@@ -21,7 +21,7 @@ app.add_middleware(
         "http://127.0.0.1:5176",
         "https://spinach-monitor-deflation.ngrok-free.app",
         "https://ad-budget-client.vercel.app",
-        https://ad-budget-client-*.vercel.app",
+        
     ],
     allow_credentials=True,
     allow_methods=["*"],
