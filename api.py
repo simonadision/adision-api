@@ -26,12 +26,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+import os
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:6268605Ss@localhost:5432/Adision")
+
 DB_CONFIG = {
-    "host": "localhost",
-    "database": "Adision",
-    "user": "postgres",
-    "password": "6268605Ss"
+    "host": DATABASE_URL.split("@")[1].split(":")[0],
+    "database": DATABASE_URL.split("/")[-1],
+    "user": DATABASE_URL.split("://")[1].split(":")[0],
+    "password": DATABASE_URL.split(":")[2].split("@")[0],
+    "port": DATABASE_URL.split(":")[-1].split("/")[0],
 }
+
+DB_URL = DATABASE_URL
 
 DB_URL = "postgresql://postgres:6268605Ss@localhost:5432/Adision"
 engine = create_engine(DB_URL)
