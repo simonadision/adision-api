@@ -5,36 +5,24 @@ import pandas as pd
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from modules.ad_budget_api import register_ad_budget_routes
+import os
 
 app = FastAPI(title="Adision API")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-        
-   
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-import os
-
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:6268605Ss@localhost:5432/Adision")
 
-DB_CONFIG = {
-    "host": DATABASE_URL.split("@")[1].split(":")[0],
-    "database": DATABASE_URL.split("/")[-1],
-    "user": DATABASE_URL.split("://")[1].split(":")[0],
-    "password": DATABASE_URL.split(":")[2].split("@")[0],
-    "port": DATABASE_URL.split(":")[-1].split("/")[0],
-}
-
-DB_URL = DATABASE_URL
-
+engine = create_engine(DATABASE_URL)
 
 def get_conn():
-    return psycopg2.connect(**DB_CONFIG)
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 
 app.include_router(register_ad_budget_routes(get_conn))
@@ -52,11 +40,9 @@ def get_items():
         FROM vue_items_complets
         ORDER BY code;
     """
-
     df = pd.read_sql_query(query, engine)
     df = df.replace({float("nan"): None})
     df = df.fillna("")
-
     return df.to_dict(orient="records")
 
 
@@ -64,7 +50,6 @@ def get_items():
 def search_items(q: str = ""):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=RealDictCursor)
-
     cur.execute("""
         SELECT id, description
         FROM items
@@ -73,12 +58,9 @@ def search_items(q: str = ""):
         ORDER BY description
         LIMIT 50;
     """, (f"%{q}%",))
-
     rows = cur.fetchall()
-
     cur.close()
     conn.close()
-
     return rows
 
 
@@ -86,7 +68,6 @@ def search_items(q: str = ""):
 def get_suggestions():
     conn = get_conn()
     cur = conn.cursor(cursor_factory=RealDictCursor)
-
     cur.execute("""
         SELECT 
             s.id,
@@ -105,12 +86,9 @@ def get_suggestions():
         WHERE s.statut = 'a_valider'
         ORDER BY s.id DESC;
     """)
-
     rows = cur.fetchall()
-
     cur.close()
     conn.close()
-
     return rows
 
 
@@ -118,18 +96,14 @@ def get_suggestions():
 def set_suggestion_item(suggestion_id: int, item_id: int):
     conn = get_conn()
     cur = conn.cursor()
-
     cur.execute("""
         UPDATE suggestions_mapping_items
         SET item_id = %s
         WHERE id = %s;
     """, (item_id, suggestion_id))
-
     conn.commit()
-
     cur.close()
     conn.close()
-
     return {"status": "updated"}
 
 
@@ -137,40 +111,30 @@ def set_suggestion_item(suggestion_id: int, item_id: int):
 def accept_suggestion(suggestion_id: int):
     conn = get_conn()
     cur = conn.cursor()
-
     cur.execute("""
         SELECT prix_web_item_id, item_id
         FROM suggestions_mapping_items
         WHERE id = %s;
     """, (suggestion_id,))
-
     row = cur.fetchone()
-
     if not row:
         cur.close()
         conn.close()
         return {"error": "Suggestion introuvable"}
-
     prix_web_item_id, item_id = row
-
     cur.execute("""
         UPDATE suggestions_mapping_items
         SET statut = 'accepte'
         WHERE id = %s;
     """, (suggestion_id,))
-
     cur.execute("""
         UPDATE prix_web_items
-        SET item_id = %s,
-            statut = 'valide'
+        SET item_id = %s, statut = 'valide'
         WHERE id = %s;
     """, (item_id, prix_web_item_id))
-
     conn.commit()
-
     cur.close()
     conn.close()
-
     return {"status": "accepted"}
 
 
@@ -178,58 +142,32 @@ def accept_suggestion(suggestion_id: int):
 def accept_and_learn(suggestion_id: int):
     conn = get_conn()
     cur = conn.cursor()
-
     cur.execute("""
-        SELECT 
-            s.prix_web_item_id,
-            s.item_id,
-            p.nom_produit
+        SELECT s.prix_web_item_id, s.item_id, p.nom_produit
         FROM suggestions_mapping_items s
         JOIN prix_web_items p ON p.id = s.prix_web_item_id
         WHERE s.id = %s;
     """, (suggestion_id,))
-
     row = cur.fetchone()
-
     if not row:
         cur.close()
         conn.close()
         return {"error": "Suggestion introuvable"}
-
     prix_web_item_id, item_id, nom_produit = row
-
     cur.execute("""
-        UPDATE suggestions_mapping_items
-        SET statut = 'accepte'
-        WHERE id = %s;
+        UPDATE suggestions_mapping_items SET statut = 'accepte' WHERE id = %s;
     """, (suggestion_id,))
-
     cur.execute("""
-        UPDATE prix_web_items
-        SET item_id = %s,
-            statut = 'valide'
-        WHERE id = %s;
+        UPDATE prix_web_items SET item_id = %s, statut = 'valide' WHERE id = %s;
     """, (item_id, prix_web_item_id))
-
     cur.execute("""
-        INSERT INTO apprentissage_mapping_items (
-            nom_produit_web,
-            item_id,
-            source
-        )
+        INSERT INTO apprentissage_mapping_items (nom_produit_web, item_id, source)
         VALUES (%s, %s, %s)
         ON CONFLICT DO NOTHING;
-    """, (
-        nom_produit,
-        item_id,
-        "validation_ui"
-    ))
-
+    """, (nom_produit, item_id, "validation_ui"))
     conn.commit()
-
     cur.close()
     conn.close()
-
     return {"status": "accepted_and_learned"}
 
 
@@ -237,16 +175,10 @@ def accept_and_learn(suggestion_id: int):
 def reject_suggestion(suggestion_id: int):
     conn = get_conn()
     cur = conn.cursor()
-
     cur.execute("""
-        UPDATE suggestions_mapping_items
-        SET statut = 'rejete'
-        WHERE id = %s;
+        UPDATE suggestions_mapping_items SET statut = 'rejete' WHERE id = %s;
     """, (suggestion_id,))
-
     conn.commit()
-
     cur.close()
     conn.close()
-
     return {"status": "rejected"}
