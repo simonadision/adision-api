@@ -157,22 +157,12 @@ def register_ad_budget_routes(get_conn):
 
     @router.post("/users")
     def create_user(data: dict):
+        EMAILS_AUTORISES = {"simon@adision.ca", "admin@adision.ca", "simon@contracta.ca", "povezina@contracta.ca", "steve@contracta.ca"}
+        email = (data.get("email") or "").strip().lower()
+        if email not in EMAILS_AUTORISES:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=403, detail="Email non autorise. Contactez l'administrateur.")
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("""
-            INSERT INTO ad_budget.users (nom, email, role)
-            VALUES (%s, %s, %s)
-            RETURNING id, nom, email, role
-        """, (
-            data["nom"],
-            data["email"],
-            data.get("role", "user")
-        ))
-        row = cur.fetchone()
-        conn.commit()
-        cur.close()
-        conn.close()
-        return {"status": "created", "user": row}
 
     @router.get("/users/{user_id}")
     def get_user(user_id: int):
