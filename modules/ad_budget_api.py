@@ -326,6 +326,19 @@ def register_ad_budget_routes(get_conn):
         conn.close()
         return {"status": "deleted"}
 
+    @router.patch("/projets/{projet_id}/notes")
+    def update_projet_notes(projet_id: int, data: dict):
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE ad_budget.projets SET notes = %s, updated_at = NOW() WHERE id = %s",
+            (data.get("notes", ""), projet_id),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"status": "updated"}
+
     # ══════════════════════════════════════════════════════════
     # BUDGET LIGNES (items du budget d'un projet)
     # ══════════════════════════════════════════════════════════
