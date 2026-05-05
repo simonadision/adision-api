@@ -155,6 +155,96 @@ def register_ad_budget_routes(get_conn):
         return {"status": "deleted", "count": deleted_count}
 
     # ══════════════════════════════════════════════════════════
+    # ADMIN — BD MAÎTRE (CRUD gardé par rôle admin)
+    # ══════════════════════════════════════════════════════════
+
+    def _require_admin(email: str):
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute(
+            "SELECT role FROM ad_budget.users WHERE LOWER(email) = LOWER(%s)",
+            (email or "",),
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if not row or row["role"] != "admin":
+            raise HTTPException(status_code=403, detail="Accès admin requis")
+
+    @router.get("/admin/items")
+    def admin_list_items(email: str = Query(...)):
+        _require_admin(email)
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT id, section, division, description, unite, prix_unitaire, note
+            FROM ad_budget.ad_budget_prix_moyens
+            ORDER BY section, description
+        """)
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return rows
+
+    @router.post("/admin/items")
+    def admin_create_item(data: dict, email: str = Query(...)):
+        _require_admin(email)
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            INSERT INTO ad_budget.ad_budget_prix_moyens
+                (section, division, description, unite, prix_unitaire, note)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id, section, division, description, unite, prix_unitaire, note
+        """, (
+            data.get("section") or "",
+            data.get("division") or None,
+            data.get("description") or "",
+            data.get("unite") or "global",
+            data.get("prix_unitaire") or 0,
+            data.get("note") or None,
+        ))
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"status": "created", "item": row}
+
+    @router.patch("/admin/items/{item_id}")
+    def admin_update_item(item_id: int, data: dict, email: str = Query(...)):
+        _require_admin(email)
+        conn = get_conn()
+        cur = conn.cursor()
+        fields = []
+        values = []
+        for field in ["section", "division", "description", "unite", "prix_unitaire", "note"]:
+            if field in data:
+                fields.append(f"{field} = %s")
+                values.append(data[field])
+        if not fields:
+            cur.close()
+            conn.close()
+            return {"error": "No fields to update"}
+        sql = f"UPDATE ad_budget.ad_budget_prix_moyens SET {', '.join(fields)} WHERE id = %s"
+        values.append(item_id)
+        cur.execute(sql, values)
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"status": "updated"}
+
+    @router.delete("/admin/items/{item_id}")
+    def admin_delete_item(item_id: int, email: str = Query(...)):
+        _require_admin(email)
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM ad_budget.ad_budget_prix_moyens WHERE id = %s", (item_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"status": "deleted"}
+
+    # ══════════════════════════════════════════════════════════
     # USERS
     # ══════════════════════════════════════════════════════════
 
