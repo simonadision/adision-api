@@ -1,8 +1,22 @@
 import io
+from collections import OrderedDict
+from datetime import date
+
 import openpyxl
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from psycopg2.extras import RealDictCursor
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import cm
+from reportlab.platypus import (
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 router = APIRouter(prefix="/budget", tags=["Ad Budget"])
 
@@ -426,6 +440,189 @@ def register_ad_budget_routes(get_conn):
         return StreamingResponse(
             buf,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @router.get("/projets/{projet_id}/pdf")
+    def export_projet_pdf(
+        projet_id: int,
+        actifs_seulement: bool = True,
+        avec_prix: bool = True,
+        sections: str = Query("", description="CSV des sections à inclure ; vide = toutes"),
+        mobilisation: float = 0,
+        surface_plancher: float = 0,
+        hauteur_cloisons: float = 0,
+        longueur_cloisons: float = 0,
+    ):
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT * FROM ad_budget.projets WHERE id = %s", (projet_id,))
+        projet = cur.fetchone()
+        if not projet:
+            cur.close()
+            conn.close()
+            raise HTTPException(status_code=404, detail="Projet not found")
+
+        where = ["projet_id = %s"]
+        params = [projet_id]
+        if actifs_seulement:
+            where.append("actif = TRUE")
+        sections_list = [s.strip() for s in sections.split(",") if s.strip()] if sections else []
+        if sections_list:
+            where.append("section = ANY(%s)")
+            params.append(sections_list)
+
+        cur.execute(
+            f"""
+            SELECT section, description, unite, qte, prix_unitaire, ajustement_pct,
+                   sous_total, total, note
+            FROM ad_budget.budget_lignes
+            WHERE {' AND '.join(where)}
+            ORDER BY section, description
+            """,
+            params,
+        )
+        lignes = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        sections_groups = OrderedDict()
+        for l in lignes:
+            sec = l["section"] or ""
+            sections_groups.setdefault(sec, []).append(l)
+
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(
+            buf, pagesize=letter,
+            rightMargin=1.5 * cm, leftMargin=1.5 * cm,
+            topMargin=1.5 * cm, bottomMargin=1.5 * cm,
+            title=f"Rapport budget — {projet['nom']}",
+        )
+        ss = getSampleStyleSheet()
+        story = []
+
+        title_style = ParagraphStyle("PdfTitle", parent=ss["Title"], fontSize=18, alignment=0, spaceAfter=4)
+        story.append(Paragraph(f"Rapport budget — {projet['nom']}", title_style))
+        meta_style = ParagraphStyle("Meta", parent=ss["Normal"], fontSize=9, textColor=colors.grey)
+        story.append(Paragraph(f"Émis le {date.today().strftime('%Y-%m-%d')}", meta_style))
+        story.append(Spacer(1, 10))
+
+        info_lines = []
+        if projet.get("client"):
+            info_lines.append(f"<b>Client :</b> {projet['client']}")
+        if projet.get("adresse"):
+            info_lines.append(f"<b>Adresse :</b> {projet['adresse']}")
+        if projet.get("statut"):
+            info_lines.append(f"<b>Statut :</b> {projet['statut']}")
+        for line in info_lines:
+            story.append(Paragraph(line, ss["Normal"]))
+        if info_lines:
+            story.append(Spacer(1, 8))
+
+        params_lines = []
+        if mobilisation:
+            params_lines.append(f"Mobilisation : {mobilisation:g} sem")
+        if surface_plancher:
+            params_lines.append(f"Surface plancher : {surface_plancher:g} pi²")
+        if hauteur_cloisons:
+            params_lines.append(f"Hauteur cloisons : {hauteur_cloisons:g}")
+        if longueur_cloisons:
+            params_lines.append(f"Longueur cloisons : {longueur_cloisons:g}")
+        if params_lines:
+            story.append(Paragraph("<b>Paramètres :</b> " + " &nbsp;|&nbsp; ".join(params_lines), ss["Normal"]))
+            story.append(Spacer(1, 8))
+
+        if projet.get("notes"):
+            story.append(Paragraph("<b>Notes du projet :</b>", ss["Normal"]))
+            notes_html = (projet["notes"] or "").replace("\n", "<br/>")
+            story.append(Paragraph(notes_html, ss["Normal"]))
+            story.append(Spacer(1, 12))
+
+        cell_style = ParagraphStyle("Cell", parent=ss["Normal"], fontSize=8, leading=10)
+
+        def cell(text):
+            return Paragraph(str(text), cell_style)
+
+        if avec_prix:
+            headers = ["Section", "Description", "Qté", "Unité", "Prix unit.", "S/T", "Adj %", "Total", "Note"]
+            col_widths = [55, 130, 28, 30, 50, 55, 30, 60, 80]
+        else:
+            headers = ["Section", "Description", "Qté", "Unité"]
+            col_widths = [80, 290, 50, 50]
+
+        table_data = [headers]
+        subtotal_rows = []
+        grand_total = 0.0
+
+        for sec, sec_lignes in sections_groups.items():
+            sec_total = 0.0
+            for l in sec_lignes:
+                qte = float(l["qte"] or 0)
+                prix = float(l["prix_unitaire"] or 0)
+                adj = float(l["ajustement_pct"] or 0)
+                st = float(l["sous_total"] or 0)
+                tot = float(l["total"] or 0)
+                sec_total += tot
+                if avec_prix:
+                    table_data.append([
+                        l["section"] or "",
+                        cell(l["description"] or ""),
+                        f"{qte:g}",
+                        l["unite"] or "",
+                        f"{prix:,.2f}",
+                        f"{st:,.2f}",
+                        f"{adj:g}",
+                        f"{tot:,.2f}",
+                        cell(l["note"] or ""),
+                    ])
+                else:
+                    table_data.append([
+                        l["section"] or "",
+                        cell(l["description"] or ""),
+                        f"{qte:g}",
+                        l["unite"] or "",
+                    ])
+            if avec_prix:
+                table_data.append(["", f"Sous-total {sec}", "", "", "", "", "", f"{sec_total:,.2f}", ""])
+                subtotal_rows.append(len(table_data) - 1)
+            grand_total += sec_total
+
+        grand_total_row = None
+        if avec_prix:
+            table_data.append(["", "GRAND TOTAL", "", "", "", "", "", f"{grand_total:,.2f}", ""])
+            grand_total_row = len(table_data) - 1
+
+        table_style_cmds = [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e3a8a")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("ALIGN", (2, 1), (-1, -1), "RIGHT"),
+            ("ALIGN", (0, 0), (1, -1), "LEFT"),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f1f5f9")]),
+        ]
+        for r in subtotal_rows:
+            table_style_cmds.append(("FONTNAME", (0, r), (-1, r), "Helvetica-Bold"))
+            table_style_cmds.append(("BACKGROUND", (0, r), (-1, r), colors.HexColor("#dbeafe")))
+        if grand_total_row is not None:
+            table_style_cmds.append(("FONTNAME", (0, grand_total_row), (-1, grand_total_row), "Helvetica-Bold"))
+            table_style_cmds.append(("BACKGROUND", (0, grand_total_row), (-1, grand_total_row), colors.HexColor("#1e3a8a")))
+            table_style_cmds.append(("TEXTCOLOR", (0, grand_total_row), (-1, grand_total_row), colors.white))
+
+        table = Table(table_data, colWidths=col_widths, repeatRows=1)
+        table.setStyle(TableStyle(table_style_cmds))
+        story.append(table)
+
+        doc.build(story)
+        buf.seek(0)
+
+        safe_nom = "".join(c if c.isalnum() or c in "-_ " else "_" for c in (projet["nom"] or "projet")).strip() or "projet"
+        filename = f"{safe_nom}.pdf"
+        return StreamingResponse(
+            buf,
+            media_type="application/pdf",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
