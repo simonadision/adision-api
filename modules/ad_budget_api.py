@@ -1,4 +1,7 @@
+import io
+import openpyxl
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from psycopg2.extras import RealDictCursor
 
 router = APIRouter(prefix="/budget", tags=["Ad Budget"])
@@ -376,6 +379,55 @@ def register_ad_budget_routes(get_conn):
         cur.close()
         conn.close()
         return {"status": "duplicated", "projet": new_projet, "nb_lignes_copiees": nb_lignes}
+
+    @router.get("/projets/{projet_id}/export")
+    def export_projet_excel(projet_id: int):
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT nom FROM ad_budget.projets WHERE id = %s", (projet_id,))
+        projet = cur.fetchone()
+        if not projet:
+            cur.close()
+            conn.close()
+            raise HTTPException(status_code=404, detail="Projet not found")
+        cur.execute("""
+            SELECT section, description, unite, qte, prix_unitaire, ajustement_pct, note
+            FROM ad_budget.budget_lignes
+            WHERE projet_id = %s
+            ORDER BY section, description
+        """, (projet_id,))
+        lignes = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Budget"
+        ws.append(["Section", "Description", "Unité", "Quantité", "Prix unitaire", "Ajustement %", "Total", "Note"])
+
+        total_general = 0.0
+        for l in lignes:
+            qte = float(l["qte"] or 0)
+            prix = float(l["prix_unitaire"] or 0)
+            adj = float(l["ajustement_pct"] or 0)
+            total = qte * prix * (1 + adj / 100)
+            total_general += total
+            ws.append([l["section"], l["description"], l["unite"], qte, prix, adj, total, l["note"] or ""])
+
+        ws.append([])
+        ws.append(["", "", "", "", "", "TOTAL", total_general, ""])
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+
+        safe_nom = "".join(c if c.isalnum() or c in "-_ " else "_" for c in (projet["nom"] or "projet")).strip() or "projet"
+        filename = f"{safe_nom}.xlsx"
+        return StreamingResponse(
+            buf,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     # ══════════════════════════════════════════════════════════
     # BUDGET LIGNES (items du budget d'un projet)
