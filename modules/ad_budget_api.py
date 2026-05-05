@@ -30,14 +30,14 @@ def register_ad_budget_routes(get_conn):
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("""
             INSERT INTO ad_budget.ad_budget_prix_moyens
-            (section, description, unite, prix_moyen_pied)
+            (section, description, unite, prix_unitaire)
             VALUES (%s, %s, %s, %s)
             RETURNING id
         """, (
             data["section"],
             data["description"],
             data["unite"],
-            data["prix_moyen_pied"]
+            data["prix_unitaire"]
         ))
         row = cur.fetchone()
         conn.commit()
@@ -94,7 +94,7 @@ def register_ad_budget_routes(get_conn):
         cur = conn.cursor()
         fields = []
         values = []
-        for field in ["section", "description", "unite", "prix_moyen_pied", "prix_moyen_m2", "division", "note"]:
+        for field in ["section", "description", "unite", "prix_unitaire", "", "division", "note"]:
             if field in data:
                 fields.append(f"{field} = %s")
                 values.append(data[field])
@@ -265,7 +265,7 @@ def register_ad_budget_routes(get_conn):
         ))
         row = cur.fetchone()
         projet_id = row["id"]
-        cur.execute("INSERT INTO ad_budget.budget_lignes (projet_id, source_item_id, section, description, unite, prix_unitaire, qte, ajustement_pct, note, actif) SELECT %s, id, section, description, COALESCE(unite, 'global'), 	COALESCE(prix_moyen_pied, 0), 0, 0, COALESCE(note, ''), TRUE FROM ad_budget.ad_budget_prix_moyens", (projet_id,))
+        cur.execute("INSERT INTO ad_budget.budget_lignes (projet_id, source_item_id, section, description, unite, prix_unitaire, qte, ajustement_pct, note, actif) SELECT %s, id, section, description, COALESCE(unite, 'global'), 	COALESCE(prix_unitaire, 0), 0, 0, COALESCE(note, ''), TRUE FROM ad_budget.ad_budget_prix_moyens", (projet_id,))
         nb_lignes = cur.rowcount
         conn.commit()
         cur.close()
@@ -355,7 +355,7 @@ def register_ad_budget_routes(get_conn):
         if source_item_id:
             # Copie depuis la base principale
             cur.execute("""
-                SELECT section, description, unite, prix_moyen_pied
+                SELECT section, description, unite, prix_unitaire
                 FROM ad_budget.ad_budget_prix_moyens
                 WHERE id = %s
             """, (source_item_id,))
@@ -365,7 +365,7 @@ def register_ad_budget_routes(get_conn):
             section = source["section"]
             description = source["description"]
             unite = source["unite"]
-            prix_unitaire = source["prix_moyen_pied"] or 0
+            prix_unitaire = source["prix_unitaire"] or 0
         else:
             # Item personnalisé
             section = data.get("section", "Divers")
@@ -412,7 +412,7 @@ def register_ad_budget_routes(get_conn):
         inserted = 0
         for item_id in item_ids:
             cur.execute("""
-                SELECT section, description, unite, prix_moyen_pied
+                SELECT section, description, unite, prix_unitaire
                 FROM ad_budget.ad_budget_prix_moyens
                 WHERE id = %s
             """, (item_id,))
@@ -429,7 +429,7 @@ def register_ad_budget_routes(get_conn):
                 source["section"],
                 source["description"],
                 source["unite"],
-                source["prix_moyen_pied"] or 0
+                source["prix_unitaire"] or 0
             ))
             inserted += 1
 
