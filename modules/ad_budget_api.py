@@ -163,6 +163,21 @@ def register_ad_budget_routes(get_conn):
             from fastapi import HTTPException
             raise HTTPException(status_code=403, detail="Email non autorise. Contactez l'administrateur.")
         conn = get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            INSERT INTO ad_budget.users (nom, email, role)
+            VALUES (%s, %s, %s)
+            RETURNING id, nom, email, role
+        """, (
+            data["nom"],
+            email,
+            data.get("role", "user")
+        ))
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+        return row
 
     @router.get("/users/{user_id}")
     def get_user(user_id: int):
