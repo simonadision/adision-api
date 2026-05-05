@@ -339,6 +339,44 @@ def register_ad_budget_routes(get_conn):
         conn.close()
         return {"status": "updated"}
 
+    @router.post("/projets/{projet_id}/duplicate")
+    def duplicate_projet(projet_id: int):
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT * FROM ad_budget.projets WHERE id = %s", (projet_id,))
+        src = cur.fetchone()
+        if not src:
+            cur.close()
+            conn.close()
+            raise HTTPException(status_code=404, detail="Projet not found")
+        cur.execute("""
+            INSERT INTO ad_budget.projets (user_id, nom, client, adresse, description, statut, notes)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """, (
+            src["user_id"],
+            f"{src['nom']} (copie)",
+            src.get("client") or "",
+            src.get("adresse") or "",
+            src.get("description") or "",
+            src.get("statut") or "en cours",
+            src.get("notes") or "",
+        ))
+        new_projet = cur.fetchone()
+        new_id = new_projet["id"]
+        cur.execute("""
+            INSERT INTO ad_budget.budget_lignes
+              (projet_id, source_item_id, section, description, unite, prix_unitaire, qte, ajustement_pct, note, actif)
+            SELECT %s, source_item_id, section, description, unite, prix_unitaire, qte, ajustement_pct, note, actif
+            FROM ad_budget.budget_lignes
+            WHERE projet_id = %s
+        """, (new_id, projet_id))
+        nb_lignes = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"status": "duplicated", "projet": new_projet, "nb_lignes_copiees": nb_lignes}
+
     # ══════════════════════════════════════════════════════════
     # BUDGET LIGNES (items du budget d'un projet)
     # ══════════════════════════════════════════════════════════
