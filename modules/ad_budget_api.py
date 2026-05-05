@@ -264,10 +264,13 @@ def register_ad_budget_routes(get_conn):
             data.get("statut", "en cours")
         ))
         row = cur.fetchone()
+        projet_id = row["id"]
+        cur.execute("INSERT INTO ad_budget.budget_lignes (projet_id, source_item_id, section, description, unite, prix_unitaire, qte, ajustement_pct, note, actif) SELECT %s, id, section, description, COALESCE(unite, 'global'), 	COALESCE(prix_moyen_pied, 0), 0, 0, COALESCE(note, ''), TRUE FROM ad_budget.ad_budget_prix_moyens", (projet_id,))
+        nb_lignes = cur.rowcount
         conn.commit()
         cur.close()
         conn.close()
-        return {"status": "created", "projet": row}
+        return {"status": "created", "projet": row, "nb_lignes_creees": nb_lignes}
 
     @router.get("/projets/{projet_id}")
     def get_projet(projet_id: int):
