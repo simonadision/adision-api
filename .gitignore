@@ -1,0 +1,43 @@
+# ─── Secrets & env ─────────────────────────────────────────────────────
+# Tout fichier .env sauf .env.example qui sert de doc.
+.env
+.env.*
+!.env.example
+
+# Notes locales contenant des clés API en clair (jamais commiter).
+# Pattern large pour attraper les futurs fichiers secrets ad-hoc.
+*api-key*.txt
+*api_key*.txt
+*-key.txt
+*_KEY.txt
+*secret*.txt
+*SECRET*.txt
+# Fichiers connus (au cas où le pattern ci-dessus rate).
+Clé Claude API.txt
+JWT_SECRET Adision.txt
+scraper/serpapi-key.txt
+
+# ─── Python ────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ─── Virtual envs (le repo en contient deux par accident) ─────────────
+.venv/
+venv/
+env/
+# Layouts venv Windows à la racine du repo et dans scraper/
+Lib/
+Include/
+Scripts/
+pyvenv.cfg
+scraper/Lib/
+scraper/Include/
+scraper/Scripts/
+scraper/pyvenv.cfg
+
+# ─── OS / éditeurs ─────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
