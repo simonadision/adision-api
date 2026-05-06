@@ -475,12 +475,19 @@ def register_ad_budget_routes(get_conn):
         """Crée un projet (mode=new) ou ajoute des lignes à un projet existant
         (mode=existing) à partir des sections CSI détectées par Ad VIU.
 
-        Idempotent sur le tuple (projet_id, section, description, source_file) :
-        re-pousser le même fichier au même projet ne duplique rien.
+        Mapping selon type_source :
+        - type_source='soumission' : qte=1, unite='global', prix_unitaire=
+          montant_total → la ligne reflète directement le montant détecté de
+          la soumission, le total Ad BUD se met à jour immédiatement.
+        - type_source='plan' / 'devis' (ou absent) : qte=0, unite='global',
+          prix_unitaire=0 → squelette CSI à compléter par l'user dans Ad BUD.
 
-        Les quantités (qte) et l'unité ne sont pas extraites par Ad VIU pour
-        l'instant ; on insère qte=0 / unite='global' comme placeholder, à
-        compléter par l'utilisateur côté Ad BUD.
+        Idempotent sur (projet_id, section, description, source_file,
+        type_source) — vérif explicite avant INSERT (pas d'INDEX UNIQUE pour
+        laisser à l'user la liberté d'ajouter des doublons manuels). Si la
+        ligne existe déjà, on SKIP — on ne met PAS à jour, ce qui préserve
+        les modifs manuelles que l'user aurait faites dans Ad BUD entre les
+        deux pushes.
         """
         mode = (data.get("mode") or "").strip()
         if mode not in ("new", "existing"):
@@ -556,8 +563,24 @@ def register_ad_budget_routes(get_conn):
                 description = (s.get("description") or s.get("nom") or "").strip()
                 if not section:
                     continue
-                # Idempotence — vérif explicite (pas d'INDEX UNIQUE pour laisser
-                # à l'user la liberté d'ajouter des doublons manuels dans Ad BUD).
+
+                type_source = (s.get("type_source") or "").strip() or None
+
+                # Mapping selon type_source.
+                if type_source == "soumission":
+                    try:
+                        montant = float(s.get("montant_total") or 0)
+                    except (TypeError, ValueError):
+                        montant = 0.0
+                    qte = 1
+                    prix_unitaire = round(montant, 2)
+                else:
+                    qte = 0
+                    prix_unitaire = 0
+
+                # Idempotence sur (projet_id, section, description, source_file,
+                # type_source). Vérif explicite — si la ligne existe, on SKIP
+                # (pas d'UPDATE) pour préserver d'éventuelles modifs manuelles.
                 cur.execute(
                     """
                     SELECT id FROM ad_budget.budget_lignes
@@ -565,9 +588,10 @@ def register_ad_budget_routes(get_conn):
                       AND section = %s
                       AND COALESCE(description, '') = %s
                       AND COALESCE(source_file, '') = COALESCE(%s, '')
+                      AND COALESCE(type_source, '') = COALESCE(%s, '')
                     LIMIT 1
                     """,
-                    (project_id, section, description, source_file),
+                    (project_id, section, description, source_file, type_source),
                 )
                 if cur.fetchone():
                     continue
@@ -575,10 +599,14 @@ def register_ad_budget_routes(get_conn):
                     """
                     INSERT INTO ad_budget.budget_lignes
                       (projet_id, section, description, unite, prix_unitaire,
-                       qte, ajustement_pct, note, actif, source_file)
-                    VALUES (%s, %s, %s, 'global', 0, 0, 0, %s, TRUE, %s)
+                       qte, ajustement_pct, note, actif, source_file, type_source)
+                    VALUES (%s, %s, %s, 'global', %s, %s, 0, %s, TRUE, %s, %s)
                     """,
-                    (project_id, section, description, note_text, source_file),
+                    (
+                        project_id, section, description,
+                        prix_unitaire, qte, note_text,
+                        source_file, type_source,
+                    ),
                 )
                 lines_added += 1
                 sections_touched.add(section)

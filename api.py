@@ -27,16 +27,26 @@ def _ensure_schema():
     try:
         conn = get_conn()
         cur = conn.cursor()
-        # ÉTAPE 7 : import depuis Ad VIU. source_file pour la traçabilité +
-        # idempotence du push.
+        # Import depuis Ad VIU : source_file = traçabilité + idempotence du push.
         cur.execute(
             "ALTER TABLE ad_budget.budget_lignes "
             "ADD COLUMN IF NOT EXISTS source_file TEXT"
         )
+        # type_source ('soumission' | 'plan' | 'devis') : permet de distinguer
+        # un re-push d'un même code_csi venant d'un autre type d'analyse, et
+        # sert de clé d'idempotence supplémentaire.
+        cur.execute(
+            "ALTER TABLE ad_budget.budget_lignes "
+            "ADD COLUMN IF NOT EXISTS type_source TEXT"
+        )
         conn.commit()
         cur.close()
         conn.close()
-        print("[startup] schema ad_budget OK (source_file column ensured)", flush=True)
+        print(
+            "[startup] schema ad_budget OK "
+            "(source_file + type_source columns ensured)",
+            flush=True,
+        )
     except Exception as e:
         print(f"[startup] schema migration failed: {e}", flush=True)
 
