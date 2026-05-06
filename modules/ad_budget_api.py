@@ -7,9 +7,11 @@ from datetime import date
 from typing import Optional
 
 import openpyxl
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from psycopg2.extras import RealDictCursor
+
+from modules.auth_jwt import make_jwt_deps
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import landscape, letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -104,10 +106,17 @@ def build_pdf_logo(logo_base64: str, max_width: float = 180):
     except Exception:
         return ""
 
-router = APIRouter(prefix="/budget", tags=["Ad Budget"])
-
-
 def register_ad_budget_routes(get_conn):
+
+    jwt_user, jwt_user_or_token, jwt_admin = make_jwt_deps(get_conn)
+
+    # Toutes les routes /budget/* exigent un JWT valide avec module ad_bud.
+    # Les routes admin imposent en plus role="admin" (Depends(jwt_admin)).
+    router = APIRouter(
+        prefix="/budget",
+        tags=["Ad Budget"],
+        dependencies=[Depends(jwt_user)],
+    )
 
     # ══════════════════════════════════════════════════════════
     # BASE DE DONNÉES PRINCIPALE (admin seulement)
@@ -241,25 +250,11 @@ def register_ad_budget_routes(get_conn):
         return {"status": "deleted", "count": deleted_count}
 
     # ══════════════════════════════════════════════════════════
-    # ADMIN — BD MAÎTRE (CRUD gardé par rôle admin)
+    # ADMIN — BD MAÎTRE (CRUD gardé par rôle admin via JWT)
     # ══════════════════════════════════════════════════════════
 
-    def _require_admin(email: str):
-        conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute(
-            "SELECT role FROM ad_budget.users WHERE LOWER(email) = LOWER(%s)",
-            (email or "",),
-        )
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-        if not row or row["role"] != "admin":
-            raise HTTPException(status_code=403, detail="Accès admin requis")
-
     @router.get("/admin/items")
-    def admin_list_items(email: str = Query(...)):
-        _require_admin(email)
+    def admin_list_items(_admin=Depends(jwt_admin)):
         conn = get_conn()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("""
@@ -273,8 +268,7 @@ def register_ad_budget_routes(get_conn):
         return rows
 
     @router.post("/admin/items")
-    def admin_create_item(data: dict, email: str = Query(...)):
-        _require_admin(email)
+    def admin_create_item(data: dict, _admin=Depends(jwt_admin)):
         conn = get_conn()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("""
@@ -297,8 +291,7 @@ def register_ad_budget_routes(get_conn):
         return {"status": "created", "item": row}
 
     @router.patch("/admin/items/{item_id}")
-    def admin_update_item(item_id: int, data: dict, email: str = Query(...)):
-        _require_admin(email)
+    def admin_update_item(item_id: int, data: dict, _admin=Depends(jwt_admin)):
         conn = get_conn()
         cur = conn.cursor()
         fields = []
@@ -320,8 +313,7 @@ def register_ad_budget_routes(get_conn):
         return {"status": "updated"}
 
     @router.delete("/admin/items/{item_id}")
-    def admin_delete_item(item_id: int, email: str = Query(...)):
-        _require_admin(email)
+    def admin_delete_item(item_id: int, _admin=Depends(jwt_admin)):
         conn = get_conn()
         cur = conn.cursor()
         cur.execute("DELETE FROM ad_budget.ad_budget_prix_moyens WHERE id = %s", (item_id,))
@@ -334,8 +326,14 @@ def register_ad_budget_routes(get_conn):
     # USERS
     # ══════════════════════════════════════════════════════════
 
+    # Note : depuis le passage au SSO, les users sont auto-provisionnés au
+    # premier login via le JWT (cf. modules/auth_jwt.py::_provision_user).
+    # Ces endpoints restent dispo pour l'admin (ex. lister les users d'Ad BUD).
+    # POST /users n'est plus utilisé pour le login — la whitelist est gérée
+    # côté dashboard adision-app-api.
+
     @router.get("/users")
-    def get_users():
+    def get_users(_admin=Depends(jwt_admin)):
         conn = get_conn()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("""
@@ -349,12 +347,10 @@ def register_ad_budget_routes(get_conn):
         return rows
 
     @router.post("/users")
-    def create_user(data: dict):
-        EMAILS_AUTORISES = {"simon@adision.ca", "admin@adision.ca", "simon@contracta.ca", "povezina@contracta.ca", "steve@contracta.ca"}
+    def create_user(data: dict, _admin=Depends(jwt_admin)):
         email = (data.get("email") or "").strip().lower()
-        if email not in EMAILS_AUTORISES:
-            from fastapi import HTTPException
-            raise HTTPException(status_code=403, detail="Email non autorise. Contactez l'administrateur.")
+        if not email:
+            raise HTTPException(status_code=400, detail="Email requis")
         conn = get_conn()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("""
@@ -362,7 +358,7 @@ def register_ad_budget_routes(get_conn):
             VALUES (%s, %s, %s)
             RETURNING id, nom, email, role
         """, (
-            data["nom"],
+            data.get("nom") or email.split("@", 1)[0],
             email,
             data.get("role", "user")
         ))
@@ -373,7 +369,7 @@ def register_ad_budget_routes(get_conn):
         return row
 
     @router.get("/users/{user_id}")
-    def get_user(user_id: int):
+    def get_user(user_id: int, _admin=Depends(jwt_admin)):
         conn = get_conn()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("""
@@ -388,7 +384,7 @@ def register_ad_budget_routes(get_conn):
         return row
 
     @router.put("/users/{user_id}")
-    def update_user(user_id: int, data: dict):
+    def update_user(user_id: int, data: dict, _admin=Depends(jwt_admin)):
         conn = get_conn()
         cur = conn.cursor()
         fields = []
@@ -408,7 +404,7 @@ def register_ad_budget_routes(get_conn):
         return {"status": "updated"}
 
     @router.delete("/users/{user_id}")
-    def delete_user(user_id: int):
+    def delete_user(user_id: int, _admin=Depends(jwt_admin)):
         conn = get_conn()
         cur = conn.cursor()
         cur.execute("DELETE FROM ad_budget.users WHERE id = %s", (user_id,))
@@ -422,31 +418,28 @@ def register_ad_budget_routes(get_conn):
     # ══════════════════════════════════════════════════════════
 
     @router.get("/projets")
-    def get_projets(user_id: int = None):
+    def get_projets(user=Depends(jwt_user)):
+        # Toujours filtrer sur le user du JWT — l'éventuel ?user_id= en query
+        # est ignoré (un user ne voit que ses propres projets).
         conn = get_conn()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        if user_id:
-            cur.execute("""
-                SELECT p.*, u.nom as user_nom
-                FROM ad_budget.projets p
-                JOIN ad_budget.users u ON u.id = p.user_id
-                WHERE p.user_id = %s
-                ORDER BY p.updated_at DESC;
-            """, (user_id,))
-        else:
-            cur.execute("""
-                SELECT p.*, u.nom as user_nom
-                FROM ad_budget.projets p
-                JOIN ad_budget.users u ON u.id = p.user_id
-                ORDER BY p.updated_at DESC;
-            """)
+        cur.execute("""
+            SELECT p.*, u.nom as user_nom
+            FROM ad_budget.projets p
+            JOIN ad_budget.users u ON u.id = p.user_id
+            WHERE p.user_id = %s
+            ORDER BY p.updated_at DESC;
+        """, (user["id"],))
         rows = cur.fetchall()
         cur.close()
         conn.close()
         return rows
 
     @router.post("/projets")
-    def create_projet(data: dict):
+    def create_projet(data: dict, user=Depends(jwt_user)):
+        # On force user_id depuis le JWT, pas depuis le body — un user ne
+        # peut pas créer un projet pour quelqu'un d'autre.
+        data["user_id"] = user["id"]
         conn = get_conn()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 

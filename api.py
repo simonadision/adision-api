@@ -1,10 +1,11 @@
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine
 import pandas as pd
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from modules.ad_budget_api import register_ad_budget_routes
+from modules.auth_jwt import make_jwt_deps
 import os
 
 app = FastAPI(title="Adision API")
@@ -27,10 +28,27 @@ def get_conn():
 
 app.include_router(register_ad_budget_routes(get_conn))
 
+# JWT auth deps (vérifie signature + module ad_bud, auto-provisionne dans
+# ad_budget.users).
+jwt_user, _jwt_user_or_token, _jwt_admin = make_jwt_deps(get_conn)
+# _jwt_user_or_token est un alias de jwt_user (header OU ?token=) ; conservé
+# dans le tuple pour compat avec d'éventuels imports externes.
+
 
 @app.get("/")
 def home():
     return {"message": "API Adision connectée"}
+
+
+@app.get("/auth/me")
+def auth_me(user=Depends(jwt_user)):
+    """Renvoie le user local ad_budget.users courant (auto-provisionné si
+    premier login SSO) + la liste des modules venant du JWT.
+
+    Utilisé par le frontend Ad BUD au load de l'app pour valider le JWT et
+    récupérer les infos d'affichage (nom, email, role).
+    """
+    return user
 
 
 @app.get("/items")
