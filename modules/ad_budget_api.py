@@ -1,4 +1,6 @@
+import base64
 import io
+import os
 from collections import OrderedDict
 from datetime import date
 
@@ -10,13 +12,46 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
+from reportlab.lib.utils import ImageReader
 from reportlab.platypus import (
+    Image,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
     Table,
     TableStyle,
 )
+
+DEFAULT_LOGO_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "assets", "adision_logo_default.png"
+)
+
+
+def build_pdf_logo(logo_base64: str, max_width: float = 110):
+    """Return a reportlab Image flowable for the projet logo, or default if empty.
+    Falls back to empty string if no source is usable.
+    """
+    source = None
+    try:
+        if logo_base64:
+            data = logo_base64
+            if "," in data:
+                data = data.split(",", 1)[1]
+            source = io.BytesIO(base64.b64decode(data))
+        elif os.path.exists(DEFAULT_LOGO_PATH):
+            source = DEFAULT_LOGO_PATH
+        if source is None:
+            return ""
+        ir = ImageReader(source if isinstance(source, str) else io.BytesIO(source.getvalue()))
+        iw, ih = ir.getSize()
+        h = max_width * ih / iw if iw else max_width
+        # For BytesIO, pass a fresh copy to Image() since ImageReader consumed it
+        img_src = source if isinstance(source, str) else io.BytesIO(
+            base64.b64decode(logo_base64.split(",", 1)[1] if "," in logo_base64 else logo_base64)
+        )
+        return Image(img_src, width=max_width, height=h)
+    except Exception:
+        return ""
 
 router = APIRouter(prefix="/budget", tags=["Ad Budget"])
 
@@ -372,11 +407,13 @@ def register_ad_budget_routes(get_conn):
               (user_id, nom, client, adresse, description, statut,
                nom_client, contact_client, email_client, telephone_client,
                numero_projet, date_debut, date_fin,
-               contact_entrepreneur, email_entrepreneur, telephone_entrepreneur)
+               contact_entrepreneur, email_entrepreneur, telephone_entrepreneur,
+               logo_base64)
             VALUES (%s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s,
                     %s, %s, %s,
-                    %s, %s, %s)
+                    %s, %s, %s,
+                    %s)
             RETURNING *
         """, (
             data["user_id"],
@@ -395,6 +432,7 @@ def register_ad_budget_routes(get_conn):
             data.get("contact_entrepreneur", ""),
             data.get("email_entrepreneur", ""),
             data.get("telephone_entrepreneur", ""),
+            data.get("logo_base64", ""),
         ))
         row = cur.fetchone()
         projet_id = row["id"]
@@ -433,6 +471,7 @@ def register_ad_budget_routes(get_conn):
             "nom_client", "contact_client", "email_client", "telephone_client",
             "numero_projet", "date_debut", "date_fin",
             "contact_entrepreneur", "email_entrepreneur", "telephone_entrepreneur",
+            "logo_base64",
         ]:
             if field in data:
                 fields.append(f"{field} = %s")
@@ -491,11 +530,13 @@ def register_ad_budget_routes(get_conn):
               (user_id, nom, client, adresse, description, statut, notes,
                nom_client, contact_client, email_client, telephone_client,
                numero_projet, date_debut, date_fin,
-               contact_entrepreneur, email_entrepreneur, telephone_entrepreneur)
+               contact_entrepreneur, email_entrepreneur, telephone_entrepreneur,
+               logo_base64)
             SELECT user_id, %s, client, adresse, description, statut, notes,
                    nom_client, contact_client, email_client, telephone_client,
                    numero_projet, date_debut, date_fin,
-                   contact_entrepreneur, email_entrepreneur, telephone_entrepreneur
+                   contact_entrepreneur, email_entrepreneur, telephone_entrepreneur,
+                   logo_base64
             FROM ad_budget.projets
             WHERE id = %s
             RETURNING *
@@ -626,9 +667,24 @@ def register_ad_budget_routes(get_conn):
 
         title_style = ParagraphStyle(
             "PdfTitle", parent=ss["Title"], fontSize=20, alignment=1,
-            spaceAfter=14, textColor=colors.HexColor("#1e3a8a"),
+            spaceAfter=0, textColor=colors.HexColor("#1e3a8a"),
         )
-        story.append(Paragraph("RAPPORT DE BUDGET", title_style))
+        title_para = Paragraph("RAPPORT DE BUDGET", title_style)
+        logo_flowable = build_pdf_logo(projet.get("logo_base64") or "")
+        title_row = Table(
+            [["", title_para, logo_flowable]],
+            colWidths=[120, 286, 120],
+        )
+        title_row.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("ALIGN", (2, 0), (2, 0), "RIGHT"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        story.append(title_row)
+        story.append(Spacer(1, 14))
 
         info_style = ParagraphStyle("Info", parent=ss["Normal"], fontSize=9, leading=13)
 
