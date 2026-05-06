@@ -34,6 +34,29 @@ BUDGET_GROUPS_PDF = [
     ("excavation", "Excavation", "pct_admin_excavation", lambda n: n == 31),
 ]
 
+# Termes de description qui déclenchent l'utilisation des surfaces globales
+# (mêmes que côté frontend, voir App.jsx)
+SURFACE_PLANCHER_TERMS = ["nettoyage", "revêtement de sol", "revetement de sol"]
+SURFACE_MUR_TERMS = ["cloisons système intérieur", "cloisons systeme interieur"]
+SURFACE_GYPSE_TERMS = ["plâtrage", "platrage", "peinture", "papier peint"]
+
+
+def _effective_qte(ligne, mobilisation, surface_plancher, surface_mur, surface_gypse):
+    """Qté effective d'une ligne en tenant compte des paramètres globaux du projet,
+    miroir de getQte côté frontend (App.jsx). Permet d'avoir des totaux PDF qui
+    matchent l'affichage de la page projet quand qte n'est pas persisté en DB."""
+    desc = (ligne.get("description") or "").lower()
+    unite = (ligne.get("unite") or "global").lower()
+    if any(t in desc for t in SURFACE_PLANCHER_TERMS):
+        return float(surface_plancher or 0)
+    if any(t in desc for t in SURFACE_MUR_TERMS):
+        return float(surface_mur or 0)
+    if any(t in desc for t in SURFACE_GYPSE_TERMS):
+        return float(surface_gypse or 0)
+    if unite == "sem":
+        return float(mobilisation or 0)
+    return float(ligne.get("qte") or 0)
+
 
 def _section_prefix_n(s: str):
     s = (s or "").strip()
@@ -876,6 +899,10 @@ def register_ad_budget_routes(get_conn):
             row[total_idx] = f"{value:,.2f}"
             return row
 
+        # Surfaces dérivées (mêmes formules que côté frontend)
+        surface_mur_calc = (hauteur_cloisons or 0) * (longueur_cloisons or 0)
+        surface_gypse_calc = surface_mur_calc * 2
+
         table_data = [headers]
         subtotal_rows = []
         group_subtotals = {key: 0.0 for key, _, _, _ in BUDGET_GROUPS_PDF}
@@ -883,12 +910,17 @@ def register_ad_budget_routes(get_conn):
 
         for sec, sec_lignes in sections_groups.items():
             sec_total = 0.0
+            section_has_visible_lines = False
+            section_start_idx = len(table_data)
             for l in sec_lignes:
-                qte = float(l["qte"] or 0)
+                qte = _effective_qte(l, mobilisation, surface_plancher,
+                                     surface_mur_calc, surface_gypse_calc)
+                if qte <= 0:
+                    continue  # cohérent avec la page projet qui filtre qte > 0
                 prix = float(l["prix_unitaire"] or 0)
                 adj = float(l["ajustement_pct"] or 0)
-                st = float(l["sous_total"] or 0)
-                tot = float(l["total"] or 0)
+                st = qte * prix
+                tot = st * (1 + adj / 100)
                 sec_total += tot
                 gkey = _group_key_for(_section_prefix_n(l["section"]))
                 if gkey is not None:
@@ -896,7 +928,8 @@ def register_ad_budget_routes(get_conn):
                 else:
                     non_grouped_total += tot
                 table_data.append([cell_for(c, l, qte, prix, adj, st, tot) for c in selected])
-            if show_totals_row:
+                section_has_visible_lines = True
+            if show_totals_row and section_has_visible_lines:
                 table_data.append(make_summary_row(f"Sous-total {sec}", sec_total))
                 subtotal_rows.append(len(table_data) - 1)
 
