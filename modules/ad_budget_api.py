@@ -402,18 +402,24 @@ def register_ad_budget_routes(get_conn):
         def _date(v):
             return None if v in (None, "") else v
 
+        def _pct(v):
+            return 0 if v in (None, "") else v
+
         cur.execute("""
             INSERT INTO ad_budget.projets
               (user_id, nom, client, adresse, description, statut,
                nom_client, contact_client, email_client, telephone_client,
                numero_projet, date_debut, date_fin,
                contact_entrepreneur, email_entrepreneur, telephone_entrepreneur,
-               logo_base64)
+               logo_base64,
+               pct_admin_conditions, pct_admin_architecture,
+               pct_admin_mecanique, pct_admin_excavation)
             VALUES (%s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s,
                     %s, %s, %s,
                     %s, %s, %s,
-                    %s)
+                    %s,
+                    %s, %s, %s, %s)
             RETURNING *
         """, (
             data["user_id"],
@@ -433,6 +439,10 @@ def register_ad_budget_routes(get_conn):
             data.get("email_entrepreneur", ""),
             data.get("telephone_entrepreneur", ""),
             data.get("logo_base64", ""),
+            _pct(data.get("pct_admin_conditions")),
+            _pct(data.get("pct_admin_architecture")),
+            _pct(data.get("pct_admin_mecanique")),
+            _pct(data.get("pct_admin_excavation")),
         ))
         row = cur.fetchone()
         projet_id = row["id"]
@@ -466,19 +476,27 @@ def register_ad_budget_routes(get_conn):
         cur = conn.cursor()
         fields = []
         values = []
+        PCT_FIELDS = {
+            "pct_admin_conditions", "pct_admin_architecture",
+            "pct_admin_mecanique", "pct_admin_excavation",
+        }
         for field in [
             "nom", "client", "adresse", "description", "statut",
             "nom_client", "contact_client", "email_client", "telephone_client",
             "numero_projet", "date_debut", "date_fin",
             "contact_entrepreneur", "email_entrepreneur", "telephone_entrepreneur",
             "logo_base64",
+            "pct_admin_conditions", "pct_admin_architecture",
+            "pct_admin_mecanique", "pct_admin_excavation",
         ]:
             if field in data:
                 fields.append(f"{field} = %s")
-                # Normalize empty date strings to NULL since DATE columns reject ""
                 v = data[field]
+                # Normalize empty values for typed columns
                 if field in ("date_debut", "date_fin") and v == "":
                     v = None
+                elif field in PCT_FIELDS and (v == "" or v is None):
+                    v = 0
                 values.append(v)
         fields.append("updated_at = NOW()")
         if not fields:
@@ -531,12 +549,16 @@ def register_ad_budget_routes(get_conn):
                nom_client, contact_client, email_client, telephone_client,
                numero_projet, date_debut, date_fin,
                contact_entrepreneur, email_entrepreneur, telephone_entrepreneur,
-               logo_base64)
+               logo_base64,
+               pct_admin_conditions, pct_admin_architecture,
+               pct_admin_mecanique, pct_admin_excavation)
             SELECT user_id, %s, client, adresse, description, statut, notes,
                    nom_client, contact_client, email_client, telephone_client,
                    numero_projet, date_debut, date_fin,
                    contact_entrepreneur, email_entrepreneur, telephone_entrepreneur,
-                   logo_base64
+                   logo_base64,
+                   pct_admin_conditions, pct_admin_architecture,
+                   pct_admin_mecanique, pct_admin_excavation
             FROM ad_budget.projets
             WHERE id = %s
             RETURNING *
