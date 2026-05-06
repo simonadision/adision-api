@@ -363,9 +363,20 @@ def register_ad_budget_routes(get_conn):
     def create_projet(data: dict):
         conn = get_conn()
         cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        def _date(v):
+            return None if v in (None, "") else v
+
         cur.execute("""
-            INSERT INTO ad_budget.projets (user_id, nom, client, adresse, description, statut)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO ad_budget.projets
+              (user_id, nom, client, adresse, description, statut,
+               nom_client, contact_client, email_client, telephone_client,
+               numero_projet, date_debut, date_fin,
+               contact_entrepreneur, email_entrepreneur, telephone_entrepreneur)
+            VALUES (%s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s)
             RETURNING *
         """, (
             data["user_id"],
@@ -373,7 +384,17 @@ def register_ad_budget_routes(get_conn):
             data.get("client", ""),
             data.get("adresse", ""),
             data.get("description", ""),
-            data.get("statut", "en cours")
+            data.get("statut", "en cours"),
+            data.get("nom_client", ""),
+            data.get("contact_client", ""),
+            data.get("email_client", ""),
+            data.get("telephone_client", ""),
+            data.get("numero_projet", ""),
+            _date(data.get("date_debut")),
+            _date(data.get("date_fin")),
+            data.get("contact_entrepreneur", ""),
+            data.get("email_entrepreneur", ""),
+            data.get("telephone_entrepreneur", ""),
         ))
         row = cur.fetchone()
         projet_id = row["id"]
