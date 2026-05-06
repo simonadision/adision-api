@@ -672,12 +672,12 @@ def register_ad_budget_routes(get_conn):
         title_para = Paragraph("RAPPORT DE BUDGET", title_style)
         logo_flowable = build_pdf_logo(projet.get("logo_base64") or "")
         title_row = Table(
-            [["", title_para, logo_flowable]],
+            [[logo_flowable, title_para, ""]],
             colWidths=[120, 286, 120],
         )
         title_row.setStyle(TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("ALIGN", (2, 0), (2, 0), "RIGHT"),
+            ("ALIGN", (0, 0), (0, 0), "LEFT"),
             ("LEFTPADDING", (0, 0), (-1, -1), 0),
             ("RIGHTPADDING", (0, 0), (-1, -1), 0),
             ("TOPPADDING", (0, 0), (-1, -1), 0),
