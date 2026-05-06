@@ -41,6 +41,10 @@ SURFACE_PLANCHER_TERMS = ["nettoyage", "revêtement de sol", "revetement de sol"
 SURFACE_MUR_TERMS = ["cloisons système intérieur", "cloisons systeme interieur"]
 SURFACE_GYPSE_TERMS = ["plâtrage", "platrage", "peinture", "papier peint"]
 
+# Taxes Québec — taux fixes hardcodés
+TPS_RATE = 0.05
+TVQ_RATE = 0.09975
+
 
 def _effective_qte(ligne, mobilisation, surface_plancher, surface_mur, surface_gypse):
     """Qté effective d'une ligne en tenant compte des paramètres globaux du projet,
@@ -684,6 +688,9 @@ def register_ad_budget_routes(get_conn):
         colonnes: str = Query("", description="CSV des colonnes à inclure ; vide = toutes"),
         sous_totaux: Optional[str] = Query(None, description="CSV des regroupements à afficher en sous-total ; param omis = tous, vide explicite = aucun"),
         admin_profits: Optional[str] = Query(None, description="CSV des regroupements pour admin&profit ; param omis = tous, vide explicite = aucun"),
+        avec_sous_total_avant_taxes: bool = True,
+        avec_tps: bool = True,
+        avec_tvq: bool = True,
         mobilisation: float = 0,
         surface_plancher: float = 0,
         hauteur_cloisons: float = 0,
@@ -979,13 +986,24 @@ def register_ad_budget_routes(get_conn):
         table.setStyle(TableStyle(table_style_cmds))
         story.append(table)
 
-        # ── Totals block (per-regroupement subtotals + admin&profit + grand total) ──
+        # ── Totals block (per-regroupement subtotals + admin&profit + taxes + grand total) ──
         if avec_prix:
             totals_rows = []
             totals_kinds = []
-            total_general = non_grouped_total
+
+            # 1. Sous-total avant taxes RÉEL : toutes les valeurs réelles, indépendant
+            #    des cases selected_st / selected_ap (qui n'agissent que sur l'affichage).
+            real_sub_avant_taxes = non_grouped_total
+            for key, _, pct_field, _ in BUDGET_GROUPS_PDF:
+                sub = group_subtotals[key]
+                if sub <= 0:
+                    continue
+                pct_d = float(projet.get(pct_field) or 0)
+                real_sub_avant_taxes += sub + sub * pct_d / 100
+
+            # 2. Affichage des lignes par regroupement (filtré par selected_st / selected_ap)
             for key, label, pct_field, _ in BUDGET_GROUPS_PDF:
-                sub = group_subtotals[key]  # valeur réelle (sans facteur)
+                sub = group_subtotals[key]
                 if sub <= 0:
                     continue
                 if key not in selected_st:
@@ -996,16 +1014,34 @@ def register_ad_budget_routes(get_conn):
                     # Mode classique : sous-total et admin & profit affichés séparément
                     totals_rows.append([f"Sous-total {label}", f"{sub:,.2f} $"])
                     totals_kinds.append("subtotal")
-                    total_general += sub
                     totals_rows.append([f"Administration et profit {pct:g}%", f"{ap:,.2f} $"])
                     totals_kinds.append("admin")
-                    total_general += ap
                 else:
                     # Mode distribution : sous-total gonflé (= sub + ap), pas de ligne admin
-                    sub_displayed = sub + ap
-                    totals_rows.append([f"Sous-total {label}", f"{sub_displayed:,.2f} $"])
+                    totals_rows.append([f"Sous-total {label}", f"{(sub + ap):,.2f} $"])
                     totals_kinds.append("subtotal")
-                    total_general += sub_displayed
+
+            # 3. Sous-total avant taxes (visuel uniquement)
+            if avec_sous_total_avant_taxes:
+                totals_rows.append(["Sous-total avant taxes", f"{real_sub_avant_taxes:,.2f} $"])
+                totals_kinds.append("subtotal_taxes")
+
+            # 4. TPS / TVQ — affectent réellement le TOTAL GÉNÉRAL
+            tps_amount = real_sub_avant_taxes * TPS_RATE
+            tvq_amount = real_sub_avant_taxes * TVQ_RATE
+            if avec_tps:
+                totals_rows.append([f"TPS {TPS_RATE * 100:g}%", f"{tps_amount:,.2f} $"])
+                totals_kinds.append("tax")
+            if avec_tvq:
+                totals_rows.append([f"TVQ {TVQ_RATE * 100:g}%", f"{tvq_amount:,.2f} $"])
+                totals_kinds.append("tax")
+
+            # 5. TOTAL GÉNÉRAL = sous-total avant taxes + TPS (si coché) + TVQ (si coché)
+            total_general = real_sub_avant_taxes
+            if avec_tps:
+                total_general += tps_amount
+            if avec_tvq:
+                total_general += tvq_amount
             totals_rows.append(["TOTAL GÉNÉRAL", f"{total_general:,.2f} $"])
             totals_kinds.append("grand")
 
@@ -1024,6 +1060,15 @@ def register_ad_budget_routes(get_conn):
                     totals_style.append(("LINEABOVE", (0, i), (-1, i), 0.4, colors.HexColor("#cbd5e1")))
                     totals_style.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#f1f5f9")))
                 elif kind == "admin":
+                    totals_style.append(("LEFTPADDING", (0, i), (0, i), 32))
+                    totals_style.append(("FONTSIZE", (0, i), (-1, i), 9))
+                    totals_style.append(("TEXTCOLOR", (0, i), (-1, i), colors.HexColor("#475569")))
+                elif kind == "subtotal_taxes":
+                    totals_style.append(("FONTNAME", (0, i), (-1, i), "Helvetica-Bold"))
+                    totals_style.append(("LINEABOVE", (0, i), (-1, i), 1, colors.HexColor("#1e3a8a")))
+                    totals_style.append(("TOPPADDING", (0, i), (-1, i), 8))
+                    totals_style.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#eef4ff")))
+                elif kind == "tax":
                     totals_style.append(("LEFTPADDING", (0, i), (0, i), 32))
                     totals_style.append(("FONTSIZE", (0, i), (-1, i), 9))
                     totals_style.append(("TEXTCOLOR", (0, i), (-1, i), colors.HexColor("#475569")))
