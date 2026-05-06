@@ -407,10 +407,19 @@ def register_ad_budget_routes(get_conn):
         cur = conn.cursor()
         fields = []
         values = []
-        for field in ["nom", "client", "adresse", "description", "statut"]:
+        for field in [
+            "nom", "client", "adresse", "description", "statut",
+            "nom_client", "contact_client", "email_client", "telephone_client",
+            "numero_projet", "date_debut", "date_fin",
+            "contact_entrepreneur", "email_entrepreneur", "telephone_entrepreneur",
+        ]:
             if field in data:
                 fields.append(f"{field} = %s")
-                values.append(data[field])
+                # Normalize empty date strings to NULL since DATE columns reject ""
+                v = data[field]
+                if field in ("date_debut", "date_fin") and v == "":
+                    v = None
+                values.append(v)
         fields.append("updated_at = NOW()")
         if not fields:
             return {"error": "No fields to update"}
@@ -450,25 +459,26 @@ def register_ad_budget_routes(get_conn):
     def duplicate_projet(projet_id: int):
         conn = get_conn()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("SELECT * FROM ad_budget.projets WHERE id = %s", (projet_id,))
+        cur.execute("SELECT id, nom FROM ad_budget.projets WHERE id = %s", (projet_id,))
         src = cur.fetchone()
         if not src:
             cur.close()
             conn.close()
             raise HTTPException(status_code=404, detail="Projet not found")
         cur.execute("""
-            INSERT INTO ad_budget.projets (user_id, nom, client, adresse, description, statut, notes)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO ad_budget.projets
+              (user_id, nom, client, adresse, description, statut, notes,
+               nom_client, contact_client, email_client, telephone_client,
+               numero_projet, date_debut, date_fin,
+               contact_entrepreneur, email_entrepreneur, telephone_entrepreneur)
+            SELECT user_id, %s, client, adresse, description, statut, notes,
+                   nom_client, contact_client, email_client, telephone_client,
+                   numero_projet, date_debut, date_fin,
+                   contact_entrepreneur, email_entrepreneur, telephone_entrepreneur
+            FROM ad_budget.projets
+            WHERE id = %s
             RETURNING *
-        """, (
-            src["user_id"],
-            f"{src['nom']} (copie)",
-            src.get("client") or "",
-            src.get("adresse") or "",
-            src.get("description") or "",
-            src.get("statut") or "en cours",
-            src.get("notes") or "",
-        ))
+        """, (f"{src['nom']} (copie)", projet_id))
         new_projet = cur.fetchone()
         new_id = new_projet["id"]
         cur.execute("""
