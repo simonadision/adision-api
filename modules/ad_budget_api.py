@@ -683,7 +683,6 @@ def register_ad_budget_routes(get_conn):
         projet_id: int,
         actifs_seulement: bool = True,
         avec_prix: bool = True,
-        avec_parametres: bool = True,
         sections: str = Query("", description="CSV des sections à inclure ; vide = toutes"),
         colonnes: str = Query("", description="CSV des colonnes à inclure ; vide = toutes"),
         sous_totaux: Optional[str] = Query(None, description="CSV des regroupements à afficher en sous-total ; param omis = tous, vide explicite = aucun"),
@@ -751,10 +750,11 @@ def register_ad_budget_routes(get_conn):
         story = []
 
         title_style = ParagraphStyle(
-            "PdfTitle", parent=ss["Title"], fontSize=14, alignment=1,
+            "PdfTitle", parent=ss["Title"], fontSize=12, alignment=1,
             spaceAfter=0, textColor=colors.HexColor("#1e3a8a"),
         )
-        title_para = Paragraph("RAPPORT DE BUDGET", title_style)
+        # <nobr> empêche le retour à la ligne dans la Paragraph reportlab
+        title_para = Paragraph("<nobr>RAPPORT DE BUDGET</nobr>", title_style)
         logo_flowable = build_pdf_logo(projet.get("logo_base64") or "")
         # Logo plus grand (180pt) → colonnes latérales 200pt pour l'accommoder
         # avec un peu de marge ; centre = total_w - 400. Garde le titre centré.
@@ -796,35 +796,42 @@ def register_ad_budget_routes(get_conn):
             field_line("Courriel", projet.get("email_client")),
             field_line("Téléphone", projet.get("telephone_client")),
         ])
-        ent_html = "<br/>".join([
-            "<b><font size='10' color='#1e3a8a'>ENTREPRENEUR</font></b>",
+        # ENTREPRENEUR : titre sur toute la largeur, puis 2 sous-colonnes
+        ent_heading_html = "<b><font size='10' color='#1e3a8a'>ENTREPRENEUR</font></b>"
+        ent_left_html = "<br/>".join([
             field_line("Date du jour", date.today().strftime("%Y-%m-%d")),
             field_line("Numéro du projet", projet.get("numero_projet")),
             field_line("Date début travaux", fmt_date(projet.get("date_debut"))),
             field_line("Date fin travaux", fmt_date(projet.get("date_fin"))),
+        ])
+        ent_right_html = "<br/>".join([
             field_line("Contact entrepreneur", projet.get("contact_entrepreneur")),
             field_line("Courriel", projet.get("email_entrepreneur")),
             field_line("Téléphone", projet.get("telephone_entrepreneur")),
         ])
 
         client_para = Paragraph(client_html, info_style)
-        ent_para = Paragraph(ent_html, info_style)
+        ent_heading_para = Paragraph(ent_heading_html, info_style)
+        ent_left_para = Paragraph(ent_left_html, info_style)
+        ent_right_para = Paragraph(ent_right_html, info_style)
 
-        statut_label = projet.get("statut") or "—"
-        statut_para = Paragraph(f"<b>STATUT :</b> &nbsp;{statut_label}", info_style)
         col_w = total_w / 2  # 2 colonnes égales (Client / Entrepreneur)
-        statut_box = Table([[statut_para]], colWidths=[col_w])
-        statut_box.setStyle(TableStyle([
-            ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#1e3a8a")),
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#dbeafe")),
-            ("LEFTPADDING", (0, 0), (-1, -1), 8),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-            ("TOPPADDING", (0, 0), (-1, -1), 4),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ent_subtable = Table(
+            [[ent_heading_para, ""], [ent_left_para, ent_right_para]],
+            colWidths=[col_w / 2, col_w / 2],
+        )
+        ent_subtable.setStyle(TableStyle([
+            ("SPAN", (0, 0), (1, 0)),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 1), (0, 1), 10),  # gap horizontal entre sous-cols
         ]))
 
         header_table = Table(
-            [[client_para, ent_para], ["", statut_box]],
+            [[client_para, ent_subtable]],
             colWidths=[col_w, col_w],
         )
         header_table.setStyle(TableStyle([
@@ -833,30 +840,10 @@ def register_ad_budget_routes(get_conn):
             ("RIGHTPADDING", (0, 0), (-1, -1), 0),
             ("TOPPADDING", (0, 0), (-1, -1), 0),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-            ("TOPPADDING", (0, 1), (-1, 1), 8),
         ]))
         story.append(header_table)
         story.append(Spacer(1, 14))
 
-        if avec_parametres:
-            surface_mur = (hauteur_cloisons or 0) * (longueur_cloisons or 0)
-            surface_gypse = surface_mur * 2
-            params_lines = []
-            if mobilisation:
-                params_lines.append(f"Mobilisation : {mobilisation:g} sem")
-            if surface_plancher:
-                params_lines.append(f"Surface plancher : {surface_plancher:g} pi²")
-            if hauteur_cloisons:
-                params_lines.append(f"Hauteur cloisons : {hauteur_cloisons:g}")
-            if longueur_cloisons:
-                params_lines.append(f"Longueur cloisons : {longueur_cloisons:g}")
-            if surface_mur:
-                params_lines.append(f"Surface mur : {surface_mur:g} pi²")
-            if surface_gypse:
-                params_lines.append(f"Surface gypse : {surface_gypse:g} pi²")
-            if params_lines:
-                story.append(Paragraph("<b>Paramètres :</b> " + " &nbsp;|&nbsp; ".join(params_lines), ss["Normal"]))
-                story.append(Spacer(1, 8))
 
         if projet.get("notes"):
             story.append(Paragraph("<b>Notes du projet :</b>", ss["Normal"]))
