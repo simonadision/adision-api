@@ -750,15 +750,17 @@ def register_ad_budget_routes(get_conn):
         story = []
 
         title_style = ParagraphStyle(
-            "PdfTitle", parent=ss["Title"], fontSize=12, alignment=1,
+            "PdfTitle", parent=ss["Title"], fontSize=10, alignment=1,
             spaceAfter=0, textColor=colors.HexColor("#1e3a8a"),
         )
-        # <nobr> empêche le retour à la ligne dans la Paragraph reportlab
-        title_para = Paragraph("<nobr>RAPPORT DE BUDGET</nobr>", title_style)
+        # Non-breaking spaces ( ) au lieu d'espaces normaux : empêchent
+        # le wrap de la Paragraph reportlab si la colonne centrale est étroite.
+        title_para = Paragraph("RAPPORT DE BUDGET", title_style)
         logo_flowable = build_pdf_logo(projet.get("logo_base64") or "")
-        # Logo plus grand (180pt) → colonnes latérales 200pt pour l'accommoder
-        # avec un peu de marge ; centre = total_w - 400. Garde le titre centré.
-        title_side = 200
+        # Logo plus grand (180pt) → colonnes latérales 190pt pour l'accommoder
+        # avec une petite marge ; centre = total_w - 380 (~147pt portrait,
+        # 327pt landscape) pour que le titre tienne sur une seule ligne.
+        title_side = 190
         title_row = Table(
             [[logo_flowable, title_para, ""]],
             colWidths=[title_side, total_w - 2 * title_side, title_side],
