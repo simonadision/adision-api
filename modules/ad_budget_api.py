@@ -624,23 +624,75 @@ def register_ad_budget_routes(get_conn):
         ss = getSampleStyleSheet()
         story = []
 
-        title_style = ParagraphStyle("PdfTitle", parent=ss["Title"], fontSize=18, alignment=0, spaceAfter=4)
-        story.append(Paragraph(f"Rapport budget — {projet['nom']}", title_style))
-        meta_style = ParagraphStyle("Meta", parent=ss["Normal"], fontSize=9, textColor=colors.grey)
-        story.append(Paragraph(f"Émis le {date.today().strftime('%Y-%m-%d')}", meta_style))
-        story.append(Spacer(1, 10))
+        title_style = ParagraphStyle(
+            "PdfTitle", parent=ss["Title"], fontSize=20, alignment=1,
+            spaceAfter=14, textColor=colors.HexColor("#1e3a8a"),
+        )
+        story.append(Paragraph("RAPPORT DE BUDGET", title_style))
 
-        info_lines = []
-        if projet.get("client"):
-            info_lines.append(f"<b>Client :</b> {projet['client']}")
-        if projet.get("adresse"):
-            info_lines.append(f"<b>Adresse :</b> {projet['adresse']}")
-        if projet.get("statut"):
-            info_lines.append(f"<b>Statut :</b> {projet['statut']}")
-        for line in info_lines:
-            story.append(Paragraph(line, ss["Normal"]))
-        if info_lines:
-            story.append(Spacer(1, 8))
+        info_style = ParagraphStyle("Info", parent=ss["Normal"], fontSize=9, leading=13)
+
+        def fmt_date(v):
+            if v is None or v == "":
+                return ""
+            if hasattr(v, "strftime"):
+                return v.strftime("%Y-%m-%d")
+            return str(v)
+
+        def field_line(label, value):
+            if value:
+                return f"<b>{label}</b> : {value}"
+            return f"<b>{label}</b> : <font color='#94a3b8'>—</font>"
+
+        client_html = "<br/>".join([
+            "<b><font size='10' color='#1e3a8a'>CLIENT</font></b>",
+            field_line("Nom du projet", projet.get("nom")),
+            field_line("Nom du client", projet.get("nom_client") or projet.get("client")),
+            field_line("Contact", projet.get("contact_client")),
+            field_line("Courriel", projet.get("email_client")),
+            field_line("Téléphone", projet.get("telephone_client")),
+        ])
+        ent_html = "<br/>".join([
+            "<b><font size='10' color='#1e3a8a'>ENTREPRENEUR</font></b>",
+            field_line("Date du jour", date.today().strftime("%Y-%m-%d")),
+            field_line("Numéro du projet", projet.get("numero_projet")),
+            field_line("Date début travaux", fmt_date(projet.get("date_debut"))),
+            field_line("Date fin travaux", fmt_date(projet.get("date_fin"))),
+            field_line("Contact entrepreneur", projet.get("contact_entrepreneur")),
+            field_line("Courriel", projet.get("email_entrepreneur")),
+            field_line("Téléphone", projet.get("telephone_entrepreneur")),
+        ])
+
+        client_para = Paragraph(client_html, info_style)
+        ent_para = Paragraph(ent_html, info_style)
+
+        statut_label = projet.get("statut") or "—"
+        statut_para = Paragraph(f"<b>STATUT :</b> &nbsp;{statut_label}", info_style)
+        col_w = 260
+        statut_box = Table([[statut_para]], colWidths=[col_w])
+        statut_box.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#1e3a8a")),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#dbeafe")),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+
+        header_table = Table(
+            [[client_para, ent_para], ["", statut_box]],
+            colWidths=[col_w, col_w],
+        )
+        header_table.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 1), (-1, 1), 8),
+        ]))
+        story.append(header_table)
+        story.append(Spacer(1, 14))
 
         if avec_parametres:
             surface_mur = (hauteur_cloisons or 0) * (longueur_cloisons or 0)
