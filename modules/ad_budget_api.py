@@ -1,6 +1,7 @@
 import base64
 import io
 import os
+import re
 from collections import OrderedDict
 from datetime import date
 
@@ -25,6 +26,28 @@ from reportlab.platypus import (
 DEFAULT_LOGO_PATH = os.path.join(
     os.path.dirname(__file__), "..", "assets", "adision_logo_default.png"
 )
+
+BUDGET_GROUPS_PDF = [
+    ("conditions", "Conditions générales", "pct_admin_conditions", lambda n: n == 1),
+    ("architecture", "Architecture", "pct_admin_architecture", lambda n: 2 <= n <= 14),
+    ("mecanique", "Mécanique", "pct_admin_mecanique", lambda n: 20 <= n <= 28),
+    ("excavation", "Excavation", "pct_admin_excavation", lambda n: n == 31),
+]
+
+
+def _section_prefix_n(s: str):
+    s = (s or "").strip()
+    m = re.match(r"^(\d+)", s)
+    return int(m.group(1)[:2]) if m else None
+
+
+def _group_key_for(n):
+    if n is None:
+        return None
+    for key, _, _, matches in BUDGET_GROUPS_PDF:
+        if matches(n):
+            return key
+    return None
 
 
 def build_pdf_logo(logo_base64: str, max_width: float = 110):
@@ -635,6 +658,8 @@ def register_ad_budget_routes(get_conn):
         avec_parametres: bool = True,
         sections: str = Query("", description="CSV des sections à inclure ; vide = toutes"),
         colonnes: str = Query("", description="CSV des colonnes à inclure ; vide = toutes"),
+        sous_totaux: str = Query("", description="CSV des regroupements à afficher en sous-total"),
+        admin_profits: str = Query("", description="CSV des regroupements pour admin&profit"),
         mobilisation: float = 0,
         surface_plancher: float = 0,
         hauteur_cloisons: float = 0,
@@ -853,7 +878,8 @@ def register_ad_budget_routes(get_conn):
 
         table_data = [headers]
         subtotal_rows = []
-        grand_total = 0.0
+        group_subtotals = {key: 0.0 for key, _, _, _ in BUDGET_GROUPS_PDF}
+        non_grouped_total = 0.0
 
         for sec, sec_lignes in sections_groups.items():
             sec_total = 0.0
@@ -864,16 +890,15 @@ def register_ad_budget_routes(get_conn):
                 st = float(l["sous_total"] or 0)
                 tot = float(l["total"] or 0)
                 sec_total += tot
+                gkey = _group_key_for(_section_prefix_n(l["section"]))
+                if gkey is not None:
+                    group_subtotals[gkey] += tot
+                else:
+                    non_grouped_total += tot
                 table_data.append([cell_for(c, l, qte, prix, adj, st, tot) for c in selected])
             if show_totals_row:
                 table_data.append(make_summary_row(f"Sous-total {sec}", sec_total))
                 subtotal_rows.append(len(table_data) - 1)
-            grand_total += sec_total
-
-        grand_total_row = None
-        if show_totals_row:
-            table_data.append(make_summary_row("GRAND TOTAL", grand_total))
-            grand_total_row = len(table_data) - 1
 
         table_style_cmds = [
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e3a8a")),
@@ -889,14 +914,74 @@ def register_ad_budget_routes(get_conn):
         for r in subtotal_rows:
             table_style_cmds.append(("FONTNAME", (0, r), (-1, r), "Helvetica-Bold"))
             table_style_cmds.append(("BACKGROUND", (0, r), (-1, r), colors.HexColor("#dbeafe")))
-        if grand_total_row is not None:
-            table_style_cmds.append(("FONTNAME", (0, grand_total_row), (-1, grand_total_row), "Helvetica-Bold"))
-            table_style_cmds.append(("BACKGROUND", (0, grand_total_row), (-1, grand_total_row), colors.HexColor("#1e3a8a")))
-            table_style_cmds.append(("TEXTCOLOR", (0, grand_total_row), (-1, grand_total_row), colors.white))
 
         table = Table(table_data, colWidths=col_widths, repeatRows=1)
         table.setStyle(TableStyle(table_style_cmds))
         story.append(table)
+
+        # ── Totals block (per-regroupement subtotals + admin&profit + grand total) ──
+        if avec_prix:
+            all_keys = {key for key, _, _, _ in BUDGET_GROUPS_PDF}
+            selected_st = (
+                {s.strip() for s in sous_totaux.split(",") if s.strip()} & all_keys
+                if sous_totaux else set(all_keys)
+            )
+            selected_ap = (
+                {s.strip() for s in admin_profits.split(",") if s.strip()} & all_keys
+                if admin_profits else set(all_keys)
+            )
+            totals_rows = []
+            totals_kinds = []
+            total_general = non_grouped_total
+            for key, label, pct_field, _ in BUDGET_GROUPS_PDF:
+                sub = group_subtotals[key]
+                if sub <= 0:
+                    continue
+                if key not in selected_st:
+                    continue
+                totals_rows.append([f"Sous-total {label}", f"{sub:,.2f} $"])
+                totals_kinds.append("subtotal")
+                total_general += sub
+                if key in selected_ap:
+                    pct = float(projet.get(pct_field) or 0)
+                    ap = sub * pct / 100
+                    totals_rows.append([f"Administration et profit {pct:g}%", f"{ap:,.2f} $"])
+                    totals_kinds.append("admin")
+                    total_general += ap
+            totals_rows.append(["TOTAL GÉNÉRAL", f"{total_general:,.2f} $"])
+            totals_kinds.append("grand")
+
+            totals_style = [
+                ("LEFTPADDING", (0, 0), (-1, -1), 12),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                ("FONTSIZE", (0, 0), (-1, -1), 10),
+                ("BOX", (0, 0), (-1, -1), 0.4, colors.grey),
+            ]
+            for i, kind in enumerate(totals_kinds):
+                if kind == "subtotal":
+                    totals_style.append(("FONTNAME", (0, i), (-1, i), "Helvetica-Bold"))
+                    totals_style.append(("LINEABOVE", (0, i), (-1, i), 0.4, colors.HexColor("#cbd5e1")))
+                    totals_style.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#f1f5f9")))
+                elif kind == "admin":
+                    totals_style.append(("LEFTPADDING", (0, i), (0, i), 32))
+                    totals_style.append(("FONTSIZE", (0, i), (-1, i), 9))
+                    totals_style.append(("TEXTCOLOR", (0, i), (-1, i), colors.HexColor("#475569")))
+                elif kind == "grand":
+                    totals_style.append(("FONTNAME", (0, i), (-1, i), "Helvetica-Bold"))
+                    totals_style.append(("FONTSIZE", (0, i), (-1, i), 12))
+                    totals_style.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#1e3a8a")))
+                    totals_style.append(("TEXTCOLOR", (0, i), (-1, i), colors.white))
+                    totals_style.append(("TOPPADDING", (0, i), (-1, i), 9))
+                    totals_style.append(("BOTTOMPADDING", (0, i), (-1, i), 9))
+                    totals_style.append(("LINEABOVE", (0, i), (-1, i), 1.5, colors.HexColor("#1e3a8a")))
+
+            totals_table = Table(totals_rows, colWidths=[400, 126])
+            totals_table.setStyle(TableStyle(totals_style))
+            story.append(Spacer(1, 14))
+            story.append(totals_table)
 
         doc.build(story)
         buf.seek(0)
