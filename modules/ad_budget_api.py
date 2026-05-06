@@ -539,6 +539,7 @@ def register_ad_budget_routes(get_conn):
         actifs_seulement: bool = True,
         avec_prix: bool = True,
         sections: str = Query("", description="CSV des sections à inclure ; vide = toutes"),
+        colonnes: str = Query("", description="CSV des colonnes à inclure ; vide = toutes"),
         mobilisation: float = 0,
         surface_plancher: float = 0,
         hauteur_cloisons: float = 0,
@@ -633,12 +634,53 @@ def register_ad_budget_routes(get_conn):
         def cell(text):
             return Paragraph(str(text), cell_style)
 
-        if avec_prix:
-            headers = ["Section", "Description", "Qté", "Unité", "Prix unit.", "S/T", "Adj %", "Total", "Note"]
-            col_widths = [55, 130, 28, 30, 50, 55, 30, 60, 80]
+        ALL_COLS = ["section", "description", "qte", "unite", "prix_unitaire", "sous_total", "ajustement_pct", "total", "note"]
+        COL_LABELS = {
+            "section": "Section", "description": "Description", "qte": "Qté",
+            "unite": "Unité", "prix_unitaire": "Prix unit.", "sous_total": "S/T",
+            "ajustement_pct": "Adj %", "total": "Total", "note": "Note",
+        }
+        COL_WIDTHS = {
+            "section": 55, "description": 130, "qte": 28, "unite": 30,
+            "prix_unitaire": 50, "sous_total": 55, "ajustement_pct": 30,
+            "total": 60, "note": 80,
+        }
+        PRIX_DEPENDENT = {"prix_unitaire", "sous_total", "ajustement_pct", "total", "note"}
+
+        if colonnes:
+            requested = {c.strip() for c in colonnes.split(",") if c.strip()}
         else:
-            headers = ["Section", "Description", "Qté", "Unité"]
-            col_widths = [80, 290, 50, 50]
+            requested = set(ALL_COLS)
+        if not avec_prix:
+            requested -= PRIX_DEPENDENT
+        selected = [c for c in ALL_COLS if c in requested] or ["section", "description"]
+        headers = [COL_LABELS[c] for c in selected]
+        col_widths = [COL_WIDTHS[c] for c in selected]
+
+        def cell_for(col, l, qte, prix, adj, st, tot):
+            if col == "section": return l["section"] or ""
+            if col == "description": return cell(l["description"] or "")
+            if col == "qte": return f"{qte:g}"
+            if col == "unite": return l["unite"] or ""
+            if col == "prix_unitaire": return f"{prix:,.2f}"
+            if col == "sous_total": return f"{st:,.2f}"
+            if col == "ajustement_pct": return f"{adj:g}"
+            if col == "total": return f"{tot:,.2f}"
+            if col == "note": return cell(l["note"] or "")
+            return ""
+
+        total_idx = selected.index("total") if "total" in selected else None
+        desc_idx = selected.index("description") if "description" in selected else None
+        show_totals_row = avec_prix and total_idx is not None
+
+        def make_summary_row(label, value):
+            row = [""] * len(selected)
+            if desc_idx is not None and desc_idx != total_idx:
+                row[desc_idx] = label
+            elif total_idx is not None and total_idx > 0:
+                row[total_idx - 1] = label
+            row[total_idx] = f"{value:,.2f}"
+            return row
 
         table_data = [headers]
         subtotal_rows = []
@@ -653,33 +695,15 @@ def register_ad_budget_routes(get_conn):
                 st = float(l["sous_total"] or 0)
                 tot = float(l["total"] or 0)
                 sec_total += tot
-                if avec_prix:
-                    table_data.append([
-                        l["section"] or "",
-                        cell(l["description"] or ""),
-                        f"{qte:g}",
-                        l["unite"] or "",
-                        f"{prix:,.2f}",
-                        f"{st:,.2f}",
-                        f"{adj:g}",
-                        f"{tot:,.2f}",
-                        cell(l["note"] or ""),
-                    ])
-                else:
-                    table_data.append([
-                        l["section"] or "",
-                        cell(l["description"] or ""),
-                        f"{qte:g}",
-                        l["unite"] or "",
-                    ])
-            if avec_prix:
-                table_data.append(["", f"Sous-total {sec}", "", "", "", "", "", f"{sec_total:,.2f}", ""])
+                table_data.append([cell_for(c, l, qte, prix, adj, st, tot) for c in selected])
+            if show_totals_row:
+                table_data.append(make_summary_row(f"Sous-total {sec}", sec_total))
                 subtotal_rows.append(len(table_data) - 1)
             grand_total += sec_total
 
         grand_total_row = None
-        if avec_prix:
-            table_data.append(["", "GRAND TOTAL", "", "", "", "", "", f"{grand_total:,.2f}", ""])
+        if show_totals_row:
+            table_data.append(make_summary_row("GRAND TOTAL", grand_total))
             grand_total_row = len(table_data) - 1
 
         table_style_cmds = [
