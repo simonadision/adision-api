@@ -4,6 +4,7 @@ import os
 import re
 from collections import OrderedDict
 from datetime import date
+from typing import Optional
 
 import openpyxl
 from fastapi import APIRouter, HTTPException, Query
@@ -681,8 +682,8 @@ def register_ad_budget_routes(get_conn):
         avec_parametres: bool = True,
         sections: str = Query("", description="CSV des sections à inclure ; vide = toutes"),
         colonnes: str = Query("", description="CSV des colonnes à inclure ; vide = toutes"),
-        sous_totaux: str = Query("", description="CSV des regroupements à afficher en sous-total"),
-        admin_profits: str = Query("", description="CSV des regroupements pour admin&profit"),
+        sous_totaux: Optional[str] = Query(None, description="CSV des regroupements à afficher en sous-total ; param omis = tous, vide explicite = aucun"),
+        admin_profits: Optional[str] = Query(None, description="CSV des regroupements pour admin&profit ; param omis = tous, vide explicite = aucun"),
         mobilisation: float = 0,
         surface_plancher: float = 0,
         hauteur_cloisons: float = 0,
@@ -904,16 +905,18 @@ def register_ad_budget_routes(get_conn):
         surface_gypse_calc = surface_mur_calc * 2
 
         # Résolution des regroupements sélectionnés (utilisée pour la distribution
-        # pro rata sur les Total des lignes ET pour le bloc totaux en fin de PDF)
+        # pro rata sur les Total des lignes ET pour le bloc totaux en fin de PDF).
+        # Sémantique : param omis (None) = tous sélectionnés (default rétrocompat) ;
+        # chaîne vide = aucun sélectionné (l'utilisateur a explicitement décoché tout).
         all_group_keys = {key for key, _, _, _ in BUDGET_GROUPS_PDF}
-        selected_st = (
-            {s.strip() for s in sous_totaux.split(",") if s.strip()} & all_group_keys
-            if sous_totaux else set(all_group_keys)
-        )
-        selected_ap = (
-            {s.strip() for s in admin_profits.split(",") if s.strip()} & all_group_keys
-            if admin_profits else set(all_group_keys)
-        )
+        if sous_totaux is None:
+            selected_st = set(all_group_keys)
+        else:
+            selected_st = {s.strip() for s in sous_totaux.split(",") if s.strip()} & all_group_keys
+        if admin_profits is None:
+            selected_ap = set(all_group_keys)
+        else:
+            selected_ap = {s.strip() for s in admin_profits.split(",") if s.strip()} & all_group_keys
         # Facteur d'affichage par regroupement : si sous-total inclus mais
         # admin & profit exclu, on gonfle le Total des lignes (et la sec_total
         # affichée) en distribuant le montant admin pro rata.
