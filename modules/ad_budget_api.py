@@ -538,6 +538,7 @@ def register_ad_budget_routes(get_conn):
         projet_id: int,
         actifs_seulement: bool = True,
         avec_prix: bool = True,
+        avec_parametres: bool = True,
         sections: str = Query("", description="CSV des sections à inclure ; vide = toutes"),
         colonnes: str = Query("", description="CSV des colonnes à inclure ; vide = toutes"),
         mobilisation: float = 0,
@@ -610,18 +611,25 @@ def register_ad_budget_routes(get_conn):
         if info_lines:
             story.append(Spacer(1, 8))
 
-        params_lines = []
-        if mobilisation:
-            params_lines.append(f"Mobilisation : {mobilisation:g} sem")
-        if surface_plancher:
-            params_lines.append(f"Surface plancher : {surface_plancher:g} pi²")
-        if hauteur_cloisons:
-            params_lines.append(f"Hauteur cloisons : {hauteur_cloisons:g}")
-        if longueur_cloisons:
-            params_lines.append(f"Longueur cloisons : {longueur_cloisons:g}")
-        if params_lines:
-            story.append(Paragraph("<b>Paramètres :</b> " + " &nbsp;|&nbsp; ".join(params_lines), ss["Normal"]))
-            story.append(Spacer(1, 8))
+        if avec_parametres:
+            surface_mur = (hauteur_cloisons or 0) * (longueur_cloisons or 0)
+            surface_gypse = surface_mur * 2
+            params_lines = []
+            if mobilisation:
+                params_lines.append(f"Mobilisation : {mobilisation:g} sem")
+            if surface_plancher:
+                params_lines.append(f"Surface plancher : {surface_plancher:g} pi²")
+            if hauteur_cloisons:
+                params_lines.append(f"Hauteur cloisons : {hauteur_cloisons:g}")
+            if longueur_cloisons:
+                params_lines.append(f"Longueur cloisons : {longueur_cloisons:g}")
+            if surface_mur:
+                params_lines.append(f"Surface mur : {surface_mur:g} pi²")
+            if surface_gypse:
+                params_lines.append(f"Surface gypse : {surface_gypse:g} pi²")
+            if params_lines:
+                story.append(Paragraph("<b>Paramètres :</b> " + " &nbsp;|&nbsp; ".join(params_lines), ss["Normal"]))
+                story.append(Spacer(1, 8))
 
         if projet.get("notes"):
             story.append(Paragraph("<b>Notes du projet :</b>", ss["Normal"]))
