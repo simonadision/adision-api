@@ -903,6 +903,28 @@ def register_ad_budget_routes(get_conn):
         surface_mur_calc = (hauteur_cloisons or 0) * (longueur_cloisons or 0)
         surface_gypse_calc = surface_mur_calc * 2
 
+        # Résolution des regroupements sélectionnés (utilisée pour la distribution
+        # pro rata sur les Total des lignes ET pour le bloc totaux en fin de PDF)
+        all_group_keys = {key for key, _, _, _ in BUDGET_GROUPS_PDF}
+        selected_st = (
+            {s.strip() for s in sous_totaux.split(",") if s.strip()} & all_group_keys
+            if sous_totaux else set(all_group_keys)
+        )
+        selected_ap = (
+            {s.strip() for s in admin_profits.split(",") if s.strip()} & all_group_keys
+            if admin_profits else set(all_group_keys)
+        )
+        # Facteur d'affichage par regroupement : si sous-total inclus mais
+        # admin & profit exclu, on gonfle le Total des lignes (et la sec_total
+        # affichée) en distribuant le montant admin pro rata.
+        group_factors = {}
+        for key, _, pct_field, _ in BUDGET_GROUPS_PDF:
+            if key in selected_st and key not in selected_ap:
+                pct_d = float(projet.get(pct_field) or 0)
+                group_factors[key] = 1 + pct_d / 100
+            else:
+                group_factors[key] = 1
+
         table_data = [headers]
         subtotal_rows = []
         group_subtotals = {key: 0.0 for key, _, _, _ in BUDGET_GROUPS_PDF}
@@ -911,7 +933,6 @@ def register_ad_budget_routes(get_conn):
         for sec, sec_lignes in sections_groups.items():
             sec_total = 0.0
             section_has_visible_lines = False
-            section_start_idx = len(table_data)
             for l in sec_lignes:
                 qte = _effective_qte(l, mobilisation, surface_plancher,
                                      surface_mur_calc, surface_gypse_calc)
@@ -920,13 +941,16 @@ def register_ad_budget_routes(get_conn):
                 prix = float(l["prix_unitaire"] or 0)
                 adj = float(l["ajustement_pct"] or 0)
                 st = qte * prix
-                tot = st * (1 + adj / 100)
-                sec_total += tot
+                tot_real = st * (1 + adj / 100)
                 gkey = _group_key_for(_section_prefix_n(l["section"]))
+                factor = group_factors.get(gkey, 1) if gkey is not None else 1
+                tot = tot_real * factor  # gonflé si admin distribué
+                sec_total += tot  # le sous-total par section CSI reflète l'affichage
                 if gkey is not None:
-                    group_subtotals[gkey] += tot
+                    group_subtotals[gkey] += tot_real  # on garde la valeur RÉELLE
                 else:
-                    non_grouped_total += tot
+                    non_grouped_total += tot_real
+                # Le S/T par ligne (st) reste qte × prix (non gonflé) — seul le Total l'est.
                 table_data.append([cell_for(c, l, qte, prix, adj, st, tot) for c in selected])
                 section_has_visible_lines = True
             if show_totals_row and section_has_visible_lines:
@@ -954,33 +978,31 @@ def register_ad_budget_routes(get_conn):
 
         # ── Totals block (per-regroupement subtotals + admin&profit + grand total) ──
         if avec_prix:
-            all_keys = {key for key, _, _, _ in BUDGET_GROUPS_PDF}
-            selected_st = (
-                {s.strip() for s in sous_totaux.split(",") if s.strip()} & all_keys
-                if sous_totaux else set(all_keys)
-            )
-            selected_ap = (
-                {s.strip() for s in admin_profits.split(",") if s.strip()} & all_keys
-                if admin_profits else set(all_keys)
-            )
             totals_rows = []
             totals_kinds = []
             total_general = non_grouped_total
             for key, label, pct_field, _ in BUDGET_GROUPS_PDF:
-                sub = group_subtotals[key]
+                sub = group_subtotals[key]  # valeur réelle (sans facteur)
                 if sub <= 0:
                     continue
                 if key not in selected_st:
                     continue
-                totals_rows.append([f"Sous-total {label}", f"{sub:,.2f} $"])
-                totals_kinds.append("subtotal")
-                total_general += sub
+                pct = float(projet.get(pct_field) or 0)
+                ap = sub * pct / 100
                 if key in selected_ap:
-                    pct = float(projet.get(pct_field) or 0)
-                    ap = sub * pct / 100
+                    # Mode classique : sous-total et admin & profit affichés séparément
+                    totals_rows.append([f"Sous-total {label}", f"{sub:,.2f} $"])
+                    totals_kinds.append("subtotal")
+                    total_general += sub
                     totals_rows.append([f"Administration et profit {pct:g}%", f"{ap:,.2f} $"])
                     totals_kinds.append("admin")
                     total_general += ap
+                else:
+                    # Mode distribution : sous-total gonflé (= sub + ap), pas de ligne admin
+                    sub_displayed = sub + ap
+                    totals_rows.append([f"Sous-total {label}", f"{sub_displayed:,.2f} $"])
+                    totals_kinds.append("subtotal")
+                    total_general += sub_displayed
             totals_rows.append(["TOTAL GÉNÉRAL", f"{total_general:,.2f} $"])
             totals_kinds.append("grand")
 
