@@ -339,7 +339,7 @@ def register_ad_budget_routes(get_conn):
         conn = get_conn()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("""
-            SELECT id, nom, email, role, has_ad_viu, created_at
+            SELECT id, nom, email, role, created_at
             FROM ad_budget.users
             ORDER BY nom;
         """)
@@ -377,7 +377,7 @@ def register_ad_budget_routes(get_conn):
         conn = get_conn()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("""
-            SELECT id, nom, email, role, has_ad_viu, created_at
+            SELECT id, nom, email, role, created_at
             FROM ad_budget.users WHERE id = %s
         """, (user_id,))
         row = cur.fetchone()
