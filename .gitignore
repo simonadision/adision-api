@@ -12,6 +12,9 @@
 *_KEY.txt
 *secret*.txt
 *SECRET*.txt
+Clé*.txt
+*.key
+secrets/
 # Fichiers connus (au cas où le pattern ci-dessus rate).
 Clé Claude API.txt
 JWT_SECRET Adision.txt
