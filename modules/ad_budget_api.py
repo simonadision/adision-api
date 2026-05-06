@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from psycopg2.extras import RealDictCursor
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import letter
+from reportlab.lib.pagesizes import landscape, letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.lib.utils import ImageReader
@@ -691,6 +691,7 @@ def register_ad_budget_routes(get_conn):
         avec_sous_total_avant_taxes: bool = True,
         avec_tps: bool = True,
         avec_tvq: bool = True,
+        orientation: str = "portrait",
         mobilisation: float = 0,
         surface_plancher: float = 0,
         hauteur_cloisons: float = 0,
@@ -733,11 +734,17 @@ def register_ad_budget_routes(get_conn):
             sec = l["section"] or ""
             sections_groups.setdefault(sec, []).append(l)
 
+        # Orientation et largeur disponible
+        is_landscape = (orientation or "").lower() == "paysage"
+        pagesize = landscape(letter) if is_landscape else letter
+        margin = 1.5 * cm
+        total_w = pagesize[0] - 2 * margin  # ~527 portrait, ~707 landscape
+
         buf = io.BytesIO()
         doc = SimpleDocTemplate(
-            buf, pagesize=letter,
-            rightMargin=1.5 * cm, leftMargin=1.5 * cm,
-            topMargin=1.5 * cm, bottomMargin=1.5 * cm,
+            buf, pagesize=pagesize,
+            rightMargin=margin, leftMargin=margin,
+            topMargin=margin, bottomMargin=margin,
             title=f"Rapport budget — {projet['nom']}",
         )
         ss = getSampleStyleSheet()
@@ -749,9 +756,11 @@ def register_ad_budget_routes(get_conn):
         )
         title_para = Paragraph("RAPPORT DE BUDGET", title_style)
         logo_flowable = build_pdf_logo(projet.get("logo_base64") or "")
+        # Largeurs : logo et bloc droit identiques pour garder le titre centré
+        title_side = round(total_w * (120 / 526))
         title_row = Table(
             [[logo_flowable, title_para, ""]],
-            colWidths=[120, 286, 120],
+            colWidths=[title_side, total_w - 2 * title_side, title_side],
         )
         title_row.setStyle(TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
@@ -802,7 +811,7 @@ def register_ad_budget_routes(get_conn):
 
         statut_label = projet.get("statut") or "—"
         statut_para = Paragraph(f"<b>STATUT :</b> &nbsp;{statut_label}", info_style)
-        col_w = 260
+        col_w = total_w / 2  # 2 colonnes égales (Client / Entrepreneur)
         statut_box = Table([[statut_para]], colWidths=[col_w])
         statut_box.setStyle(TableStyle([
             ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#1e3a8a")),
@@ -865,11 +874,15 @@ def register_ad_budget_routes(get_conn):
             "unite": "Unité", "prix_unitaire": "Prix unit.", "sous_total": "S/T",
             "ajustement_pct": "Adj %", "total": "Total", "note": "Note",
         }
-        COL_WIDTHS = {
+        # Largeurs de base (somme 518) — mises à l'échelle pour remplir la
+        # largeur disponible de la page (portrait ou paysage).
+        _col_widths_base = {
             "section": 55, "description": 130, "qte": 28, "unite": 30,
             "prix_unitaire": 50, "sous_total": 55, "ajustement_pct": 30,
             "total": 60, "note": 80,
         }
+        _scale = total_w / sum(_col_widths_base.values())
+        COL_WIDTHS = {k: v * _scale for k, v in _col_widths_base.items()}
         PRIX_DEPENDENT = {"prix_unitaire", "sous_total", "ajustement_pct", "total", "note"}
 
         if colonnes:
@@ -1081,7 +1094,7 @@ def register_ad_budget_routes(get_conn):
                     totals_style.append(("BOTTOMPADDING", (0, i), (-1, i), 9))
                     totals_style.append(("LINEABOVE", (0, i), (-1, i), 1.5, colors.HexColor("#1e3a8a")))
 
-            totals_table = Table(totals_rows, colWidths=[400, 126])
+            totals_table = Table(totals_rows, colWidths=[total_w * (400 / 526), total_w * (126 / 526)])
             totals_table.setStyle(TableStyle(totals_style))
             story.append(Spacer(1, 14))
             story.append(totals_table)
