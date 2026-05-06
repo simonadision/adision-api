@@ -80,6 +80,28 @@ def _group_key_for(n):
     return None
 
 
+def _apply_master_template(cur, projet_id: int) -> int:
+    """Copie les items master (`ad_budget.ad_budget_prix_moyens`) dans
+    `budget_lignes` du projet. C'est le squelette standard de soumission
+    appliqué à toute création de projet — qte=0 par défaut, à compléter
+    par l'utilisateur. Réutilisé par POST /budget/projets ET par POST
+    /budget/projects/from-viu en mode=new pour cohérence d'archi.
+
+    Le curseur est partagé pour rester dans la même transaction que la
+    création du projet appelante. Retourne le nombre de lignes insérées.
+    """
+    cur.execute(
+        "INSERT INTO ad_budget.budget_lignes "
+        "(projet_id, source_item_id, section, description, unite, "
+        " prix_unitaire, qte, ajustement_pct, note, actif) "
+        "SELECT %s, id, section, description, COALESCE(unite, 'global'), "
+        "       COALESCE(prix_unitaire, 0), 0, 0, COALESCE(note, ''), TRUE "
+        "FROM ad_budget.ad_budget_prix_moyens",
+        (projet_id,),
+    )
+    return cur.rowcount
+
+
 def build_pdf_logo(logo_base64: str, max_width: float = 180):
     """Return a reportlab Image flowable for the projet logo, or default if empty.
     Falls back to empty string if no source is usable.
@@ -502,6 +524,7 @@ def register_ad_budget_routes(get_conn):
         conn = get_conn()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         try:
+            template_lines_added = 0
             if mode == "new":
                 project_name = (data.get("project_name") or "").strip()
                 if not project_name:
@@ -518,6 +541,11 @@ def register_ad_budget_routes(get_conn):
                     (user["id"], project_name),
                 )
                 proj = cur.fetchone()
+                # Squelette standard appliqué au nouveau projet — même logique
+                # que POST /budget/projets pour rester cohérent avec une création
+                # manuelle. Les lignes Ad VIU s'ajoutent ensuite par-dessus
+                # (coexistence assumée si même section, l'user choisit).
+                template_lines_added = _apply_master_template(cur, proj["id"])
             else:
                 project_id_in = data.get("project_id")
                 if not project_id_in:
@@ -618,6 +646,9 @@ def register_ad_budget_routes(get_conn):
                 "project_name": proj["nom"],
                 "sections_added": new_sections_count,
                 "lines_added": lines_added,
+                # Nombre de lignes du squelette standard ajoutées si le projet
+                # vient d'être créé (mode=new). 0 en mode=existing.
+                "template_lines_added": template_lines_added,
             }
         except HTTPException:
             conn.rollback()
@@ -684,8 +715,7 @@ def register_ad_budget_routes(get_conn):
         ))
         row = cur.fetchone()
         projet_id = row["id"]
-        cur.execute("INSERT INTO ad_budget.budget_lignes (projet_id, source_item_id, section, description, unite, prix_unitaire, qte, ajustement_pct, note, actif) SELECT %s, id, section, description, COALESCE(unite, 'global'), 	COALESCE(prix_unitaire, 0), 0, 0, COALESCE(note, ''), TRUE FROM ad_budget.ad_budget_prix_moyens", (projet_id,))
-        nb_lignes = cur.rowcount
+        nb_lignes = _apply_master_template(cur, projet_id)
         conn.commit()
         cur.close()
         conn.close()
