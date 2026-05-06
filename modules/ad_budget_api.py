@@ -435,6 +435,172 @@ def register_ad_budget_routes(get_conn):
         conn.close()
         return rows
 
+    # ══════════════════════════════════════════════════════════
+    # IMPORT DEPUIS AD VIU (push cross-module)
+    # ══════════════════════════════════════════════════════════
+
+    @router.get("/projects/mine")
+    def projects_mine(user=Depends(jwt_user)):
+        """Liste légère des projets du user — utilisée par le modal "Pousser
+        vers Ad BUD" d'Ad VIU. nb_sections = nombre de valeurs section
+        distinctes (codes CSI) déjà présentes dans le projet."""
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute(
+            """
+            SELECT
+                p.id,
+                p.nom,
+                p.updated_at AS date_creation,
+                COALESCE(
+                    COUNT(DISTINCT bl.section)
+                        FILTER (WHERE bl.section IS NOT NULL AND bl.section <> ''),
+                    0
+                ) AS nb_sections
+            FROM ad_budget.projets p
+            LEFT JOIN ad_budget.budget_lignes bl ON bl.projet_id = p.id
+            WHERE p.user_id = %s
+            GROUP BY p.id, p.nom, p.updated_at
+            ORDER BY p.updated_at DESC
+            """,
+            (user["id"],),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return rows
+
+    @router.post("/projects/from-viu")
+    def projects_from_viu(data: dict, user=Depends(jwt_user)):
+        """Crée un projet (mode=new) ou ajoute des lignes à un projet existant
+        (mode=existing) à partir des sections CSI détectées par Ad VIU.
+
+        Idempotent sur le tuple (projet_id, section, description, source_file) :
+        re-pousser le même fichier au même projet ne duplique rien.
+
+        Les quantités (qte) et l'unité ne sont pas extraites par Ad VIU pour
+        l'instant ; on insère qte=0 / unite='global' comme placeholder, à
+        compléter par l'utilisateur côté Ad BUD.
+        """
+        mode = (data.get("mode") or "").strip()
+        if mode not in ("new", "existing"):
+            raise HTTPException(status_code=400, detail="mode doit être 'new' ou 'existing'")
+
+        sections = data.get("sections") or []
+        if not isinstance(sections, list) or not sections:
+            raise HTTPException(status_code=400, detail="Aucune section à pousser")
+
+        source_file = (data.get("source_file") or "").strip() or None
+
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            if mode == "new":
+                project_name = (data.get("project_name") or "").strip()
+                if not project_name:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="project_name requis pour mode=new",
+                    )
+                cur.execute(
+                    """
+                    INSERT INTO ad_budget.projets (user_id, nom, statut)
+                    VALUES (%s, %s, 'en cours')
+                    RETURNING id, nom
+                    """,
+                    (user["id"], project_name),
+                )
+                proj = cur.fetchone()
+            else:
+                project_id_in = data.get("project_id")
+                if not project_id_in:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="project_id requis pour mode=existing",
+                    )
+                cur.execute(
+                    "SELECT id, nom, user_id FROM ad_budget.projets WHERE id = %s",
+                    (project_id_in,),
+                )
+                proj = cur.fetchone()
+                if not proj:
+                    raise HTTPException(status_code=404, detail="Projet introuvable")
+                if proj["user_id"] != user["id"]:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Ce projet ne vous appartient pas",
+                    )
+
+            project_id = proj["id"]
+
+            # Sections déjà présentes AVANT le push, pour calculer "sections_added".
+            cur.execute(
+                """
+                SELECT DISTINCT section
+                FROM ad_budget.budget_lignes
+                WHERE projet_id = %s AND section IS NOT NULL AND section <> ''
+                """,
+                (project_id,),
+            )
+            existing_sections = {row["section"] for row in cur.fetchall()}
+
+            sections_touched = set()
+            lines_added = 0
+            note_text = (
+                f"Importé depuis Ad VIU ({source_file})"
+                if source_file else "Importé depuis Ad VIU"
+            )
+
+            for s in sections:
+                section = (s.get("code_csi") or "").strip()
+                description = (s.get("description") or s.get("nom") or "").strip()
+                if not section:
+                    continue
+                # Idempotence — vérif explicite (pas d'INDEX UNIQUE pour laisser
+                # à l'user la liberté d'ajouter des doublons manuels dans Ad BUD).
+                cur.execute(
+                    """
+                    SELECT id FROM ad_budget.budget_lignes
+                    WHERE projet_id = %s
+                      AND section = %s
+                      AND COALESCE(description, '') = %s
+                      AND COALESCE(source_file, '') = COALESCE(%s, '')
+                    LIMIT 1
+                    """,
+                    (project_id, section, description, source_file),
+                )
+                if cur.fetchone():
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO ad_budget.budget_lignes
+                      (projet_id, section, description, unite, prix_unitaire,
+                       qte, ajustement_pct, note, actif, source_file)
+                    VALUES (%s, %s, %s, 'global', 0, 0, 0, %s, TRUE, %s)
+                    """,
+                    (project_id, section, description, note_text, source_file),
+                )
+                lines_added += 1
+                sections_touched.add(section)
+
+            new_sections_count = len(sections_touched - existing_sections)
+            conn.commit()
+            return {
+                "project_id": project_id,
+                "project_name": proj["nom"],
+                "sections_added": new_sections_count,
+                "lines_added": lines_added,
+            }
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cur.close()
+            conn.close()
+
     @router.post("/projets")
     def create_projet(data: dict, user=Depends(jwt_user)):
         # On force user_id depuis le JWT, pas depuis le body — un user ne

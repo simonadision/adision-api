@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine
@@ -8,7 +10,44 @@ from modules.ad_budget_api import register_ad_budget_routes
 from modules.auth_jwt import make_jwt_deps
 import os
 
-app = FastAPI(title="Adision API")
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:6268605Ss@localhost:5432/Adision")
+
+engine = create_engine(DATABASE_URL)
+
+
+def get_conn():
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
+
+
+def _ensure_schema():
+    """Migrations idempotentes appliquées au démarrage. ADD COLUMN IF NOT EXISTS
+    est sûr en prod : pas de réécriture de table, pas de blocage des requêtes
+    en cours sur Postgres ≥ 11.
+    """
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        # ÉTAPE 7 : import depuis Ad VIU. source_file pour la traçabilité +
+        # idempotence du push.
+        cur.execute(
+            "ALTER TABLE ad_budget.budget_lignes "
+            "ADD COLUMN IF NOT EXISTS source_file TEXT"
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("[startup] schema ad_budget OK (source_file column ensured)", flush=True)
+    except Exception as e:
+        print(f"[startup] schema migration failed: {e}", flush=True)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _ensure_schema()
+    yield
+
+
+app = FastAPI(title="Adision API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,14 +56,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:6268605Ss@localhost:5432/Adision")
-
-engine = create_engine(DATABASE_URL)
-
-def get_conn():
-    return psycopg2.connect(DATABASE_URL, sslmode="require")
-
 
 app.include_router(register_ad_budget_routes(get_conn))
 
