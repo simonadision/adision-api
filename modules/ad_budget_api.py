@@ -594,17 +594,26 @@ def register_ad_budget_routes(get_conn):
 
                 type_source = (s.get("type_source") or "").strip() or None
 
-                # Mapping selon type_source.
+                # Mapping selon type_source — depuis la refonte 3 sections,
+                # une soumission Ad VIU pousse directement dans la section
+                # SOUS-TRAITANT (type=Soumission, montant=montant_total) plutôt
+                # qu'en matériel. Plan/devis = ligne placeholder à compléter.
+                qte = 0
+                prix_unitaire = 0
+                sous_traitant_type = None
+                sous_traitant_montant = 0
+                sous_traitant_nom = None
+
                 if type_source == "soumission":
                     try:
                         montant = float(s.get("montant_total") or 0)
                     except (TypeError, ValueError):
                         montant = 0.0
-                    qte = 1
-                    prix_unitaire = round(montant, 2)
-                else:
-                    qte = 0
-                    prix_unitaire = 0
+                    sous_traitant_type = "Soumission"
+                    sous_traitant_montant = round(montant, 2)
+                    nom = (s.get("entrepreneur") or s.get("nom_entrepreneur")
+                           or s.get("sous_traitant_nom") or "").strip()
+                    sous_traitant_nom = nom or None
 
                 # Idempotence sur (projet_id, section, description, source_file,
                 # type_source). Vérif explicite — si la ligne existe, on SKIP
@@ -627,13 +636,16 @@ def register_ad_budget_routes(get_conn):
                     """
                     INSERT INTO ad_budget.budget_lignes
                       (projet_id, section, description, unite, prix_unitaire,
-                       qte, ajustement_pct, note, actif, source_file, type_source)
-                    VALUES (%s, %s, %s, 'global', %s, %s, 0, %s, TRUE, %s, %s)
+                       qte, ajustement_pct, note, actif, source_file, type_source,
+                       sous_traitant_type, sous_traitant_montant, sous_traitant_nom)
+                    VALUES (%s, %s, %s, 'global', %s, %s, 0, %s, TRUE, %s, %s,
+                            %s, %s, %s)
                     """,
                     (
                         project_id, section, description,
                         prix_unitaire, qte, note_text,
                         source_file, type_source,
+                        sous_traitant_type, sous_traitant_montant, sous_traitant_nom,
                     ),
                 )
                 lines_added += 1
@@ -837,10 +849,14 @@ def register_ad_budget_routes(get_conn):
             INSERT INTO ad_budget.budget_lignes
               (projet_id, source_item_id, section, description, unite, prix_unitaire,
                qte, ajustement_pct, note, actif,
-               heures, taux_horaire, cout_sous_traitant, sous_traitant_nom)
+               heures, taux_horaire, cout_sous_traitant, sous_traitant_nom,
+               ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
+               sous_traitant_type, sous_traitant_montant)
             SELECT %s, source_item_id, section, description, unite, prix_unitaire,
                    qte, ajustement_pct, note, actif,
-                   heures, taux_horaire, cout_sous_traitant, sous_traitant_nom
+                   heures, taux_horaire, cout_sous_traitant, sous_traitant_nom,
+                   ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
+                   sous_traitant_type, sous_traitant_montant
             FROM ad_budget.budget_lignes
             WHERE projet_id = %s
         """, (new_id, projet_id))
@@ -861,8 +877,11 @@ def register_ad_budget_routes(get_conn):
             conn.close()
             raise HTTPException(status_code=404, detail="Projet not found")
         cur.execute("""
-            SELECT section, description, unite, qte, prix_unitaire, ajustement_pct,
-                   heures, taux_horaire, cout_sous_traitant, sous_traitant_nom, note
+            SELECT section, description, unite, qte, prix_unitaire,
+                   ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
+                   heures, taux_horaire,
+                   sous_traitant_type, sous_traitant_montant, sous_traitant_nom,
+                   note
             FROM ad_budget.budget_lignes
             WHERE projet_id = %s
             ORDER BY section, description
@@ -874,43 +893,57 @@ def register_ad_budget_routes(get_conn):
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Budget"
+        # Une seule rangée d'entêtes : pas de header de groupe (Excel rendrait
+        # mal en sortie standard). Les colonnes sont nommées explicitement.
         ws.append([
-            "Section", "Description", "Unité", "Quantité",
-            "Coût matériel", "Heures", "Taux $", "S/T M-O",
-            "Sous-traitant $", "Sous-traitant",
-            "Ajustement %", "Total", "Note",
+            "Section", "Description", "Unité", "Qté",
+            "Coût unitaire", "Ajust. mat. %", "S/T matériaux",
+            "Heures", "Taux $", "Ajust. M-O %", "S/T main-d'œuvre",
+            "Type S-T", "Sous-traitant", "Montant S-T", "Ajust. S-T %", "S/T sous-traitant",
+            "Total ligne", "Note",
         ])
 
-        total_general = 0.0
-        total_materiel = 0.0
+        total_materiaux = 0.0
         total_mo = 0.0
         total_st = 0.0
         for l in lignes:
             qte = float(l["qte"] or 0)
             prix = float(l["prix_unitaire"] or 0)
-            adj = float(l["ajustement_pct"] or 0)
+            ajm = float(l["ajust_materiaux"] or 0)
             heures = float(l["heures"] or 0)
             taux = float(l["taux_horaire"] or 0)
-            cout_st = float(l["cout_sous_traitant"] or 0)
-            st_mo = heures * taux
-            sous_total = qte * prix + st_mo + cout_st
-            total = sous_total * (1 + adj / 100)
-            total_general += total
-            total_materiel += qte * prix
+            ajmo = float(l["ajust_main_oeuvre"] or 0)
+            st_montant = float(l["sous_traitant_montant"] or 0)
+            ajst = float(l["ajust_sous_traitant"] or 0)
+            # Formules de la refonte 3 sections : ajustement appliqué par
+            # section, total ligne = somme des 3 sous-totaux. M-O et S-T ne
+            # sont PAS multipliés par qte (contrairement aux matériaux).
+            st_mat = qte * prix * (1 + ajm / 100)
+            st_mo = heures * taux * (1 + ajmo / 100)
+            st_st = st_montant * (1 + ajst / 100)
+            total_ligne = st_mat + st_mo + st_st
+            total_materiaux += st_mat
             total_mo += st_mo
-            total_st += cout_st
+            total_st += st_st
             ws.append([
                 l["section"], l["description"], l["unite"], qte,
-                prix, heures, taux, st_mo,
-                cout_st, l["sous_traitant_nom"] or "",
-                adj, total, l["note"] or "",
+                prix, ajm, st_mat,
+                heures, taux, ajmo, st_mo,
+                l["sous_traitant_type"] or "", l["sous_traitant_nom"] or "",
+                st_montant, ajst, st_st,
+                total_ligne, l["note"] or "",
             ])
 
+        total_general = total_materiaux + total_mo + total_st
         ws.append([])
-        ws.append(["", "", "", "", "", "", "", "", "", "", "Dont matériel", total_materiel, ""])
-        ws.append(["", "", "", "", "", "", "", "", "", "", "Dont main-d'œuvre", total_mo, ""])
-        ws.append(["", "", "", "", "", "", "", "", "", "", "Dont sous-traitant", total_st, ""])
-        ws.append(["", "", "", "", "", "", "", "", "", "", "TOTAL", total_general, ""])
+        ws.append(["", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                   "Coût total matériaux", total_materiaux, ""])
+        ws.append(["", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                   "Coût total main-d'œuvre", total_mo, ""])
+        ws.append(["", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                   "Coût total sous-traitant", total_st, ""])
+        ws.append(["", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                   "TOTAL GÉNÉRAL", total_general, ""])
 
         buf = io.BytesIO()
         wb.save(buf)
@@ -964,6 +997,8 @@ def register_ad_budget_routes(get_conn):
             f"""
             SELECT section, description, unite, qte, prix_unitaire, ajustement_pct,
                    heures, taux_horaire, cout_sous_traitant, sous_traitant_nom,
+                   ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
+                   sous_traitant_type, sous_traitant_montant,
                    sous_total, total, note
             FROM ad_budget.budget_lignes
             WHERE {' AND '.join(where)}
@@ -1105,43 +1140,50 @@ def register_ad_budget_routes(get_conn):
         def cell(text):
             return Paragraph(str(text), cell_style)
 
-        # Colonnes disponibles. prix_unitaire = "Coût matériel" (le label
-        # change mais on garde le nom de colonne BD). heures/taux_horaire/
-        # cout_sous_traitant/sous_traitant_nom sont opt-in (pas dans le set
-        # par défaut) pour ne pas casser la mise en page existante.
+        # Colonnes disponibles — refonte 3 sections (matériaux / M-O / S-T).
+        # Les colonnes par section sont opt-in (pas dans _default_cols) pour
+        # ne pas casser la mise en page PDF existante. ajustement_pct (ancien
+        # ajustement global) est conservé pour compat mais n'est plus posé
+        # par la nouvelle UI ; les ajust_* par section le remplacent.
         ALL_COLS = [
-            "section", "description", "qte", "unite", "prix_unitaire",
-            "heures", "taux_horaire", "cout_sous_traitant", "sous_traitant_nom",
+            "section", "description", "qte", "unite",
+            "prix_unitaire", "ajust_materiaux",
+            "heures", "taux_horaire", "ajust_main_oeuvre",
+            "sous_traitant_type", "sous_traitant_nom",
+            "sous_traitant_montant", "ajust_sous_traitant",
             "sous_total", "ajustement_pct", "total", "note",
         ]
         COL_LABELS = {
             "section": "Section", "description": "Description", "qte": "Qté",
-            "unite": "Unité", "prix_unitaire": "Coût matériel",
+            "unite": "Unité",
+            "prix_unitaire": "Coût u.", "ajust_materiaux": "Aj. mat.",
             "heures": "Heures", "taux_horaire": "Taux $",
-            "cout_sous_traitant": "S/T $", "sous_traitant_nom": "Sous-traitant",
+            "ajust_main_oeuvre": "Aj. M-O",
+            "sous_traitant_type": "Type S-T", "sous_traitant_nom": "Sous-traitant",
+            "sous_traitant_montant": "Mt S-T", "ajust_sous_traitant": "Aj. S-T",
             "sous_total": "S/T", "ajustement_pct": "Adj %",
             "total": "Total", "note": "Note",
         }
-        # Largeurs de base (somme 518 pour les colonnes par défaut) — mises
-        # à l'échelle pour remplir la largeur disponible.
         _col_widths_base = {
             "section": 55, "description": 130, "qte": 28, "unite": 30,
-            "prix_unitaire": 50,
-            "heures": 30, "taux_horaire": 35,
-            "cout_sous_traitant": 45, "sous_traitant_nom": 70,
+            "prix_unitaire": 45, "ajust_materiaux": 30,
+            "heures": 30, "taux_horaire": 35, "ajust_main_oeuvre": 30,
+            "sous_traitant_type": 45, "sous_traitant_nom": 70,
+            "sous_traitant_montant": 45, "ajust_sous_traitant": 30,
             "sous_total": 55, "ajustement_pct": 30,
             "total": 60, "note": 80,
         }
-        # Colonnes affichées par défaut (sans les opt-in M-O / sous-traitant)
+        # Colonnes affichées par défaut — vue compacte historique.
         _default_cols = {
             "section", "description", "qte", "unite", "prix_unitaire",
             "sous_total", "ajustement_pct", "total", "note",
         }
-        # Le scale est calculé sur la sélection effective plus bas pour que
-        # l'ajout des colonnes opt-in ne réduise pas les colonnes par défaut.
         PRIX_DEPENDENT = {
-            "prix_unitaire", "heures", "taux_horaire", "cout_sous_traitant",
-            "sous_traitant_nom", "sous_total", "ajustement_pct", "total", "note",
+            "prix_unitaire", "ajust_materiaux",
+            "heures", "taux_horaire", "ajust_main_oeuvre",
+            "sous_traitant_type", "sous_traitant_nom",
+            "sous_traitant_montant", "ajust_sous_traitant",
+            "sous_total", "ajustement_pct", "total", "note",
         }
 
         if colonnes:
@@ -1158,16 +1200,22 @@ def register_ad_budget_routes(get_conn):
         _scale = total_w / sum(_col_widths_base[c] for c in selected)
         col_widths = [_col_widths_base[c] * _scale for c in selected]
 
-        def cell_for(col, l, qte, prix, adj, st, tot, heures, taux, st_mo, cout_st):
+        def cell_for(col, l, qte, prix, adj, st, tot,
+                     heures, taux, st_mo, st_montant,
+                     ajm, ajmo, ajst):
             if col == "section": return l["section"] or ""
             if col == "description": return cell(l["description"] or "")
             if col == "qte": return f"{qte:g}"
             if col == "unite": return l["unite"] or ""
             if col == "prix_unitaire": return f"{prix:,.2f}"
+            if col == "ajust_materiaux": return f"{ajm:g}"
             if col == "heures": return f"{heures:g}"
             if col == "taux_horaire": return f"{taux:,.2f}"
-            if col == "cout_sous_traitant": return f"{cout_st:,.2f}"
+            if col == "ajust_main_oeuvre": return f"{ajmo:g}"
+            if col == "sous_traitant_type": return l["sous_traitant_type"] or ""
             if col == "sous_traitant_nom": return cell(l["sous_traitant_nom"] or "")
+            if col == "sous_traitant_montant": return f"{st_montant:,.2f}"
+            if col == "ajust_sous_traitant": return f"{ajst:g}"
             if col == "sous_total": return f"{st:,.2f}"
             if col == "ajustement_pct": return f"{adj:g}"
             if col == "total": return f"{tot:,.2f}"
@@ -1226,28 +1274,42 @@ def register_ad_budget_routes(get_conn):
             for l in sec_lignes:
                 qte = _effective_qte(l, mobilisation, surface_plancher,
                                      surface_mur_calc, surface_gypse_calc)
-                if qte <= 0:
-                    continue  # cohérent avec la page projet qui filtre qte > 0
-                prix = float(l["prix_unitaire"] or 0)
-                adj = float(l["ajustement_pct"] or 0)
+                # Avec la refonte 3 sections, une ligne peut être active sans
+                # qte > 0 (ex. ligne pure sous-traitant). On garde le filtre
+                # qte > 0 historique mais on l'élargit aux lignes M-O / S-T.
                 heures = float(l["heures"] or 0)
                 taux = float(l["taux_horaire"] or 0)
-                cout_st = float(l["cout_sous_traitant"] or 0)
-                # Sous-total = matériel + main-d'œuvre + sous-traitant.
-                st_mo = heures * taux
-                st = qte * prix + st_mo + cout_st
+                ajmo = float(l["ajust_main_oeuvre"] or 0)
+                st_montant = float(l["sous_traitant_montant"] or 0)
+                ajst = float(l["ajust_sous_traitant"] or 0)
+                has_mo = heures > 0 and taux > 0
+                has_st = st_montant > 0
+                if qte <= 0 and not has_mo and not has_st:
+                    continue
+                prix = float(l["prix_unitaire"] or 0)
+                ajm = float(l["ajust_materiaux"] or 0)
+                adj = float(l["ajustement_pct"] or 0)
+                st_mat = qte * prix * (1 + ajm / 100)
+                st_mo = heures * taux * (1 + ajmo / 100)
+                st_st = st_montant * (1 + ajst / 100)
+                # Sous-total ligne = somme des 3 sous-totaux par section.
+                st = st_mat + st_mo + st_st
+                # tot_real = total brut. ajustement_pct historique reste appliqué
+                # pour rétro-compat des projets antérieurs à la refonte ; sera
+                # à 0 sur les nouvelles saisies.
                 tot_real = st * (1 + adj / 100)
                 gkey = _group_key_for(_section_prefix_n(l["section"]))
                 factor = group_factors.get(gkey, 1) if gkey is not None else 1
                 tot = tot_real * factor  # gonflé si admin distribué
-                sec_total += tot  # le sous-total par section CSI reflète l'affichage
+                sec_total += tot
                 if gkey is not None:
-                    group_subtotals[gkey] += tot_real  # on garde la valeur RÉELLE
+                    group_subtotals[gkey] += tot_real
                 else:
                     non_grouped_total += tot_real
-                # Le S/T par ligne (st) reste matériel+M-O+S/T (non gonflé) — seul le Total l'est.
                 table_data.append([
-                    cell_for(c, l, qte, prix, adj, st, tot, heures, taux, st_mo, cout_st)
+                    cell_for(c, l, qte, prix, adj, st, tot,
+                             heures, taux, st_mo, st_montant,
+                             ajm, ajmo, ajst)
                     for c in selected
                 ])
                 section_has_visible_lines = True
@@ -1502,8 +1564,23 @@ def register_ad_budget_routes(get_conn):
         conn.close()
         return {"status": "imported", "count": inserted}
 
+    # Valeurs autorisées pour sous_traitant_type. None / "" = vide.
+    SOUS_TRAITANT_TYPES = {"Budget", "Soumission", "BSDQ", "Allocation"}
+
     @router.put("/projets/{projet_id}/lignes/{ligne_id}")
     def update_budget_ligne(projet_id: int, ligne_id: int, data: dict):
+        # Validation du type de sous-traitant. On accepte vide / null ou un
+        # des types whitelist — refus 400 sur valeur inconnue pour éviter
+        # qu'une typo silencieuse pollue la BD.
+        if "sous_traitant_type" in data:
+            v = data["sous_traitant_type"]
+            if v not in (None, "") and v not in SOUS_TRAITANT_TYPES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"sous_traitant_type doit être un de {sorted(SOUS_TRAITANT_TYPES)} ou vide",
+                )
+            if v == "":
+                data["sous_traitant_type"] = None
         conn = get_conn()
         cur = conn.cursor()
         fields = []
@@ -1514,6 +1591,9 @@ def register_ad_budget_routes(get_conn):
             # Ventilation tri-axiale matériel / main-d'œuvre / sous-traitant.
             # prix_unitaire conserve son nom mais représente le coût matériel.
             "heures", "taux_horaire", "cout_sous_traitant", "sous_traitant_nom",
+            # Refonte 3 sections : ajust % par section + type et montant S-T.
+            "ajust_materiaux", "ajust_main_oeuvre", "ajust_sous_traitant",
+            "sous_traitant_type", "sous_traitant_montant",
         ]:
             if field in data:
                 fields.append(f"{field} = %s")

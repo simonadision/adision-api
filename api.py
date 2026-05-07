@@ -49,6 +49,28 @@ def _ensure_schema():
             "ADD COLUMN IF NOT EXISTS cout_sous_traitant NUMERIC(12,2) DEFAULT 0, "
             "ADD COLUMN IF NOT EXISTS sous_traitant_nom TEXT DEFAULT NULL"
         )
+        # Refonte 3 sections (matériaux / M-O / sous-traitant) : ajustement %
+        # par section + type et montant explicite pour le sous-traitant.
+        # sous_traitant_montant remplace fonctionnellement cout_sous_traitant
+        # dans la nouvelle UI ; on garde l'ancienne colonne pour rétro-compat.
+        cur.execute(
+            "ALTER TABLE ad_budget.budget_lignes "
+            "ADD COLUMN IF NOT EXISTS ajust_materiaux NUMERIC(5,2) DEFAULT 0, "
+            "ADD COLUMN IF NOT EXISTS ajust_main_oeuvre NUMERIC(5,2) DEFAULT 0, "
+            "ADD COLUMN IF NOT EXISTS ajust_sous_traitant NUMERIC(5,2) DEFAULT 0, "
+            "ADD COLUMN IF NOT EXISTS sous_traitant_type TEXT DEFAULT NULL, "
+            "ADD COLUMN IF NOT EXISTS sous_traitant_montant NUMERIC(12,2) DEFAULT 0"
+        )
+        # One-shot : copier les valeurs existantes de cout_sous_traitant vers
+        # sous_traitant_montant pour ne pas perdre la donnée si le déploiement
+        # précédent en a saisi. WHERE évite d'écraser des valeurs déjà
+        # renseignées dans la nouvelle colonne.
+        cur.execute(
+            "UPDATE ad_budget.budget_lignes "
+            "SET sous_traitant_montant = cout_sous_traitant "
+            "WHERE COALESCE(sous_traitant_montant, 0) = 0 "
+            "  AND COALESCE(cout_sous_traitant, 0) <> 0"
+        )
         conn.commit()
         cur.close()
         conn.close()
