@@ -130,6 +130,69 @@ def _ensure_schema():
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_projet_statut ON ad_budget.projets(statut)"
         )
+        # === Sprint B : table app_ana.project_snapshots ===
+        # Snapshot du budget figé au moment où le projet bascule sur un statut
+        # définitif (adjuge / complet / perdu). Consommé par Ad ANA pour les
+        # analyses cross-projets (Sprint C).
+        cur.execute("CREATE SCHEMA IF NOT EXISTS app_ana")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_ana.project_snapshots (
+                id SERIAL PRIMARY KEY,
+                projet_id INTEGER NOT NULL,
+                nom_projet VARCHAR(255),
+                client_nom VARCHAR(255),
+                statut VARCHAR(20) NOT NULL,
+                type_batiment VARCHAR(20),
+                region VARCHAR(50),
+                date_adjudication DATE,
+                superficie_m2 NUMERIC(10,2),
+                budget_lines_jsonb JSONB NOT NULL,
+                aggregates_jsonb JSONB NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                trigger_event VARCHAR(50) NOT NULL,
+                schema_version INTEGER NOT NULL DEFAULT 1,
+                is_latest BOOLEAN NOT NULL DEFAULT TRUE
+            )
+            """
+        )
+        # Indexes sur les colonnes que Ad ANA filtrera. Tous IF NOT EXISTS.
+        for idx_sql in (
+            "CREATE INDEX IF NOT EXISTS idx_snapshots_projet_id "
+            "ON app_ana.project_snapshots(projet_id)",
+            "CREATE INDEX IF NOT EXISTS idx_snapshots_statut "
+            "ON app_ana.project_snapshots(statut)",
+            "CREATE INDEX IF NOT EXISTS idx_snapshots_type_batiment "
+            "ON app_ana.project_snapshots(type_batiment)",
+            "CREATE INDEX IF NOT EXISTS idx_snapshots_region "
+            "ON app_ana.project_snapshots(region)",
+            "CREATE INDEX IF NOT EXISTS idx_snapshots_client_nom "
+            "ON app_ana.project_snapshots(client_nom)",
+            "CREATE INDEX IF NOT EXISTS idx_snapshots_date_adjudication "
+            "ON app_ana.project_snapshots(date_adjudication)",
+            # Partial index sur is_latest = TRUE : permet de retrouver vite le
+            # snapshot courant d'un projet sans scan complet.
+            "CREATE INDEX IF NOT EXISTS idx_snapshots_is_latest "
+            "ON app_ana.project_snapshots(is_latest) WHERE is_latest = TRUE",
+            # GIN sur aggregates_jsonb : Ad ANA pourra filtrer par champ JSON
+            # (ex: aggregates_jsonb->'totals'->>'general' > 100000).
+            "CREATE INDEX IF NOT EXISTS idx_snapshots_aggregates_gin "
+            "ON app_ana.project_snapshots USING GIN (aggregates_jsonb)",
+        ):
+            cur.execute(idx_sql)
+        # FK projet.dernier_snapshot_id -> app_ana.project_snapshots(id) avec
+        # ON DELETE SET NULL : si un snapshot est purgé (impossible via API
+        # actuelle, mais possible en intervention manuelle), le projet ne
+        # casse pas, sa FK passe à NULL.
+        cur.execute(
+            "ALTER TABLE ad_budget.projets "
+            "DROP CONSTRAINT IF EXISTS projet_dernier_snapshot_fk"
+        )
+        cur.execute(
+            "ALTER TABLE ad_budget.projets ADD CONSTRAINT projet_dernier_snapshot_fk "
+            "FOREIGN KEY (dernier_snapshot_id) "
+            "REFERENCES app_ana.project_snapshots(id) ON DELETE SET NULL"
+        )
         conn.commit()
         cur.close()
         conn.close()

@@ -1,5 +1,6 @@
 import base64
 import io
+import json
 import os
 import re
 from collections import OrderedDict
@@ -9,8 +10,9 @@ from typing import Optional
 import openpyxl
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import Json, RealDictCursor
 
+from modules.aggregates import adapt_budget_lines, compute_aggregates
 from modules.auth_jwt import make_jwt_deps
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import landscape, letter
@@ -61,6 +63,13 @@ ALLOWED_REGIONS = {
 }
 DATE_ADJ_ALLOWED_FOR_STATUTS = {"adjuge", "complet", "perdu"}
 
+# === Sprint B : statuts qui figent le budget (snapshot dans app_ana) ===
+# Quand un projet bascule depuis un statut hors de ce set vers un statut dedans,
+# le hook PUT /projets/{id} declenche la creation d'un snapshot consomme par
+# Ad ANA. Note : le set est identique a DATE_ADJ_ALLOWED_FOR_STATUTS, mais
+# semantiquement different (figement vs UI date picker), donc constante separee.
+DEFINITIVE_STATUSES = {"adjuge", "complet", "perdu"}
+
 
 def _validate_projet_fields(data: dict, current_statut: Optional[str] = None) -> None:
     """Valide les champs Sprint A dans `data`. Lève HTTPException 400 si invalide.
@@ -99,6 +108,94 @@ def _validate_projet_fields(data: dict, current_statut: Optional[str] = None) ->
                 status_code=400,
                 detail="Date d'adjudication non autorisée pour ce statut",
             )
+
+
+def _json_dumps_with_default(obj):
+    """Sérialiseur JSON tolérant : Decimal et date deviennent des strings.
+    Utilisé pour persister budget_lines_jsonb (rows BD bruts contenant
+    Decimal et date) et aggregates_jsonb dans app_ana.project_snapshots.
+    """
+    return json.dumps(obj, default=str)
+
+
+def _create_snapshot(cur, projet_row, trigger_event: str) -> int:
+    """Crée un snapshot du projet dans app_ana.project_snapshots et le marque
+    is_latest=TRUE. Marque les anciens snapshots du même projet à FALSE et
+    met à jour ad_budget.projets.dernier_snapshot_id.
+
+    `cur` est un curseur (RealDictCursor) déjà ouvert sur la transaction
+    en cours. NE COMMIT PAS — l'appelant gère la transaction.
+    Retourne l'id du snapshot créé.
+    """
+    projet_id = projet_row["id"]
+
+    # 1. Récupérer les budget_lignes courantes (rows BD bruts)
+    cur.execute(
+        "SELECT * FROM ad_budget.budget_lignes WHERE projet_id = %s "
+        "ORDER BY section, description",
+        (projet_id,),
+    )
+    budget_rows = cur.fetchall()
+    # RealDictRow -> dict pour serialisation JSON propre
+    budget_lines_raw = [dict(r) for r in budget_rows]
+
+    # 2. Adapter au format aggregate (mat/mo/st nested) puis calculer
+    aggregate_lines = adapt_budget_lines(budget_lines_raw)
+    superficie = projet_row.get("superficie_m2")
+    aggregates = compute_aggregates(
+        aggregate_lines,
+        {
+            "superficie_m2": float(superficie)
+            if superficie is not None
+            else None
+        },
+    )
+
+    # 3. Marquer les snapshots précédents de ce projet comme non-latest.
+    # Limité à WHERE is_latest = TRUE (touche au plus 1 row en pratique
+    # grâce à l'invariant maintenu par cette fonction elle-même).
+    cur.execute(
+        "UPDATE app_ana.project_snapshots SET is_latest = FALSE "
+        "WHERE projet_id = %s AND is_latest = TRUE",
+        (projet_id,),
+    )
+
+    # 4. Insérer le nouveau snapshot
+    cur.execute(
+        """
+        INSERT INTO app_ana.project_snapshots (
+            projet_id, nom_projet, client_nom, statut, type_batiment,
+            region, date_adjudication, superficie_m2,
+            budget_lines_jsonb, aggregates_jsonb,
+            trigger_event, schema_version, is_latest
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+        RETURNING id
+        """,
+        (
+            projet_id,
+            projet_row.get("nom"),
+            projet_row.get("nom_client") or projet_row.get("client"),
+            projet_row["statut"],
+            projet_row.get("type_batiment"),
+            projet_row.get("region"),
+            projet_row.get("date_adjudication"),
+            projet_row.get("superficie_m2"),
+            Json(budget_lines_raw, dumps=_json_dumps_with_default),
+            Json(aggregates, dumps=_json_dumps_with_default),
+            trigger_event,
+            aggregates.get("schema_version", 1),
+        ),
+    )
+    snapshot_id = cur.fetchone()["id"]
+
+    # 5. Mettre à jour la FK projet.dernier_snapshot_id (FK est ON DELETE
+    # SET NULL côté BD, donc cohérent même si le snapshot est purgé).
+    cur.execute(
+        "UPDATE ad_budget.projets SET dernier_snapshot_id = %s WHERE id = %s",
+        (snapshot_id, projet_id),
+    )
+
+    return snapshot_id
 
 
 def _effective_qte(ligne, mobilisation, surface_plancher, surface_mur, surface_gypse):
@@ -908,6 +1005,22 @@ def register_ad_budget_routes(get_conn):
         values.append(projet_id)
         cur.execute(sql, values)
         updated = cur.fetchone()
+
+        # Sprint B : detecter la transition vers un statut definitif
+        # (adjuge / complet / perdu) et figer le budget dans un snapshot.
+        # Tout dans la meme transaction : si la creation du snapshot echoue,
+        # l'UPDATE projet sera rollback aussi.
+        old_statut = existing["statut"]
+        new_statut = updated["statut"]
+        if (
+            old_statut not in DEFINITIVE_STATUSES
+            and new_statut in DEFINITIVE_STATUSES
+        ):
+            snapshot_id = _create_snapshot(
+                cur, updated, f"statut_change_to_{new_statut}"
+            )
+            updated["dernier_snapshot_id"] = snapshot_id
+
         conn.commit()
         cur.close()
         conn.close()
@@ -1639,6 +1752,63 @@ def register_ad_budget_routes(get_conn):
             media_type="application/pdf",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
+
+    # ══════════════════════════════════════════════════════════
+    # SNAPSHOTS (Sprint B - app_ana.project_snapshots)
+    # ══════════════════════════════════════════════════════════
+    # Colonnes retournées par défaut par les endpoints snapshots ; on omet
+    # budget_lines_jsonb qui est lourd. Opt-in via ?include_lines=true.
+    _SNAPSHOT_DEFAULT_COLS = (
+        "id, projet_id, nom_projet, client_nom, statut, type_batiment, "
+        "region, date_adjudication, superficie_m2, aggregates_jsonb, "
+        "created_at, trigger_event, schema_version, is_latest"
+    )
+
+    @router.get("/projets/{projet_id}/snapshots")
+    def list_projet_snapshots(projet_id: int, include_lines: bool = False):
+        """Liste tous les snapshots d'un projet, du plus récent au plus ancien.
+
+        budget_lines_jsonb est OMIS par défaut (champ lourd). Opt-in via
+        ?include_lines=true (utile pour Ad ANA recalcul).
+        """
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        columns = _SNAPSHOT_DEFAULT_COLS
+        if include_lines:
+            columns += ", budget_lines_jsonb"
+        cur.execute(
+            f"SELECT {columns} FROM app_ana.project_snapshots "
+            "WHERE projet_id = %s ORDER BY created_at DESC",
+            (projet_id,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return rows
+
+    @router.get("/projets/{projet_id}/snapshots/latest")
+    def get_latest_snapshot(projet_id: int, include_lines: bool = False):
+        """Retourne le snapshot le plus récent (is_latest = TRUE) du projet.
+        404 si aucun snapshot n'existe.
+        """
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        columns = _SNAPSHOT_DEFAULT_COLS
+        if include_lines:
+            columns += ", budget_lines_jsonb"
+        cur.execute(
+            f"SELECT {columns} FROM app_ana.project_snapshots "
+            "WHERE projet_id = %s AND is_latest = TRUE LIMIT 1",
+            (projet_id,),
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if not row:
+            raise HTTPException(
+                status_code=404, detail="Aucun snapshot pour ce projet"
+            )
+        return row
 
     # ══════════════════════════════════════════════════════════
     # BUDGET LIGNES (items du budget d'un projet)
