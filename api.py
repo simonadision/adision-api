@@ -6,6 +6,7 @@ from sqlalchemy import create_engine
 import pandas as pd
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from modules.ad_ana_api import register_ad_ana_routes
 from modules.ad_budget_api import register_ad_budget_routes
 from modules.auth_jwt import make_jwt_deps
 import os
@@ -222,6 +223,7 @@ app.add_middleware(
 )
 
 app.include_router(register_ad_budget_routes(get_conn))
+app.include_router(register_ad_ana_routes(get_conn))
 
 # JWT auth deps (vérifie signature + module ad_bud, auto-provisionne dans
 # ad_budget.users).
