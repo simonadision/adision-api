@@ -134,4 +134,82 @@ def register_ad_ana_routes(get_conn):
             "offset": offset,
         }
 
+    @router.get("/comparator/{projet_id}")
+    def comparator(projet_id: int, top_n: int = 5):
+        """Trouve les snapshots les plus similaires au snapshot is_latest du
+        projet de référence. Score de similarité (max 95) :
+          - Type bâtiment match exact (et non NULL) : +50
+          - Région match exact (et non NULL) : +20
+          - Superficie ±20% : +20  (sinon ±50% : +10)
+          - Client_nom match exact (et non NULL) : +5
+
+        Renvoie la référence + top_n candidats (clamp 1-20) avec score > 0.
+        """
+        top_n = max(1, min(int(top_n), 20))
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            # 1. Snapshot de référence (is_latest du projet demandé)
+            cur.execute(
+                f"SELECT {_SNAPSHOT_LIST_COLS} "
+                f"FROM app_ana.project_snapshots "
+                f"WHERE projet_id = %s AND is_latest = TRUE LIMIT 1",
+                (projet_id,),
+            )
+            ref = cur.fetchone()
+            if not ref:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Aucun snapshot pour ce projet (le projet doit "
+                    "etre passe en statut adjuge/complet/perdu).",
+                )
+
+            # 2. Tous les autres snapshots is_latest
+            cur.execute(
+                f"SELECT {_SNAPSHOT_LIST_COLS} "
+                f"FROM app_ana.project_snapshots "
+                f"WHERE is_latest = TRUE AND projet_id <> %s",
+                (projet_id,),
+            )
+            candidates = cur.fetchall()
+        finally:
+            cur.close()
+            conn.close()
+
+        # 3. Scorer chaque candidat
+        ref_type = ref.get("type_batiment")
+        ref_region = ref.get("region")
+        ref_surf = ref.get("superficie_m2")
+        ref_client = ref.get("client_nom")
+        ref_surf_f = float(ref_surf) if ref_surf is not None else None
+
+        scored = []
+        for c in candidates:
+            score = 0
+            if c["type_batiment"] and c["type_batiment"] == ref_type:
+                score += 50
+            if c["region"] and c["region"] == ref_region:
+                score += 20
+            c_surf = c.get("superficie_m2")
+            if ref_surf_f and c_surf is not None:
+                ratio = float(c_surf) / ref_surf_f
+                if 0.8 <= ratio <= 1.2:
+                    score += 20
+                elif 0.5 <= ratio <= 2.0:
+                    score += 10
+            if c["client_nom"] and c["client_nom"] == ref_client:
+                score += 5
+            if score > 0:
+                # Mutate the dict to add score (RealDictRow accepte ça)
+                c_with_score = dict(c)
+                c_with_score["score"] = score
+                scored.append(c_with_score)
+
+        scored.sort(key=lambda x: -x["score"])
+        return {
+            "reference": dict(ref),
+            "similar": scored[:top_n],
+            "candidates_evaluated": len(candidates),
+        }
+
     return router
