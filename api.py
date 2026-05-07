@@ -39,6 +39,16 @@ def _ensure_schema():
             "ALTER TABLE ad_budget.budget_lignes "
             "ADD COLUMN IF NOT EXISTS type_source TEXT"
         )
+        # Ventilation tri-axiale : prix_unitaire = matériel ; les colonnes
+        # ci-dessous ajoutent la main-d'œuvre (heures × taux) et le
+        # sous-traitant (montant + nom pour autocomplétion).
+        cur.execute(
+            "ALTER TABLE ad_budget.budget_lignes "
+            "ADD COLUMN IF NOT EXISTS heures NUMERIC(10,2) DEFAULT 0, "
+            "ADD COLUMN IF NOT EXISTS taux_horaire NUMERIC(10,2) DEFAULT 0, "
+            "ADD COLUMN IF NOT EXISTS cout_sous_traitant NUMERIC(12,2) DEFAULT 0, "
+            "ADD COLUMN IF NOT EXISTS sous_traitant_nom TEXT DEFAULT NULL"
+        )
         conn.commit()
         cur.close()
         conn.close()

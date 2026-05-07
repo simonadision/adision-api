@@ -835,8 +835,12 @@ def register_ad_budget_routes(get_conn):
         new_id = new_projet["id"]
         cur.execute("""
             INSERT INTO ad_budget.budget_lignes
-              (projet_id, source_item_id, section, description, unite, prix_unitaire, qte, ajustement_pct, note, actif)
-            SELECT %s, source_item_id, section, description, unite, prix_unitaire, qte, ajustement_pct, note, actif
+              (projet_id, source_item_id, section, description, unite, prix_unitaire,
+               qte, ajustement_pct, note, actif,
+               heures, taux_horaire, cout_sous_traitant, sous_traitant_nom)
+            SELECT %s, source_item_id, section, description, unite, prix_unitaire,
+                   qte, ajustement_pct, note, actif,
+                   heures, taux_horaire, cout_sous_traitant, sous_traitant_nom
             FROM ad_budget.budget_lignes
             WHERE projet_id = %s
         """, (new_id, projet_id))
@@ -857,7 +861,8 @@ def register_ad_budget_routes(get_conn):
             conn.close()
             raise HTTPException(status_code=404, detail="Projet not found")
         cur.execute("""
-            SELECT section, description, unite, qte, prix_unitaire, ajustement_pct, note
+            SELECT section, description, unite, qte, prix_unitaire, ajustement_pct,
+                   heures, taux_horaire, cout_sous_traitant, sous_traitant_nom, note
             FROM ad_budget.budget_lignes
             WHERE projet_id = %s
             ORDER BY section, description
@@ -869,19 +874,43 @@ def register_ad_budget_routes(get_conn):
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Budget"
-        ws.append(["Section", "Description", "Unité", "Quantité", "Prix unitaire", "Ajustement %", "Total", "Note"])
+        ws.append([
+            "Section", "Description", "Unité", "Quantité",
+            "Coût matériel", "Heures", "Taux $", "S/T M-O",
+            "Sous-traitant $", "Sous-traitant",
+            "Ajustement %", "Total", "Note",
+        ])
 
         total_general = 0.0
+        total_materiel = 0.0
+        total_mo = 0.0
+        total_st = 0.0
         for l in lignes:
             qte = float(l["qte"] or 0)
             prix = float(l["prix_unitaire"] or 0)
             adj = float(l["ajustement_pct"] or 0)
-            total = qte * prix * (1 + adj / 100)
+            heures = float(l["heures"] or 0)
+            taux = float(l["taux_horaire"] or 0)
+            cout_st = float(l["cout_sous_traitant"] or 0)
+            st_mo = heures * taux
+            sous_total = qte * prix + st_mo + cout_st
+            total = sous_total * (1 + adj / 100)
             total_general += total
-            ws.append([l["section"], l["description"], l["unite"], qte, prix, adj, total, l["note"] or ""])
+            total_materiel += qte * prix
+            total_mo += st_mo
+            total_st += cout_st
+            ws.append([
+                l["section"], l["description"], l["unite"], qte,
+                prix, heures, taux, st_mo,
+                cout_st, l["sous_traitant_nom"] or "",
+                adj, total, l["note"] or "",
+            ])
 
         ws.append([])
-        ws.append(["", "", "", "", "", "TOTAL", total_general, ""])
+        ws.append(["", "", "", "", "", "", "", "", "", "", "Dont matériel", total_materiel, ""])
+        ws.append(["", "", "", "", "", "", "", "", "", "", "Dont main-d'œuvre", total_mo, ""])
+        ws.append(["", "", "", "", "", "", "", "", "", "", "Dont sous-traitant", total_st, ""])
+        ws.append(["", "", "", "", "", "", "", "", "", "", "TOTAL", total_general, ""])
 
         buf = io.BytesIO()
         wb.save(buf)
@@ -934,6 +963,7 @@ def register_ad_budget_routes(get_conn):
         cur.execute(
             f"""
             SELECT section, description, unite, qte, prix_unitaire, ajustement_pct,
+                   heures, taux_horaire, cout_sous_traitant, sous_traitant_nom,
                    sous_total, total, note
             FROM ad_budget.budget_lignes
             WHERE {' AND '.join(where)}
@@ -1075,39 +1105,69 @@ def register_ad_budget_routes(get_conn):
         def cell(text):
             return Paragraph(str(text), cell_style)
 
-        ALL_COLS = ["section", "description", "qte", "unite", "prix_unitaire", "sous_total", "ajustement_pct", "total", "note"]
+        # Colonnes disponibles. prix_unitaire = "Coût matériel" (le label
+        # change mais on garde le nom de colonne BD). heures/taux_horaire/
+        # cout_sous_traitant/sous_traitant_nom sont opt-in (pas dans le set
+        # par défaut) pour ne pas casser la mise en page existante.
+        ALL_COLS = [
+            "section", "description", "qte", "unite", "prix_unitaire",
+            "heures", "taux_horaire", "cout_sous_traitant", "sous_traitant_nom",
+            "sous_total", "ajustement_pct", "total", "note",
+        ]
         COL_LABELS = {
             "section": "Section", "description": "Description", "qte": "Qté",
-            "unite": "Unité", "prix_unitaire": "Prix unit.", "sous_total": "S/T",
-            "ajustement_pct": "Adj %", "total": "Total", "note": "Note",
+            "unite": "Unité", "prix_unitaire": "Coût matériel",
+            "heures": "Heures", "taux_horaire": "Taux $",
+            "cout_sous_traitant": "S/T $", "sous_traitant_nom": "Sous-traitant",
+            "sous_total": "S/T", "ajustement_pct": "Adj %",
+            "total": "Total", "note": "Note",
         }
-        # Largeurs de base (somme 518) — mises à l'échelle pour remplir la
-        # largeur disponible de la page (portrait ou paysage).
+        # Largeurs de base (somme 518 pour les colonnes par défaut) — mises
+        # à l'échelle pour remplir la largeur disponible.
         _col_widths_base = {
             "section": 55, "description": 130, "qte": 28, "unite": 30,
-            "prix_unitaire": 50, "sous_total": 55, "ajustement_pct": 30,
+            "prix_unitaire": 50,
+            "heures": 30, "taux_horaire": 35,
+            "cout_sous_traitant": 45, "sous_traitant_nom": 70,
+            "sous_total": 55, "ajustement_pct": 30,
             "total": 60, "note": 80,
         }
-        _scale = total_w / sum(_col_widths_base.values())
-        COL_WIDTHS = {k: v * _scale for k, v in _col_widths_base.items()}
-        PRIX_DEPENDENT = {"prix_unitaire", "sous_total", "ajustement_pct", "total", "note"}
+        # Colonnes affichées par défaut (sans les opt-in M-O / sous-traitant)
+        _default_cols = {
+            "section", "description", "qte", "unite", "prix_unitaire",
+            "sous_total", "ajustement_pct", "total", "note",
+        }
+        # Le scale est calculé sur la sélection effective plus bas pour que
+        # l'ajout des colonnes opt-in ne réduise pas les colonnes par défaut.
+        PRIX_DEPENDENT = {
+            "prix_unitaire", "heures", "taux_horaire", "cout_sous_traitant",
+            "sous_traitant_nom", "sous_total", "ajustement_pct", "total", "note",
+        }
 
         if colonnes:
             requested = {c.strip() for c in colonnes.split(",") if c.strip()}
         else:
-            requested = set(ALL_COLS)
+            # Sans param `colonnes`, on conserve l'ancien set (sans les
+            # colonnes M-O / sous-traitant) pour ne pas casser le layout.
+            requested = set(_default_cols)
         if not avec_prix:
             requested -= PRIX_DEPENDENT
         selected = [c for c in ALL_COLS if c in requested] or ["section", "description"]
         headers = [COL_LABELS[c] for c in selected]
-        col_widths = [COL_WIDTHS[c] for c in selected]
+        # Scale calculé sur la sélection effective : tient compte des opt-in.
+        _scale = total_w / sum(_col_widths_base[c] for c in selected)
+        col_widths = [_col_widths_base[c] * _scale for c in selected]
 
-        def cell_for(col, l, qte, prix, adj, st, tot):
+        def cell_for(col, l, qte, prix, adj, st, tot, heures, taux, st_mo, cout_st):
             if col == "section": return l["section"] or ""
             if col == "description": return cell(l["description"] or "")
             if col == "qte": return f"{qte:g}"
             if col == "unite": return l["unite"] or ""
             if col == "prix_unitaire": return f"{prix:,.2f}"
+            if col == "heures": return f"{heures:g}"
+            if col == "taux_horaire": return f"{taux:,.2f}"
+            if col == "cout_sous_traitant": return f"{cout_st:,.2f}"
+            if col == "sous_traitant_nom": return cell(l["sous_traitant_nom"] or "")
             if col == "sous_total": return f"{st:,.2f}"
             if col == "ajustement_pct": return f"{adj:g}"
             if col == "total": return f"{tot:,.2f}"
@@ -1170,7 +1230,12 @@ def register_ad_budget_routes(get_conn):
                     continue  # cohérent avec la page projet qui filtre qte > 0
                 prix = float(l["prix_unitaire"] or 0)
                 adj = float(l["ajustement_pct"] or 0)
-                st = qte * prix
+                heures = float(l["heures"] or 0)
+                taux = float(l["taux_horaire"] or 0)
+                cout_st = float(l["cout_sous_traitant"] or 0)
+                # Sous-total = matériel + main-d'œuvre + sous-traitant.
+                st_mo = heures * taux
+                st = qte * prix + st_mo + cout_st
                 tot_real = st * (1 + adj / 100)
                 gkey = _group_key_for(_section_prefix_n(l["section"]))
                 factor = group_factors.get(gkey, 1) if gkey is not None else 1
@@ -1180,8 +1245,11 @@ def register_ad_budget_routes(get_conn):
                     group_subtotals[gkey] += tot_real  # on garde la valeur RÉELLE
                 else:
                     non_grouped_total += tot_real
-                # Le S/T par ligne (st) reste qte × prix (non gonflé) — seul le Total l'est.
-                table_data.append([cell_for(c, l, qte, prix, adj, st, tot) for c in selected])
+                # Le S/T par ligne (st) reste matériel+M-O+S/T (non gonflé) — seul le Total l'est.
+                table_data.append([
+                    cell_for(c, l, qte, prix, adj, st, tot, heures, taux, st_mo, cout_st)
+                    for c in selected
+                ])
                 section_has_visible_lines = True
             if show_totals_row and section_has_visible_lines:
                 table_data.append(make_summary_row(f"Sous-total {sec}", sec_total))
@@ -1440,7 +1508,13 @@ def register_ad_budget_routes(get_conn):
         cur = conn.cursor()
         fields = []
         values = []
-        for field in ["section", "description", "unite", "prix_unitaire", "qte", "ajustement_pct", "note", "actif"]:
+        for field in [
+            "section", "description", "unite", "prix_unitaire", "qte",
+            "ajustement_pct", "note", "actif",
+            # Ventilation tri-axiale matériel / main-d'œuvre / sous-traitant.
+            # prix_unitaire conserve son nom mais représente le coût matériel.
+            "heures", "taux_horaire", "cout_sous_traitant", "sous_traitant_nom",
+        ]:
             if field in data:
                 fields.append(f"{field} = %s")
                 values.append(data[field])
@@ -1458,6 +1532,34 @@ def register_ad_budget_routes(get_conn):
         cur.close()
         conn.close()
         return {"status": "updated"}
+
+    @router.patch("/projets/{projet_id}/lignes/{ligne_id}")
+    def patch_budget_ligne(projet_id: int, ligne_id: int, data: dict):
+        # Alias PATCH du PUT — même comportement, même whitelist de champs.
+        return update_budget_ligne(projet_id, ligne_id, data)
+
+    @router.get("/sous-traitants/suggestions")
+    def get_sous_traitants_suggestions(user=Depends(jwt_user)):
+        """Liste DISTINCT des noms de sous-traitants déjà saisis par ce user
+        (toutes lignes confondues), pour autocomplétion dans l'UI."""
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT DISTINCT bl.sous_traitant_nom
+            FROM ad_budget.budget_lignes bl
+            JOIN ad_budget.projets p ON p.id = bl.projet_id
+            WHERE p.user_id = %s
+              AND bl.sous_traitant_nom IS NOT NULL
+              AND bl.sous_traitant_nom <> ''
+            ORDER BY bl.sous_traitant_nom
+            """,
+            (user["id"],),
+        )
+        rows = [r[0] for r in cur.fetchall()]
+        cur.close()
+        conn.close()
+        return rows
 
     @router.delete("/projets/{projet_id}/lignes/{ligne_id}")
     def delete_budget_ligne(projet_id: int, ligne_id: int):
