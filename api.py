@@ -71,6 +71,65 @@ def _ensure_schema():
             "WHERE COALESCE(sous_traitant_montant, 0) = 0 "
             "  AND COALESCE(cout_sous_traitant, 0) <> 0"
         )
+        # === Sprint A : enrichir modèle projet (statut whitelist, type_batiment,
+        # region, date_adjudication, superficie_m2, dernier_snapshot_id) ===
+        # 1. Migrer les statut existants vers la nouvelle whitelist AVANT le CHECK :
+        # tous les projets actuels ont 'en cours' (legacy), on bascule sur 'brouillon'
+        # pour rester dans la whitelist Sprint A.
+        cur.execute(
+            "UPDATE ad_budget.projets SET statut = 'brouillon' "
+            "WHERE statut NOT IN ('brouillon', 'adjuge', 'complet', 'perdu', 'archive')"
+        )
+        # 2. Default + CHECK statut.
+        cur.execute(
+            "ALTER TABLE ad_budget.projets ALTER COLUMN statut SET DEFAULT 'brouillon'"
+        )
+        cur.execute(
+            "ALTER TABLE ad_budget.projets DROP CONSTRAINT IF EXISTS projet_statut_check"
+        )
+        cur.execute(
+            "ALTER TABLE ad_budget.projets ADD CONSTRAINT projet_statut_check "
+            "CHECK (statut IN ('brouillon', 'adjuge', 'complet', 'perdu', 'archive'))"
+        )
+        # 3. type_batiment + CHECK.
+        cur.execute(
+            "ALTER TABLE ad_budget.projets ADD COLUMN IF NOT EXISTS type_batiment VARCHAR(20)"
+        )
+        cur.execute(
+            "ALTER TABLE ad_budget.projets DROP CONSTRAINT IF EXISTS projet_type_batiment_check"
+        )
+        cur.execute(
+            "ALTER TABLE ad_budget.projets ADD CONSTRAINT projet_type_batiment_check "
+            "CHECK (type_batiment IS NULL OR type_batiment IN ("
+            "'residentiel', 'commercial', 'institutionnel', 'industriel', 'mixte'))"
+        )
+        # 4. region (validation côté backend, pas de CHECK SQL pour rester souple).
+        cur.execute(
+            "ALTER TABLE ad_budget.projets ADD COLUMN IF NOT EXISTS region VARCHAR(50)"
+        )
+        # 5. date_adjudication.
+        cur.execute(
+            "ALTER TABLE ad_budget.projets ADD COLUMN IF NOT EXISTS date_adjudication DATE"
+        )
+        # 6. superficie_m2 + CHECK > 0.
+        cur.execute(
+            "ALTER TABLE ad_budget.projets ADD COLUMN IF NOT EXISTS superficie_m2 NUMERIC(10,2)"
+        )
+        cur.execute(
+            "ALTER TABLE ad_budget.projets DROP CONSTRAINT IF EXISTS projet_superficie_m2_check"
+        )
+        cur.execute(
+            "ALTER TABLE ad_budget.projets ADD CONSTRAINT projet_superficie_m2_check "
+            "CHECK (superficie_m2 IS NULL OR superficie_m2 > 0)"
+        )
+        # 7. dernier_snapshot_id (préparation Sprint B, pas utilisé maintenant).
+        cur.execute(
+            "ALTER TABLE ad_budget.projets ADD COLUMN IF NOT EXISTS dernier_snapshot_id INTEGER"
+        )
+        # 8. Index sur statut — Ad ANA filtrera dessus.
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_projet_statut ON ad_budget.projets(statut)"
+        )
         conn.commit()
         cur.close()
         conn.close()

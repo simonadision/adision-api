@@ -47,6 +47,59 @@ SURFACE_GYPSE_TERMS = ["plâtrage", "platrage", "peinture", "papier peint"]
 TPS_RATE = 0.05
 TVQ_RATE = 0.09975
 
+# === Sprint A : whitelists pour validation des champs projet ===
+ALLOWED_STATUTS = {"brouillon", "adjuge", "complet", "perdu", "archive"}
+ALLOWED_TYPES_BATIMENT = {
+    "residentiel", "commercial", "institutionnel", "industriel", "mixte",
+}
+ALLOWED_REGIONS = {
+    "Bas-Saint-Laurent", "Saguenay–Lac-Saint-Jean", "Capitale-Nationale",
+    "Mauricie", "Estrie", "Montréal", "Outaouais", "Abitibi-Témiscamingue",
+    "Côte-Nord", "Nord-du-Québec", "Gaspésie–Îles-de-la-Madeleine",
+    "Chaudière-Appalaches", "Laval", "Lanaudière", "Laurentides",
+    "Montérégie", "Centre-du-Québec",
+}
+DATE_ADJ_ALLOWED_FOR_STATUTS = {"adjuge", "complet", "perdu"}
+
+
+def _validate_projet_fields(data: dict, current_statut: Optional[str] = None) -> None:
+    """Valide les champs Sprint A dans `data`. Lève HTTPException 400 si invalide.
+
+    `current_statut` = statut actuel en BD (utilisé pour la cross-field validation
+    de date_adjudication quand le payload ne contient pas 'statut').
+    """
+    if "statut" in data and data["statut"] not in ALLOWED_STATUTS:
+        raise HTTPException(status_code=400, detail="Statut invalide")
+    if "type_batiment" in data:
+        v = data["type_batiment"]
+        if v not in (None, "") and v not in ALLOWED_TYPES_BATIMENT:
+            raise HTTPException(status_code=400, detail="Type de bâtiment invalide")
+    if "region" in data:
+        v = data["region"]
+        if v not in (None, "") and v not in ALLOWED_REGIONS:
+            raise HTTPException(status_code=400, detail="Région invalide")
+    if "superficie_m2" in data:
+        v = data["superficie_m2"]
+        if v not in (None, ""):
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="Superficie invalide")
+            if fv <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="La superficie doit être supérieure à 0",
+                )
+    if "date_adjudication" in data and data["date_adjudication"] not in (None, ""):
+        # Statut effectif après ce PUT/POST : valeur du payload si présente,
+        # sinon valeur actuelle en BD.
+        effective_statut = data.get("statut", current_statut)
+        if effective_statut not in DATE_ADJ_ALLOWED_FOR_STATUTS:
+            raise HTTPException(
+                status_code=400,
+                detail="Date d'adjudication non autorisée pour ce statut",
+            )
+
 
 def _effective_qte(ligne, mobilisation, surface_plancher, surface_mur, surface_gypse):
     """Qté effective d'une ligne en tenant compte des paramètres globaux du projet,
@@ -440,18 +493,48 @@ def register_ad_budget_routes(get_conn):
     # ══════════════════════════════════════════════════════════
 
     @router.get("/projets")
-    def get_projets(user=Depends(jwt_user)):
+    def get_projets(
+        user=Depends(jwt_user),
+        statut: Optional[str] = None,
+        type_batiment: Optional[str] = None,
+        region: Optional[str] = None,
+        client_nom: Optional[str] = None,
+        include_archived: bool = False,
+    ):
         # Toujours filtrer sur le user du JWT — l'éventuel ?user_id= en query
         # est ignoré (un user ne voit que ses propres projets).
+        # Sprint A : nouveaux query params pour la liste filtrée. Par défaut,
+        # les projets 'archive' sont masqués (sauf si include_archived=true ou
+        # si on demande explicitement statut=archive).
+        where = ["p.user_id = %s"]
+        params = [user["id"]]
+        if statut:
+            where.append("p.statut = %s")
+            params.append(statut)
+        elif not include_archived:
+            where.append("p.statut <> 'archive'")
+        if type_batiment:
+            where.append("p.type_batiment = %s")
+            params.append(type_batiment)
+        if region:
+            where.append("p.region = %s")
+            params.append(region)
+        if client_nom:
+            # Recherche sur les deux colonnes (nom_client = champ structuré,
+            # client = champ libre legacy).
+            where.append("(p.nom_client ILIKE %s OR p.client ILIKE %s)")
+            params.append(f"%{client_nom}%")
+            params.append(f"%{client_nom}%")
+        sql = (
+            "SELECT p.*, u.nom as user_nom "
+            "FROM ad_budget.projets p "
+            "JOIN ad_budget.users u ON u.id = p.user_id "
+            f"WHERE {' AND '.join(where)} "
+            "ORDER BY p.updated_at DESC"
+        )
         conn = get_conn()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("""
-            SELECT p.*, u.nom as user_nom
-            FROM ad_budget.projets p
-            JOIN ad_budget.users u ON u.id = p.user_id
-            WHERE p.user_id = %s
-            ORDER BY p.updated_at DESC;
-        """, (user["id"],))
+        cur.execute(sql, params)
         rows = cur.fetchall()
         cur.close()
         conn.close()
@@ -535,7 +618,7 @@ def register_ad_budget_routes(get_conn):
                 cur.execute(
                     """
                     INSERT INTO ad_budget.projets (user_id, nom, statut)
-                    VALUES (%s, %s, 'en cours')
+                    VALUES (%s, %s, 'brouillon')
                     RETURNING id, nom
                     """,
                     (user["id"], project_name),
@@ -677,6 +760,10 @@ def register_ad_budget_routes(get_conn):
         # On force user_id depuis le JWT, pas depuis le body — un user ne
         # peut pas créer un projet pour quelqu'un d'autre.
         data["user_id"] = user["id"]
+        # Sprint A : valider les champs descriptifs avant d'insérer. Le default
+        # de statut à la création est 'brouillon', donc passé en current_statut
+        # pour la cross-field validation de date_adjudication.
+        _validate_projet_fields(data, current_statut="brouillon")
         conn = get_conn()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
@@ -686,6 +773,9 @@ def register_ad_budget_routes(get_conn):
         def _pct(v):
             return 0 if v in (None, "") else v
 
+        def _opt(v):
+            return None if v in (None, "") else v
+
         cur.execute("""
             INSERT INTO ad_budget.projets
               (user_id, nom, client, adresse, description, statut,
@@ -694,12 +784,14 @@ def register_ad_budget_routes(get_conn):
                contact_entrepreneur, email_entrepreneur, telephone_entrepreneur,
                logo_base64,
                pct_admin_conditions, pct_admin_architecture,
-               pct_admin_mecanique, pct_admin_excavation)
+               pct_admin_mecanique, pct_admin_excavation,
+               type_batiment, region, date_adjudication, superficie_m2)
             VALUES (%s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s,
                     %s, %s, %s,
                     %s, %s, %s,
                     %s,
+                    %s, %s, %s, %s,
                     %s, %s, %s, %s)
             RETURNING *
         """, (
@@ -708,7 +800,7 @@ def register_ad_budget_routes(get_conn):
             data.get("client", ""),
             data.get("adresse", ""),
             data.get("description", ""),
-            data.get("statut", "en cours"),
+            data.get("statut", "brouillon"),
             data.get("nom_client", ""),
             data.get("contact_client", ""),
             data.get("email_client", ""),
@@ -724,6 +816,11 @@ def register_ad_budget_routes(get_conn):
             _pct(data.get("pct_admin_architecture")),
             _pct(data.get("pct_admin_mecanique")),
             _pct(data.get("pct_admin_excavation")),
+            # Sprint A — tous nullables.
+            _opt(data.get("type_batiment")),
+            _opt(data.get("region")),
+            _date(data.get("date_adjudication")),
+            _opt(data.get("superficie_m2")),
         ))
         row = cur.fetchone()
         projet_id = row["id"]
@@ -753,12 +850,31 @@ def register_ad_budget_routes(get_conn):
     @router.put("/projets/{projet_id}")
     def update_projet(projet_id: int, data: dict):
         conn = get_conn()
-        cur = conn.cursor()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        # Sprint A : récupère le statut actuel pour la cross-field validation
+        # (date_adjudication permise uniquement si statut ∈ adjuge/complet/perdu).
+        cur.execute(
+            "SELECT statut FROM ad_budget.projets WHERE id = %s",
+            (projet_id,),
+        )
+        existing = cur.fetchone()
+        if not existing:
+            cur.close()
+            conn.close()
+            raise HTTPException(status_code=404, detail="Projet not found")
+        _validate_projet_fields(data, current_statut=existing["statut"])
+
         fields = []
         values = []
         PCT_FIELDS = {
             "pct_admin_conditions", "pct_admin_architecture",
             "pct_admin_mecanique", "pct_admin_excavation",
+        }
+        # Champs qui doivent être normalisés à NULL si reçus en chaîne vide
+        # (typés DATE, NUMERIC, ou VARCHAR optionnels).
+        NULLABLE_EMPTY_FIELDS = {
+            "date_debut", "date_fin",
+            "type_batiment", "region", "date_adjudication", "superficie_m2",
         }
         for field in [
             "nom", "client", "adresse", "description", "statut",
@@ -768,26 +884,34 @@ def register_ad_budget_routes(get_conn):
             "logo_base64",
             "pct_admin_conditions", "pct_admin_architecture",
             "pct_admin_mecanique", "pct_admin_excavation",
+            # Sprint A
+            "type_batiment", "region", "date_adjudication", "superficie_m2",
+            "dernier_snapshot_id",
         ]:
             if field in data:
-                fields.append(f"{field} = %s")
                 v = data[field]
-                # Normalize empty values for typed columns
-                if field in ("date_debut", "date_fin") and v == "":
+                if field in NULLABLE_EMPTY_FIELDS and v == "":
                     v = None
                 elif field in PCT_FIELDS and (v == "" or v is None):
                     v = 0
+                fields.append(f"{field} = %s")
                 values.append(v)
-        fields.append("updated_at = NOW()")
         if not fields:
+            cur.close()
+            conn.close()
             return {"error": "No fields to update"}
-        sql = f"UPDATE ad_budget.projets SET {', '.join(fields)} WHERE id = %s"
+        fields.append("updated_at = NOW()")
+        sql = (
+            f"UPDATE ad_budget.projets SET {', '.join(fields)} "
+            "WHERE id = %s RETURNING *"
+        )
         values.append(projet_id)
         cur.execute(sql, values)
+        updated = cur.fetchone()
         conn.commit()
         cur.close()
         conn.close()
-        return {"status": "updated"}
+        return updated
 
     @router.delete("/projets/{projet_id}")
     def delete_projet(projet_id: int):
