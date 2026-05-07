@@ -1173,10 +1173,27 @@ def register_ad_budget_routes(get_conn):
             "sous_total": 55, "ajustement_pct": 30,
             "total": 60, "note": 80,
         }
-        # Colonnes affichées par défaut — vue compacte historique.
-        _default_cols = {
-            "section", "description", "qte", "unite", "prix_unitaire",
-            "sous_total", "ajustement_pct", "total", "note",
+        # Mapping colonne → section. Sert pour la rangée header de section
+        # avec colspan ; les colonnes hors section restent vides dans cette
+        # rangée.
+        COL_SECTION = {
+            "prix_unitaire": "materiaux", "ajust_materiaux": "materiaux",
+            "heures": "mainOeuvre", "taux_horaire": "mainOeuvre",
+            "ajust_main_oeuvre": "mainOeuvre",
+            "sous_traitant_type": "sousTraitant",
+            "sous_traitant_nom": "sousTraitant",
+            "sous_traitant_montant": "sousTraitant",
+            "ajust_sous_traitant": "sousTraitant",
+        }
+        SECTION_LABELS = {
+            "materiaux": "MATÉRIAUX",
+            "mainOeuvre": "MAIN-D'ŒUVRE",
+            "sousTraitant": "SOUS-TRAITANT",
+        }
+        SECTION_COLORS = {
+            "materiaux": colors.HexColor("#E3E7F4"),
+            "mainOeuvre": colors.HexColor("#FCE5E5"),
+            "sousTraitant": colors.HexColor("#DDF2EC"),
         }
         PRIX_DEPENDENT = {
             "prix_unitaire", "ajust_materiaux",
@@ -1189,9 +1206,11 @@ def register_ad_budget_routes(get_conn):
         if colonnes:
             requested = {c.strip() for c in colonnes.split(",") if c.strip()}
         else:
-            # Sans param `colonnes`, on conserve l'ancien set (sans les
-            # colonnes M-O / sous-traitant) pour ne pas casser le layout.
-            requested = set(_default_cols)
+            # Sans param `colonnes`, on prend toutes les colonnes — le frontend
+            # omet le param quand l'user a tout coché (allColsSelected), donc
+            # "pas de param" = "tout cocher". L'ancien comportement (vue
+            # compacte 9 cols) cachait les 8 colonnes des sections refondues.
+            requested = set(ALL_COLS)
         if not avec_prix:
             requested -= PRIX_DEPENDENT
         selected = [c for c in ALL_COLS if c in requested] or ["section", "description"]
@@ -1199,6 +1218,31 @@ def register_ad_budget_routes(get_conn):
         # Scale calculé sur la sélection effective : tient compte des opt-in.
         _scale = total_w / sum(_col_widths_base[c] for c in selected)
         col_widths = [_col_widths_base[c] * _scale for c in selected]
+
+        # Police adaptive : 8pt par défaut, 7pt si > 12 colonnes pour rester
+        # lisible sans débordement en paysage A4.
+        body_fontsize = 7 if len(selected) > 12 else 8
+
+        # Construction de la rangée "section header" (colspans). On group les
+        # colonnes consécutives qui partagent un même groupe de section ;
+        # une section qui n'a aucune colonne visible disparaît automatiquement.
+        section_header_row = None
+        section_spans = []  # [(start_col, end_col, section_key)]
+        any_section_visible = any(COL_SECTION.get(c) for c in selected)
+        if any_section_visible:
+            section_header_row = [""] * len(selected)
+            i = 0
+            while i < len(selected):
+                grp = COL_SECTION.get(selected[i])
+                if grp is None:
+                    i += 1
+                    continue
+                j = i
+                while j < len(selected) and COL_SECTION.get(selected[j]) == grp:
+                    j += 1
+                section_header_row[i] = SECTION_LABELS[grp]
+                section_spans.append((i, j - 1, grp))
+                i = j
 
         def cell_for(col, l, qte, prix, adj, st, tot,
                      heures, taux, st_mo, st_montant,
@@ -1263,7 +1307,16 @@ def register_ad_budget_routes(get_conn):
             else:
                 group_factors[key] = 1
 
-        table_data = [headers]
+        # Préfixage du tableau : rangée 0 = headers de section (colspan) si
+        # au moins une section est visible, sinon on commence direct avec les
+        # libellés. header_offset = nombre de rangées d'en-tête à sauter pour
+        # localiser le début du body (utilisé par les styles indexés ci-dessous).
+        if section_header_row is not None:
+            table_data = [section_header_row, headers]
+            header_offset = 2
+        else:
+            table_data = [headers]
+            header_offset = 1
         subtotal_rows = []
         group_subtotals = {key: 0.0 for key, _, _, _ in BUDGET_GROUPS_PDF}
         non_grouped_total = 0.0
@@ -1317,22 +1370,38 @@ def register_ad_budget_routes(get_conn):
                 table_data.append(make_summary_row(f"Sous-total {sec}", sec_total))
                 subtotal_rows.append(len(table_data) - 1)
 
+        # Indice de la rangée des libellés de colonnes (sous l'éventuelle
+        # rangée de header de section).
+        col_header_row = header_offset - 1
+        body_start_row = header_offset
+
         table_style_cmds = [
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e3a8a")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("ALIGN", (2, 1), (-1, -1), "RIGHT"),
+            # Fond bleu Adision sur la rangée des libellés de colonnes.
+            ("BACKGROUND", (0, col_header_row), (-1, col_header_row), colors.HexColor("#1e3a8a")),
+            ("TEXTCOLOR", (0, col_header_row), (-1, col_header_row), colors.white),
+            ("FONTNAME", (0, col_header_row), (-1, col_header_row), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), body_fontsize),
+            ("ALIGN", (2, body_start_row), (-1, -1), "RIGHT"),
             ("ALIGN", (0, 0), (1, -1), "LEFT"),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f1f5f9")]),
+            ("ROWBACKGROUNDS", (0, body_start_row), (-1, -1),
+             [colors.white, colors.HexColor("#f1f5f9")]),
         ]
+        # Header de section (rangée 0) : SPAN + fond couleur palette Adision
+        # pâle pour chaque section visible.
+        if section_header_row is not None:
+            table_style_cmds.append(("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"))
+            table_style_cmds.append(("ALIGN", (0, 0), (-1, 0), "CENTER"))
+            for start, end, grp in section_spans:
+                table_style_cmds.append(("SPAN", (start, 0), (end, 0)))
+                table_style_cmds.append(("BACKGROUND", (start, 0), (end, 0),
+                                         SECTION_COLORS[grp]))
         for r in subtotal_rows:
             table_style_cmds.append(("FONTNAME", (0, r), (-1, r), "Helvetica-Bold"))
             table_style_cmds.append(("BACKGROUND", (0, r), (-1, r), colors.HexColor("#dbeafe")))
 
-        table = Table(table_data, colWidths=col_widths, repeatRows=1)
+        table = Table(table_data, colWidths=col_widths, repeatRows=header_offset)
         table.setStyle(TableStyle(table_style_cmds))
         story.append(table)
 
