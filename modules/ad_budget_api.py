@@ -972,6 +972,9 @@ def register_ad_budget_routes(get_conn):
         NULLABLE_EMPTY_FIELDS = {
             "date_debut", "date_fin",
             "type_batiment", "region", "date_adjudication", "superficie_m2",
+            # Params globaux du tableau budget (persistes maintenant)
+            "mobilisation", "surface_plancher",
+            "hauteur_cloisons", "longueur_cloisons",
         }
         for field in [
             "nom", "client", "adresse", "description", "statut",
@@ -984,6 +987,9 @@ def register_ad_budget_routes(get_conn):
             # Sprint A
             "type_batiment", "region", "date_adjudication", "superficie_m2",
             "dernier_snapshot_id",
+            # Params globaux du tableau budget
+            "mobilisation", "surface_plancher",
+            "hauteur_cloisons", "longueur_cloisons",
         ]:
             if field in data:
                 v = data[field]

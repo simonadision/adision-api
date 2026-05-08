@@ -131,6 +131,29 @@ def _ensure_schema():
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_projet_statut ON ad_budget.projets(statut)"
         )
+        # === Fix bug params globaux : persister les 4 paramètres de calcul du
+        # tableau budget (mobilisation, surface_plancher, hauteur_cloisons,
+        # longueur_cloisons). Avant ce fix, ces 4 champs n'existaient qu'en
+        # state local React côté frontend ; perdus au refresh. NUMERIC(10,2)
+        # nullable + CHECK >= 0 (les 4 valeurs peuvent légitimement être 0,
+        # contrairement à superficie_m2 qui doit être > 0). ===
+        for col in (
+            "mobilisation", "surface_plancher",
+            "hauteur_cloisons", "longueur_cloisons",
+        ):
+            cur.execute(
+                f"ALTER TABLE ad_budget.projets "
+                f"ADD COLUMN IF NOT EXISTS {col} NUMERIC(10,2)"
+            )
+            cur.execute(
+                f"ALTER TABLE ad_budget.projets "
+                f"DROP CONSTRAINT IF EXISTS projet_{col}_check"
+            )
+            cur.execute(
+                f"ALTER TABLE ad_budget.projets "
+                f"ADD CONSTRAINT projet_{col}_check "
+                f"CHECK ({col} IS NULL OR {col} >= 0)"
+            )
         # === Sprint B : table app_ana.project_snapshots ===
         # Snapshot du budget figé au moment où le projet bascule sur un statut
         # définitif (adjuge / complet / perdu). Consommé par Ad ANA pour les
