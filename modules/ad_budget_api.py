@@ -155,10 +155,17 @@ def _create_snapshot(cur, projet_row, trigger_event: str) -> int:
     surface_mur = hc * lc
     surface_gypse = surface_mur * 2
 
+    # Pour le storage (budget_lines_jsonb) : ajouter qte_effective a chaque
+    # row, en preservant la qte brute (audit trail "ce que user a tape").
+    # Pour le calcul aggregates : copie ou qte = effective_qte (ce que JS
+    # adapt_budget_lines/compute_aggregates attendent).
+    # Vue 7 frontend lit qte_effective ?? qte pour agreger au niveau ligne.
     rows_with_eff_qte = []
     for r in budget_lines_raw:
+        eff = _effective_qte(r, mob, sp, surface_mur, surface_gypse)
+        r["qte_effective"] = eff  # mute en place -> sera persiste dans budget_lines_jsonb
         rc = dict(r)
-        rc["qte"] = _effective_qte(rc, mob, sp, surface_mur, surface_gypse)
+        rc["qte"] = eff  # copie pour le compute (qte = effective)
         rows_with_eff_qte.append(rc)
 
     # 3. Adapter au format aggregate (mat/mo/st nested) puis calculer
