@@ -44,3 +44,7 @@ scraper/pyvenv.cfg
 Thumbs.db
 .vscode/
 .idea/
+
+# Scripts perso avec secrets en clair (TODO: refactorer pour utiliser .env)
+import_railway.py
+import_budget.py
