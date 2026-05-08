@@ -139,8 +139,30 @@ def _create_snapshot(cur, projet_row, trigger_event: str) -> int:
     # RealDictRow -> dict pour serialisation JSON propre
     budget_lines_raw = [dict(r) for r in budget_rows]
 
-    # 2. Adapter au format aggregate (mat/mo/st nested) puis calculer
-    aggregate_lines = adapt_budget_lines(budget_lines_raw)
+    # 2. Calculer la qté EFFECTIVE pour chaque ligne (miroir de getQte
+    # frontend / _effective_qte PDF). Sans ça, les lignes du squelette
+    # template (qte=0 stocké en BD, qte calculée live côté frontend
+    # depuis les params globaux) donnent des aggregates à 0.
+    # Les params globaux du projet (mobilisation, surface_plancher, etc.)
+    # viennent de projet_row directement (persistés en BD depuis le fix
+    # 5cf146c). On mute UNE COPIE des rows pour le calcul ; budget_lines_raw
+    # reste intact pour persister les lignes brutes (utile pour Ad ANA si
+    # méthodo de calcul change un jour).
+    mob = float(projet_row.get("mobilisation") or 0)
+    sp = float(projet_row.get("surface_plancher") or 0)
+    hc = float(projet_row.get("hauteur_cloisons") or 0)
+    lc = float(projet_row.get("longueur_cloisons") or 0)
+    surface_mur = hc * lc
+    surface_gypse = surface_mur * 2
+
+    rows_with_eff_qte = []
+    for r in budget_lines_raw:
+        rc = dict(r)
+        rc["qte"] = _effective_qte(rc, mob, sp, surface_mur, surface_gypse)
+        rows_with_eff_qte.append(rc)
+
+    # 3. Adapter au format aggregate (mat/mo/st nested) puis calculer
+    aggregate_lines = adapt_budget_lines(rows_with_eff_qte)
     superficie = projet_row.get("superficie_m2")
     aggregates = compute_aggregates(
         aggregate_lines,
