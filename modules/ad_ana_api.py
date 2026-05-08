@@ -59,6 +59,7 @@ def register_ad_ana_routes(get_conn):
         date_from: Optional[str] = None,
         date_to: Optional[str] = None,
         is_latest_only: bool = True,
+        include_lines: bool = False,
         limit: int = SNAPSHOTS_DEFAULT_LIMIT,
         offset: int = 0,
     ):
@@ -67,6 +68,8 @@ def register_ad_ana_routes(get_conn):
 
         Filtres multi-valeurs (statut, type_batiment, region) : passés en
         liste séparée par des virgules (ex: ?statut=adjuge,complet).
+        Si include_lines=true, budget_lines_jsonb est inclus dans le payload
+        (utile pour Vue 7 Ratio détaillé qui aggregée au niveau ligne).
         """
         # Clamp limit/offset (sécurité + DX : un client qui passe limit=99999
         # reçoit 1000 sans erreur)
@@ -114,8 +117,11 @@ def register_ad_ana_routes(get_conn):
             )
             total = cur.fetchone()["n"]
 
+            columns = _SNAPSHOT_LIST_COLS
+            if include_lines:
+                columns += ", budget_lines_jsonb"
             cur.execute(
-                f"SELECT {_SNAPSHOT_LIST_COLS} "
+                f"SELECT {columns} "
                 f"FROM app_ana.project_snapshots "
                 f"WHERE {where_sql} "
                 f"ORDER BY created_at DESC "
