@@ -15,7 +15,7 @@ from typing import Optional
 
 import jwt
 from fastapi import Depends, Header, HTTPException, Query
-from psycopg2.extras import RealDictCursor
+from psycopg.rows import dict_row
 
 JWT_ALGORITHM = "HS256"
 REQUIRED_MODULE = "ad_bud"
@@ -68,7 +68,7 @@ def _provision_user(conn, payload: dict) -> dict:
     if not email:
         raise HTTPException(status_code=401, detail="JWT sans email")
 
-    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur = conn.cursor(row_factory=dict_row)
     cur.execute(
         "SELECT id, nom, email, role, created_at "
         "FROM ad_budget.users WHERE LOWER(email) = %s",

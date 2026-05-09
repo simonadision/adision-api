@@ -1,6 +1,8 @@
 fastapi
-uvicorn[standard]
-psycopg2-binary
+uvicorn[standard]; sys_platform != 'win32' or platform_machine != 'ARM64'
+uvicorn; sys_platform == 'win32' and platform_machine == 'ARM64'
+psycopg[binary]; sys_platform != 'win32' or platform_machine != 'ARM64'
+psycopg; sys_platform == 'win32' and platform_machine == 'ARM64'
 sqlalchemy
 pandas
 openpyxl

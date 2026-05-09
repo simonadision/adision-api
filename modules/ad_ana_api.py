@@ -10,7 +10,7 @@ Pas de scope multi-tenant — à ajouter dans un sprint futur si besoin.
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from psycopg2.extras import RealDictCursor
+from psycopg.rows import dict_row
 
 from modules.auth_jwt import make_jwt_deps
 
@@ -106,7 +106,7 @@ def register_ad_ana_routes(get_conn):
         where_sql = " AND ".join(where) if where else "TRUE"
 
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
         try:
             # COUNT séparé : OK pour Sprint C v1, optimisable au besoin avec
             # une window function COUNT(*) OVER ().
@@ -153,7 +153,7 @@ def register_ad_ana_routes(get_conn):
         """
         top_n = max(1, min(int(top_n), 20))
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
         try:
             # 1. Snapshot de référence (is_latest du projet demandé)
             cur.execute(

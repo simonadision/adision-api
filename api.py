@@ -4,8 +4,8 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine
 import pandas as pd
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import psycopg
+from psycopg.rows import dict_row
 from modules.ad_ana_api import register_ad_ana_routes
 from modules.ad_budget_api import register_ad_budget_routes
 from modules.auth_jwt import make_jwt_deps
@@ -13,11 +13,24 @@ import os
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:6268605Ss@localhost:5432/Adision")
 
-engine = create_engine(DATABASE_URL)
+
+def _sqlalchemy_url(url: str) -> str:
+    """Force SQLAlchemy à utiliser le dialecte psycopg3 (`postgresql+psycopg`).
+    Sans ce préfixe, SQLAlchemy chercherait psycopg2 par défaut."""
+    if url.startswith("postgresql+"):
+        return url
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + url[len("postgresql://"):]
+    if url.startswith("postgres://"):
+        return "postgresql+psycopg://" + url[len("postgres://"):]
+    return url
+
+
+engine = create_engine(_sqlalchemy_url(DATABASE_URL))
 
 
 def get_conn():
-    return psycopg2.connect(DATABASE_URL, sslmode="require")
+    return psycopg.connect(DATABASE_URL, sslmode="require")
 
 
 def _ensure_schema():
@@ -338,7 +351,7 @@ def get_items():
 @app.get("/items/search")
 def search_items(q: str = ""):
     conn = get_conn()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur = conn.cursor(row_factory=dict_row)
     cur.execute("""
         SELECT id, description
         FROM items
@@ -356,7 +369,7 @@ def search_items(q: str = ""):
 @app.get("/mapping/suggestions")
 def get_suggestions():
     conn = get_conn()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur = conn.cursor(row_factory=dict_row)
     cur.execute("""
         SELECT 
             s.id,

@@ -10,7 +10,8 @@ from typing import Optional
 import openpyxl
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from psycopg2.extras import Json, RealDictCursor
+from psycopg.rows import dict_row
+from psycopg.types.json import Json
 
 from modules.aggregates import adapt_budget_lines, compute_aggregates
 from modules.auth_jwt import make_jwt_deps
@@ -123,7 +124,7 @@ def _create_snapshot(cur, projet_row, trigger_event: str) -> int:
     is_latest=TRUE. Marque les anciens snapshots du même projet à FALSE et
     met à jour ad_budget.projets.dernier_snapshot_id.
 
-    `cur` est un curseur (RealDictCursor) déjà ouvert sur la transaction
+    `cur` est un curseur (row_factory=dict_row) déjà ouvert sur la transaction
     en cours. NE COMMIT PAS — l'appelant gère la transaction.
     Retourne l'id du snapshot créé.
     """
@@ -326,7 +327,7 @@ def register_ad_budget_routes(get_conn):
     @router.get("/prix-moyens")
     def get_budget_prix_moyens():
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
         cur.execute("""
             SELECT *
             FROM ad_budget.ad_budget_prix_moyens
@@ -340,7 +341,7 @@ def register_ad_budget_routes(get_conn):
     @router.post("/item")
     def create_item(data: dict):
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
         cur.execute("""
             INSERT INTO ad_budget.ad_budget_prix_moyens
             (section, description, unite, prix_unitaire)
@@ -361,7 +362,7 @@ def register_ad_budget_routes(get_conn):
     @router.get("/search")
     def search_budget(q: str = ""):
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
         q_clean = q.replace("-", " ").strip()
         words = [w for w in q_clean.split() if w]
         if not words:
@@ -390,7 +391,7 @@ def register_ad_budget_routes(get_conn):
     @router.get("/item/{item_id}")
     def get_item(item_id: int):
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
         cur.execute("""
             SELECT * FROM ad_budget.ad_budget_prix_moyens WHERE id = %s
         """, (item_id,))
@@ -457,7 +458,7 @@ def register_ad_budget_routes(get_conn):
     @router.get("/admin/items")
     def admin_list_items(_admin=Depends(jwt_admin)):
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
         cur.execute("""
             SELECT id, section, division, description, unite, prix_unitaire, note
             FROM ad_budget.ad_budget_prix_moyens
@@ -471,7 +472,7 @@ def register_ad_budget_routes(get_conn):
     @router.post("/admin/items")
     def admin_create_item(data: dict, _admin=Depends(jwt_admin)):
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
         cur.execute("""
             INSERT INTO ad_budget.ad_budget_prix_moyens
                 (section, division, description, unite, prix_unitaire, note)
@@ -536,7 +537,7 @@ def register_ad_budget_routes(get_conn):
     @router.get("/users")
     def get_users(_admin=Depends(jwt_admin)):
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
         cur.execute("""
             SELECT id, nom, email, role, created_at
             FROM ad_budget.users
@@ -553,7 +554,7 @@ def register_ad_budget_routes(get_conn):
         if not email:
             raise HTTPException(status_code=400, detail="Email requis")
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
         cur.execute("""
             INSERT INTO ad_budget.users (nom, email, role)
             VALUES (%s, %s, %s)
@@ -572,7 +573,7 @@ def register_ad_budget_routes(get_conn):
     @router.get("/users/{user_id}")
     def get_user(user_id: int, _admin=Depends(jwt_admin)):
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
         cur.execute("""
             SELECT id, nom, email, role, created_at
             FROM ad_budget.users WHERE id = %s
@@ -659,7 +660,7 @@ def register_ad_budget_routes(get_conn):
             "ORDER BY p.updated_at DESC"
         )
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
         cur.execute(sql, params)
         rows = cur.fetchall()
         cur.close()
@@ -676,7 +677,7 @@ def register_ad_budget_routes(get_conn):
         vers Ad BUD" d'Ad VIU. nb_sections = nombre de valeurs section
         distinctes (codes CSI) déjà présentes dans le projet."""
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
         cur.execute(
             """
             SELECT
@@ -731,7 +732,7 @@ def register_ad_budget_routes(get_conn):
         source_file = (data.get("source_file") or "").strip() or None
 
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
         try:
             template_lines_added = 0
             if mode == "new":
@@ -891,7 +892,7 @@ def register_ad_budget_routes(get_conn):
         # pour la cross-field validation de date_adjudication.
         _validate_projet_fields(data, current_statut="brouillon")
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
 
         def _date(v):
             return None if v in (None, "") else v
@@ -959,7 +960,7 @@ def register_ad_budget_routes(get_conn):
     @router.get("/projets/{projet_id}")
     def get_projet(projet_id: int):
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
         cur.execute("""
             SELECT p.*, u.nom as user_nom
             FROM ad_budget.projets p
@@ -976,7 +977,7 @@ def register_ad_budget_routes(get_conn):
     @router.put("/projets/{projet_id}")
     def update_projet(projet_id: int, data: dict):
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
         # Sprint A : récupère le statut actuel pour la cross-field validation
         # (date_adjudication permise uniquement si statut ∈ adjuge/complet/perdu).
         cur.execute(
@@ -1088,7 +1089,7 @@ def register_ad_budget_routes(get_conn):
     @router.post("/projets/{projet_id}/duplicate")
     def duplicate_projet(projet_id: int):
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
         cur.execute("SELECT id, nom FROM ad_budget.projets WHERE id = %s", (projet_id,))
         src = cur.fetchone()
         if not src:
@@ -1141,7 +1142,7 @@ def register_ad_budget_routes(get_conn):
     @router.get("/projets/{projet_id}/export")
     def export_projet_excel(projet_id: int):
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
         cur.execute("SELECT nom FROM ad_budget.projets WHERE id = %s", (projet_id,))
         projet = cur.fetchone()
         if not projet:
@@ -1248,7 +1249,7 @@ def register_ad_budget_routes(get_conn):
         longueur_cloisons: float = 0,
     ):
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
         cur.execute("SELECT * FROM ad_budget.projets WHERE id = %s", (projet_id,))
         projet = cur.fetchone()
         if not projet:
@@ -1807,7 +1808,7 @@ def register_ad_budget_routes(get_conn):
         ?include_lines=true (utile pour Ad ANA recalcul).
         """
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
         columns = _SNAPSHOT_DEFAULT_COLS
         if include_lines:
             columns += ", budget_lines_jsonb"
@@ -1827,7 +1828,7 @@ def register_ad_budget_routes(get_conn):
         404 si aucun snapshot n'existe.
         """
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
         columns = _SNAPSHOT_DEFAULT_COLS
         if include_lines:
             columns += ", budget_lines_jsonb"
@@ -1852,7 +1853,7 @@ def register_ad_budget_routes(get_conn):
     @router.get("/projets/{projet_id}/lignes")
     def get_budget_lignes(projet_id: int):
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
         cur.execute("""
             SELECT *
             FROM ad_budget.budget_lignes
@@ -1872,7 +1873,7 @@ def register_ad_budget_routes(get_conn):
         Sinon, utilise les données fournies directement.
         """
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
 
         source_item_id = data.get("source_item_id")
 
@@ -1931,7 +1932,7 @@ def register_ad_budget_routes(get_conn):
             return {"error": "No item_ids provided"}
 
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
 
         inserted = 0
         for item_id in item_ids:
@@ -2056,7 +2057,7 @@ def register_ad_budget_routes(get_conn):
     def get_projet_total(projet_id: int):
         """Retourne le total du budget d'un projet groupé par section."""
         conn = get_conn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor(row_factory=dict_row)
         cur.execute("""
             SELECT
                 section,
