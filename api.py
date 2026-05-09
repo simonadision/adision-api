@@ -230,6 +230,20 @@ def _ensure_schema():
             "FOREIGN KEY (dernier_snapshot_id) "
             "REFERENCES app_ana.project_snapshots(id) ON DELETE SET NULL"
         )
+        # === Ad VIU v2 (Jalon 4) : tracabilite + idempotence du push ===
+        cur.execute(
+            "ALTER TABLE ad_budget.budget_lignes "
+            "ADD COLUMN IF NOT EXISTS source_viu_analysis_id INT NULL"
+        )
+        cur.execute(
+            "ALTER TABLE ad_budget.budget_lignes "
+            "ADD COLUMN IF NOT EXISTS source_viu_item_id INT NULL"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_budget_lignes_viu_item "
+            "ON ad_budget.budget_lignes (source_viu_item_id) "
+            "WHERE source_viu_item_id IS NOT NULL"
+        )
         conn.commit()
         cur.close()
         conn.close()
