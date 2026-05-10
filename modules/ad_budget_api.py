@@ -260,22 +260,34 @@ def _group_key_for(n):
     return None
 
 
-def _apply_master_template(cur, projet_id: int, *, skip_section_01: bool = False) -> int:
+def _apply_master_template(
+    cur, projet_id: int, *,
+    skip_section_01: bool = False,
+    only_section_01: bool = False,
+) -> int:
     """Copie les items master (`ad_budget.ad_budget_prix_moyens`) dans
     `budget_lignes` du projet. C'est le squelette standard de soumission
     appliqué à toute création de projet — qte=0 par défaut, à compléter
     par l'utilisateur. Réutilisé par POST /budget/projets ET par POST
     /budget/projects/from-viu en mode=new pour cohérence d'archi.
 
-    Si `skip_section_01=True`, les lignes de la division 01 (frais
-    généraux : assurances, contingence, nettoyage, etc.) sont exclues.
-    Utilisé par `from-viu-v2 mode=new` pour laisser l'estimateur
-    remplir manuellement les frais généraux au lieu de partir du
-    squelette par défaut.
+    Filtres optionnels (mutuellement exclusifs) sur la division 01
+    (frais généraux / conditions générales : assurances, contingence,
+    nettoyage, mobilisation, etc.) :
+      - `skip_section_01=True` : exclut la division 01 (autres divisions
+        ajoutees).
+      - `only_section_01=True` : importe UNIQUEMENT la division 01 (le
+        reste reste vide, a remplir manuellement). Utilise par
+        from-viu-v2 mode=new : on importe les frais generaux universels
+        + les items v2 detectes dans le PDF, pas le reste du squelette.
 
     Le curseur est partagé pour rester dans la même transaction que la
     création du projet appelante. Retourne le nombre de lignes insérées.
     """
+    if skip_section_01 and only_section_01:
+        raise ValueError(
+            "skip_section_01 et only_section_01 sont mutuellement exclusifs"
+        )
     sql = (
         "INSERT INTO ad_budget.budget_lignes "
         "(projet_id, source_item_id, section, description, unite, "
@@ -285,10 +297,13 @@ def _apply_master_template(cur, projet_id: int, *, skip_section_01: bool = False
         "FROM ad_budget.ad_budget_prix_moyens"
     )
     params: list = [projet_id]
+    # Le pattern LIKE est parametrise (au lieu de '01 %' inline) pour
+    # eviter que psycopg3 interprete le % comme placeholder mal forme.
     if skip_section_01:
-        # Le pattern LIKE est parametrise (au lieu de '01 %' inline) pour
-        # eviter que psycopg3 interprete le % comme placeholder mal forme.
         sql += " WHERE section NOT LIKE %s"
+        params.append("01 %")
+    elif only_section_01:
+        sql += " WHERE section LIKE %s"
         params.append("01 %")
     cur.execute(sql, params)
     return cur.rowcount
@@ -956,13 +971,16 @@ def register_ad_budget_routes(get_conn):
                     (user["id"], project_name),
                 )
                 proj = cur.fetchone()
-                # Decision produit (J8) : mode=new importe UNIQUEMENT les
-                # items Ad VIU v2, pas le master template. L'estimateur
-                # remplit manuellement les frais generaux et les autres
-                # divisions absentes du PDF analyse. Le template existe
-                # toujours via POST /budget/projets direct si l'user veut
-                # creer un projet vide a partir d'un squelette standard.
-                template_lines_added = 0
+                # Decision produit (J8 v2) : mode=new importe les items
+                # Ad VIU v2 + UNIQUEMENT la division 01 du master template
+                # (conditions generales / frais generaux universels :
+                # assurances, contingence, nettoyage, mobilisation, etc.).
+                # Les autres divisions du squelette restent absentes ;
+                # l'estimateur les remplit selon ce que le PDF analyse
+                # contient.
+                template_lines_added = _apply_master_template(
+                    cur, proj["id"], only_section_01=True,
+                )
             else:
                 project_id_in = data.get("project_id")
                 if not project_id_in:
