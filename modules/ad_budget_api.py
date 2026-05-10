@@ -276,18 +276,21 @@ def _apply_master_template(cur, projet_id: int, *, skip_section_01: bool = False
     Le curseur est partagé pour rester dans la même transaction que la
     création du projet appelante. Retourne le nombre de lignes insérées.
     """
-    where = ""
-    if skip_section_01:
-        where = "WHERE section NOT LIKE '01 %'"
-    cur.execute(
-        f"INSERT INTO ad_budget.budget_lignes "
-        f"(projet_id, source_item_id, section, description, unite, "
-        f" prix_unitaire, qte, ajustement_pct, note, actif) "
-        f"SELECT %s, id, section, description, COALESCE(unite, 'global'), "
-        f"       COALESCE(prix_unitaire, 0), 0, 0, COALESCE(note, ''), TRUE "
-        f"FROM ad_budget.ad_budget_prix_moyens {where}",
-        (projet_id,),
+    sql = (
+        "INSERT INTO ad_budget.budget_lignes "
+        "(projet_id, source_item_id, section, description, unite, "
+        " prix_unitaire, qte, ajustement_pct, note, actif) "
+        "SELECT %s, id, section, description, COALESCE(unite, 'global'), "
+        "       COALESCE(prix_unitaire, 0), 0, 0, COALESCE(note, ''), TRUE "
+        "FROM ad_budget.ad_budget_prix_moyens"
     )
+    params: list = [projet_id]
+    if skip_section_01:
+        # Le pattern LIKE est parametrise (au lieu de '01 %' inline) pour
+        # eviter que psycopg3 interprete le % comme placeholder mal forme.
+        sql += " WHERE section NOT LIKE %s"
+        params.append("01 %")
+    cur.execute(sql, params)
     return cur.rowcount
 
 
