@@ -290,7 +290,7 @@ def _map_v2_unite_to_bud(unite: Optional[str]) -> Optional[str]:
 def _apply_master_template(
     cur, projet_id: int, *,
     skip_section_01: bool = False,
-    only_section_01: bool = False,
+    default_divisions: Optional[list] = None,
 ) -> int:
     """Copie les items master (`ad_budget.ad_budget_prix_moyens`) dans
     `budget_lignes` du projet. C'est le squelette standard de soumission
@@ -298,22 +298,22 @@ def _apply_master_template(
     par l'utilisateur. Réutilisé par POST /budget/projets ET par POST
     /budget/projects/from-viu en mode=new pour cohérence d'archi.
 
-    Filtres optionnels (mutuellement exclusifs) sur la division 01
-    (frais généraux / conditions générales : assurances, contingence,
-    nettoyage, mobilisation, etc.) :
+    Filtres optionnels (mutuellement exclusifs) :
       - `skip_section_01=True` : exclut la division 01 (autres divisions
         ajoutees).
-      - `only_section_01=True` : importe UNIQUEMENT la division 01 (le
-        reste reste vide, a remplir manuellement). Utilise par
-        from-viu-v2 mode=new : on importe les frais generaux universels
-        + les items v2 detectes dans le PDF, pas le reste du squelette.
+      - `default_divisions=['01', '20', '21', ...]` : importe UNIQUEMENT
+        les lignes des divisions listees (filtre sur les 2 premiers
+        caracteres de section). Utilise par from-viu-v2 mode=new pour
+        importer les divisions transversales que le sous-module v2
+        Architecture ne couvre pas (mecanique 20-25, electrique 26-28,
+        excavation 31, plus les frais generaux 01).
 
     Le curseur est partagé pour rester dans la même transaction que la
     création du projet appelante. Retourne le nombre de lignes insérées.
     """
-    if skip_section_01 and only_section_01:
+    if skip_section_01 and default_divisions is not None:
         raise ValueError(
-            "skip_section_01 et only_section_01 sont mutuellement exclusifs"
+            "skip_section_01 et default_divisions sont mutuellement exclusifs"
         )
     sql = (
         "INSERT INTO ad_budget.budget_lignes "
@@ -324,14 +324,16 @@ def _apply_master_template(
         "FROM ad_budget.ad_budget_prix_moyens"
     )
     params: list = [projet_id]
-    # Le pattern LIKE est parametrise (au lieu de '01 %' inline) pour
-    # eviter que psycopg3 interprete le % comme placeholder mal forme.
     if skip_section_01:
+        # Le pattern LIKE est parametrise (au lieu de '01 %' inline) pour
+        # eviter que psycopg3 interprete le % comme placeholder mal forme.
         sql += " WHERE section NOT LIKE %s"
         params.append("01 %")
-    elif only_section_01:
-        sql += " WHERE section LIKE %s"
-        params.append("01 %")
+    elif default_divisions:
+        # Filtre sur les 2 premiers chars de section (= code division CSI).
+        # ANY(%s::text[]) accepte un array Python, idiomatique psycopg3.
+        sql += " WHERE LEFT(section, 2) = ANY(%s)"
+        params.append(list(default_divisions))
     cur.execute(sql, params)
     return cur.rowcount
 
@@ -998,15 +1000,21 @@ def register_ad_budget_routes(get_conn):
                     (user["id"], project_name),
                 )
                 proj = cur.fetchone()
-                # Decision produit (J8 v2) : mode=new importe les items
-                # Ad VIU v2 + UNIQUEMENT la division 01 du master template
-                # (conditions generales / frais generaux universels :
-                # assurances, contingence, nettoyage, mobilisation, etc.).
-                # Les autres divisions du squelette restent absentes ;
-                # l'estimateur les remplit selon ce que le PDF analyse
-                # contient.
+                # Decision produit (J8 v3) : mode=new importe les items
+                # Ad VIU v2 + les divisions techniques transversales du
+                # master template que le sous-module v2 Architecture ne
+                # couvre PAS :
+                #   01 = frais generaux / conditions generales
+                #   20-23, 25 = mecanique / CVAC / plomberie
+                #   26-28 = electrique / communications / securite
+                #   31 = excavation / pieux
+                # L'estimateur complete ces divisions manuellement.
                 template_lines_added = _apply_master_template(
-                    cur, proj["id"], only_section_01=True,
+                    cur, proj["id"],
+                    default_divisions=[
+                        "01", "20", "21", "22", "23",
+                        "25", "26", "27", "28", "31",
+                    ],
                 )
             else:
                 project_id_in = data.get("project_id")
