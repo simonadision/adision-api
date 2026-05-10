@@ -260,23 +260,32 @@ def _group_key_for(n):
     return None
 
 
-def _apply_master_template(cur, projet_id: int) -> int:
+def _apply_master_template(cur, projet_id: int, *, skip_section_01: bool = False) -> int:
     """Copie les items master (`ad_budget.ad_budget_prix_moyens`) dans
     `budget_lignes` du projet. C'est le squelette standard de soumission
     appliqué à toute création de projet — qte=0 par défaut, à compléter
     par l'utilisateur. Réutilisé par POST /budget/projets ET par POST
     /budget/projects/from-viu en mode=new pour cohérence d'archi.
 
+    Si `skip_section_01=True`, les lignes de la division 01 (frais
+    généraux : assurances, contingence, nettoyage, etc.) sont exclues.
+    Utilisé par `from-viu-v2 mode=new` pour laisser l'estimateur
+    remplir manuellement les frais généraux au lieu de partir du
+    squelette par défaut.
+
     Le curseur est partagé pour rester dans la même transaction que la
     création du projet appelante. Retourne le nombre de lignes insérées.
     """
+    where = ""
+    if skip_section_01:
+        where = "WHERE section NOT LIKE '01 %'"
     cur.execute(
-        "INSERT INTO ad_budget.budget_lignes "
-        "(projet_id, source_item_id, section, description, unite, "
-        " prix_unitaire, qte, ajustement_pct, note, actif) "
-        "SELECT %s, id, section, description, COALESCE(unite, 'global'), "
-        "       COALESCE(prix_unitaire, 0), 0, 0, COALESCE(note, ''), TRUE "
-        "FROM ad_budget.ad_budget_prix_moyens",
+        f"INSERT INTO ad_budget.budget_lignes "
+        f"(projet_id, source_item_id, section, description, unite, "
+        f" prix_unitaire, qte, ajustement_pct, note, actif) "
+        f"SELECT %s, id, section, description, COALESCE(unite, 'global'), "
+        f"       COALESCE(prix_unitaire, 0), 0, 0, COALESCE(note, ''), TRUE "
+        f"FROM ad_budget.ad_budget_prix_moyens {where}",
         (projet_id,),
     )
     return cur.rowcount
@@ -938,7 +947,11 @@ def register_ad_budget_routes(get_conn):
                     (user["id"], project_name),
                 )
                 proj = cur.fetchone()
-                template_lines_added = _apply_master_template(cur, proj["id"])
+                # Skip division 01 (frais generaux) : l'estimateur la
+                # remplit manuellement quand il pousse depuis Ad VIU v2.
+                template_lines_added = _apply_master_template(
+                    cur, proj["id"], skip_section_01=True,
+                )
             else:
                 project_id_in = data.get("project_id")
                 if not project_id_in:
