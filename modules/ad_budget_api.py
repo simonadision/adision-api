@@ -664,10 +664,16 @@ def register_ad_budget_routes(get_conn):
             where.append("(p.nom_client ILIKE %s OR p.client ILIKE %s)")
             params.append(f"%{client_nom}%")
             params.append(f"%{client_nom}%")
+        # LEFT JOIN sur ad_budget.users : sans ce LEFT, les projets
+        # orphelins (user_id n'a plus de row matching dans users —
+        # cf. duplicate users docs/AD_BUD_TECH_DEBT.md #1) etaient
+        # silencieusement exclus de la liste, donnant l'impression que
+        # le projet "n'existait pas". user_nom devient NULL si pas de
+        # match (frontend ne l'utilise pas).
         sql = (
             "SELECT p.*, u.nom as user_nom "
             "FROM ad_budget.projets p "
-            "JOIN ad_budget.users u ON u.id = p.user_id "
+            "LEFT JOIN ad_budget.users u ON u.id = p.user_id "
             f"WHERE {' AND '.join(where)} "
             "ORDER BY p.updated_at DESC"
         )
@@ -1156,10 +1162,15 @@ def register_ad_budget_routes(get_conn):
     def get_projet(projet_id: int):
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
+        # LEFT JOIN : meme rationale que get_projets ci-dessus. Sans LEFT
+        # JOIN, un projet dont user_id pointe vers une row absente de
+        # ad_budget.users (orphelin, cf. docs/AD_BUD_TECH_DEBT.md #1)
+        # remontait 404, cassant le deep-link "Ouvrir dans Ad BUD" depuis
+        # Ad VIU v2.
         cur.execute("""
             SELECT p.*, u.nom as user_nom
             FROM ad_budget.projets p
-            JOIN ad_budget.users u ON u.id = p.user_id
+            LEFT JOIN ad_budget.users u ON u.id = p.user_id
             WHERE p.id = %s
         """, (projet_id,))
         row = cur.fetchone()
