@@ -956,11 +956,13 @@ def register_ad_budget_routes(get_conn):
                     (user["id"], project_name),
                 )
                 proj = cur.fetchone()
-                # Skip division 01 (frais generaux) : l'estimateur la
-                # remplit manuellement quand il pousse depuis Ad VIU v2.
-                template_lines_added = _apply_master_template(
-                    cur, proj["id"], skip_section_01=True,
-                )
+                # Decision produit (J8) : mode=new importe UNIQUEMENT les
+                # items Ad VIU v2, pas le master template. L'estimateur
+                # remplit manuellement les frais generaux et les autres
+                # divisions absentes du PDF analyse. Le template existe
+                # toujours via POST /budget/projets direct si l'user veut
+                # creer un projet vide a partir d'un squelette standard.
+                template_lines_added = 0
             else:
                 project_id_in = data.get("project_id")
                 if not project_id_in:
