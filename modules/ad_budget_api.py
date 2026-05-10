@@ -260,6 +260,33 @@ def _group_key_for(n):
     return None
 
 
+# Mapping notation Ad VIU v2 (ASCII plain, decision produit J7
+# "Unites cibles HARDCODEES, pas d'exposants Unicode") -> notation
+# Ad BUD frontend (allowedUnites avec Unicode + libelles longs).
+# Cf. docs/AD_BUD_TECH_DEBT.md #3 pour la vraie solution long terme
+# (standardize cross-module). Ce mapping est la couche d'integration
+# en attendant.
+_VIU_V2_TO_BUD_UNITE = {
+    "pi2": "pi²",
+    "m2":  "m²",
+    "m3":  "m³",
+    "un":  "unité",
+    "pl":  "plin",
+    "ml":  "mlin",
+    "ea":  "unité",  # legacy 'each' -> 'unité' (avant les regles J6)
+}
+
+
+def _map_v2_unite_to_bud(unite: Optional[str]) -> Optional[str]:
+    """Convertit une unite Ad VIU v2 (ASCII plain) vers la notation
+    Ad BUD (allowedUnites du frontend). Passthrough si l'unite n'est
+    pas dans la table de mapping (deja conforme ou cas inattendu)."""
+    if not unite:
+        return unite
+    key = unite.strip().lower()
+    return _VIU_V2_TO_BUD_UNITE.get(key, unite)
+
+
 def _apply_master_template(
     cur, projet_id: int, *,
     skip_section_01: bool = False,
@@ -1029,6 +1056,11 @@ def register_ad_budget_routes(get_conn):
                     continue
 
                 unite = (item.get("unite") or "global").strip() or "global"
+                # Mapping ASCII (Ad VIU v2) -> Unicode/libelle long (Ad BUD
+                # allowedUnites). Sans ce mapping, le <select> Ad BUD ne
+                # selectionnait rien et l'estimateur voyait les cellules
+                # unite vides. Cf. docs/AD_BUD_TECH_DEBT.md #3.
+                unite = _map_v2_unite_to_bud(unite) or "global"
 
                 qte = item.get("quantite")
                 if qte is None:
