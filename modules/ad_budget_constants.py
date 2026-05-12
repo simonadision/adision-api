@@ -7,6 +7,8 @@ du code (endpoint d'import Ad VIU notamment). Eviter de dupliquer ces listes
 """
 from __future__ import annotations
 
+import re
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Divisions CSI = "angles morts" Ad VIU.
@@ -34,22 +36,33 @@ AD_VIU_BLINDSPOT_DIVISIONS: tuple[str, ...] = (
 )
 
 
+_NON_DIGIT_RE = re.compile(r"\D")
+
+
 def get_division_code(section: str | None) -> str | None:
     """Extrait le code division (2 chiffres) d'une section CSI.
 
-    Le format BD typique est '23 05 00' (avec espaces) mais on est tolerant
-    aux variations : '23-05-00', '230500', '  23 05 00' → tous renvoient '23'.
+    Strip TOUS les caracteres non-chiffres (regex \\D), puis prend les 2
+    premiers chiffres restants. Robuste a tout format de saisie :
+      '23 05 00'              → '23'
+      '23-05-00'              → '23'
+      '230500'                → '23'
+      '02 - Site Preparation' → '02'   (texte suffix toleré)
+      'Division 02 — Sitework'→ '02'   (texte prefix toleré aussi)
+      '\\u00a002 21 13'       → '02'   (NBSP/tab/whitespace exotique OK)
 
-    Retourne None si section vide ou format non reconnu (ne commence pas par
-    2 chiffres apres normalisation).
+    Retourne None si la section ne contient AUCUN chiffre (ex: 'TBD',
+    None, vide).
+
+    SQL miroir (a garder synchro) :
+        LEFT(REGEXP_REPLACE(COALESCE(section, ''), '\\D', '', 'g'), 2)
     """
     if not section:
         return None
-    # Strip + retire espaces internes (codes parfois saisis avec/sans espaces)
-    normalized = section.strip().replace(" ", "").replace("-", "")
-    if len(normalized) < 2 or not normalized[:2].isdigit():
+    digits_only = _NON_DIGIT_RE.sub("", section)
+    if len(digits_only) < 2:
         return None
-    return normalized[:2]
+    return digits_only[:2]
 
 
 def is_ad_viu_blindspot(section: str | None) -> bool:

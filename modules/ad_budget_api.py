@@ -1030,31 +1030,79 @@ def register_ad_budget_routes(get_conn):
 
             project_id = proj["id"]
 
-            # === DELETE REPLACE (2026-05-12) =============================
+            # === DELETE REPLACE (2026-05-12, fix format 2026-05-12 v2) ===
             # Efface toutes les lignes du projet SAUF celles dans les
             # divisions blindspot Ad VIU (mecanique, civil, conditions
             # generales — Ad VIU ne les analyse pas, donc on les preserve).
-            # Concretement : on vire le squelette architectural (02-19, 24,
-            # 29-30) et tout item precedemment importe d'Ad VIU dans une
-            # division non-blindspot. Les lignes dans 01/20-23/25-28/31-33
-            # survivent (squelette mecanique/civil + items Ad VIU pousses
-            # dans ces divisions coexistent, doublons acceptes).
             #
-            # COALESCE(section, '') defensif : sections NULL renvoient ''
-            # apres replace, LEFT('', 2) = '' qui n'est dans aucune division
-            # blindspot → la ligne est DELETE (conservatif : on prefere
-            # virer une ligne au format douteux plutot que la garder a tort).
+            # BUG fix v2 : la v1 utilisait REPLACE(section, ' ', '') qui ne
+            # gerait QUE les espaces. Les sections du master template
+            # peuvent etre stockees avec d'autres separateurs (dash, slash,
+            # texte suffix type "02 - Site Preparation", NBSP, etc.) qui
+            # faisaient que LEFT(REPLACE, 2) ne donnait PAS les 2 premiers
+            # chiffres CSI. REGEXP_REPLACE(... '\D', '', 'g') strip TOUS les
+            # caracteres non-chiffres → robuste a tous les formats.
+            #
+            # Log diagnostic avant + apres pour visibilite Railway au cas
+            # ou le format BD change a nouveau.
+            cur.execute(
+                """
+                SELECT COUNT(*) AS total,
+                       COUNT(*) FILTER (
+                           WHERE LEFT(REGEXP_REPLACE(COALESCE(section, ''), '\\D', '', 'g'), 2)
+                                 IN ('01','20','21','22','23','25','26','27','28','31','32','33')
+                       ) AS blindspot_count
+                FROM ad_budget.budget_lignes
+                WHERE projet_id = %s
+                """,
+                (project_id,),
+            )
+            counts_before = cur.fetchone()
+            print(
+                f"[from_viu_v2] project {project_id}: BEFORE DELETE — "
+                f"total={counts_before['total']}, "
+                f"blindspot_preserved={counts_before['blindspot_count']}, "
+                f"to_delete={counts_before['total'] - counts_before['blindspot_count']}",
+                flush=True,
+            )
+
             cur.execute(
                 """
                 DELETE FROM ad_budget.budget_lignes
                 WHERE projet_id = %s
-                  AND LEFT(REPLACE(COALESCE(section, ''), ' ', ''), 2) NOT IN (
+                  AND LEFT(REGEXP_REPLACE(COALESCE(section, ''), '\\D', '', 'g'), 2) NOT IN (
                       '01','20','21','22','23','25','26','27','28','31','32','33'
                   )
                 """,
                 (project_id,),
             )
             deleted_count = cur.rowcount
+            print(
+                f"[from_viu_v2] project {project_id}: DELETE REPLACE — "
+                f"rowcount={deleted_count}",
+                flush=True,
+            )
+
+            # Log samples post-DELETE pour identifier format du squelette
+            # qui survit (utile si on detecte que des lignes architecturales
+            # restent encore = format non reconnu meme par regex).
+            cur.execute(
+                """
+                SELECT section, COUNT(*) AS n
+                FROM ad_budget.budget_lignes
+                WHERE projet_id = %s
+                GROUP BY section
+                ORDER BY section
+                LIMIT 8
+                """,
+                (project_id,),
+            )
+            samples = [(r["section"], r["n"]) for r in cur.fetchall()]
+            print(
+                f"[from_viu_v2] project {project_id}: AFTER DELETE — "
+                f"sample sections (max 8): {samples}",
+                flush=True,
+            )
 
             # Recolte les sections survivantes pour calculer correctement
             # le compte de nouvelles sections introduites par l'INSERT.
