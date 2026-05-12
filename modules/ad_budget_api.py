@@ -2287,9 +2287,8 @@ def register_ad_budget_routes(get_conn):
 
         cur.execute("""
             INSERT INTO ad_budget.budget_lignes
-            (projet_id, source_item_id, section, description, unite, prix_unitaire, qte, ajustement_pct, note, actif,
-             item_id_ad_mat, ad_hub_pending_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (projet_id, source_item_id, section, description, unite, prix_unitaire, qte, ajustement_pct, note, actif)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """, (
             projet_id,
@@ -2301,9 +2300,7 @@ def register_ad_budget_routes(get_conn):
             data.get("qte", 0),
             data.get("ajustement_pct", 0),
             data.get("note", ""),
-            data.get("actif", True),
-            data.get("item_id_ad_mat"),
-            data.get("ad_hub_pending_id"),
+            data.get("actif", True)
         ))
         row = cur.fetchone()
         conn.commit()
@@ -2383,8 +2380,6 @@ def register_ad_budget_routes(get_conn):
             # Refonte 3 sections : ajust % par section + type et montant S-T.
             "ajust_materiaux", "ajust_main_oeuvre", "ajust_sous_traitant",
             "sous_traitant_type", "sous_traitant_montant",
-            # Sprint 1.5 : liens logiques vers Ad MAT (cross-DB, pas de FK physique).
-            "item_id_ad_mat", "ad_hub_pending_id",
         ]:
             if field in data:
                 fields.append(f"{field} = %s")
