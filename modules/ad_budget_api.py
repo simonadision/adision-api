@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
+from modules.ad_budget_constants import AUTHORIZED_DIVISIONS, is_in_scope
 from modules.aggregates import adapt_budget_lines, compute_aggregates
 from modules.auth_jwt import make_jwt_deps
 from reportlab.lib import colors
@@ -1003,18 +1004,14 @@ def register_ad_budget_routes(get_conn):
                 # Decision produit (J8 v3) : mode=new importe les items
                 # Ad VIU v2 + les divisions techniques transversales du
                 # master template que le sous-module v2 Architecture ne
-                # couvre PAS :
-                #   01 = frais generaux / conditions generales
-                #   20-23, 25 = mecanique / CVAC / plomberie
-                #   26-28 = electrique / communications / securite
-                #   31 = excavation / pieux
+                # couvre PAS. Source de verite : AUTHORIZED_DIVISIONS dans
+                # modules/ad_budget_constants.py — la meme liste sert au
+                # marquage hors_scope a l'import (cf. boucle d'INSERT items
+                # plus bas) pour garantir la coherence.
                 # L'estimateur complete ces divisions manuellement.
                 template_lines_added = _apply_master_template(
                     cur, proj["id"],
-                    default_divisions=[
-                        "01", "20", "21", "22", "23",
-                        "25", "26", "27", "28", "31",
-                    ],
+                    default_divisions=list(AUTHORIZED_DIVISIONS),
                 )
             else:
                 project_id_in = data.get("project_id")
@@ -1051,11 +1048,21 @@ def register_ad_budget_routes(get_conn):
             sections_touched = set()
             lines_added = 0
             lines_skipped = 0
+            # Comptes separes pour le retour API. Le frontend les utilise
+            # pour afficher "X items integres, Y archives en hors scope".
+            in_scope_count = 0
+            hors_scope_count = 0
 
             note_prefix = (
                 f"Importe d'Ad VIU v2 - Analyse #{source_analysis_id}"
                 if source_analysis_id else "Importe d'Ad VIU v2"
             )
+
+            # TODO v2 (preview Ad VIU avant push) : actuellement le filtre
+            # hors_scope est applique cote backend silencieusement. Une v2
+            # pourrait exposer ce calcul cote frontend Ad VIU pour preview
+            # avant l'envoi (modal "N items entreront en hors scope, OK ?").
+            # Cf. audit divisions mai 2026.
 
             for item in items:
                 section = (item.get("csi_section") or "").strip()
@@ -1104,23 +1111,33 @@ def register_ad_budget_routes(get_conn):
                     note_parts.append(item_notes)
                 note_text = " | ".join(note_parts)
 
+                # Determine hors_scope : la section est-elle dans une
+                # division autorisee Ad BUD ? Sections sans division
+                # reconnaissable → hors_scope (conservatif, evite le junk).
+                line_hors_scope = not is_in_scope(section)
+
                 cur.execute(
                     """
                     INSERT INTO ad_budget.budget_lignes
                       (projet_id, section, description, unite, prix_unitaire,
                        qte, ajustement_pct, note, actif, source_file, type_source,
-                       source_viu_analysis_id, source_viu_item_id)
+                       source_viu_analysis_id, source_viu_item_id, hors_scope)
                     VALUES (%s, %s, %s, %s, 0, %s, 0, %s, TRUE, %s, 'viu_v2',
-                            %s, %s)
+                            %s, %s, %s)
                     """,
                     (
                         project_id, section or None, description, unite,
                         qte, note_text,
                         source_file,
                         source_analysis_id, viu_item_id,
+                        line_hors_scope,
                     ),
                 )
                 lines_added += 1
+                if line_hors_scope:
+                    hors_scope_count += 1
+                else:
+                    in_scope_count += 1
                 if section:
                     sections_touched.add(section)
 
@@ -1133,6 +1150,11 @@ def register_ad_budget_routes(get_conn):
                 "lines_added": lines_added,
                 "lines_skipped": lines_skipped,
                 "template_lines_added": template_lines_added,
+                # Split in_scope vs hors_scope sur les lignes nouvellement
+                # inserees (exclut lines_skipped via idempotence). Affichage
+                # frontend Ad VIU modal : "X integres, Y archives".
+                "in_scope_count": in_scope_count,
+                "hors_scope_count": hors_scope_count,
             }
         except HTTPException:
             conn.rollback()
@@ -1212,7 +1234,18 @@ def register_ad_budget_routes(get_conn):
         ))
         row = cur.fetchone()
         projet_id = row["id"]
-        nb_lignes = _apply_master_template(cur, projet_id)
+        # Cohérence semantique : la creation manuelle de projet applique le
+        # MEME filtre AUTHORIZED_DIVISIONS que from-viu-v2 mode=new. Sinon,
+        # les nouveaux projets manuels auraient ~100 lignes squelette dont
+        # une majorite de divisions hors-scope (09 finitions, 04 maconnerie,
+        # 32 amenagement…) marquees hors_scope=FALSE par defaut → drift
+        # silencieux par rapport aux projets pushes depuis Ad VIU.
+        # Effet utilisateur : seules 10 divisions visibles a la creation.
+        # Pour les divisions hors-scope, l'estimateur ajoute via "+ Ajouter"
+        # (ligne marquee hors_scope=TRUE, visible dans la section dediee).
+        nb_lignes = _apply_master_template(
+            cur, projet_id, default_divisions=list(AUTHORIZED_DIVISIONS)
+        )
         conn.commit()
         cur.close()
         conn.close()
@@ -2259,6 +2292,10 @@ def register_ad_budget_routes(get_conn):
             # Refonte 3 sections : ajust % par section + type et montant S-T.
             "ajust_materiaux", "ajust_main_oeuvre", "ajust_sous_traitant",
             "sous_traitant_type", "sous_traitant_montant",
+            # Flag hors_scope : reintegration manuelle d'une ligne archivee
+            # via PATCH generic. Le endpoint dedie /reintegrate est plus
+            # idiomatique pour le bouton frontend "Reintegrer dans scope".
+            "hors_scope",
         ]:
             if field in data:
                 fields.append(f"{field} = %s")
@@ -2282,6 +2319,76 @@ def register_ad_budget_routes(get_conn):
     def patch_budget_ligne(projet_id: int, ligne_id: int, data: dict):
         # Alias PATCH du PUT — même comportement, même whitelist de champs.
         return update_budget_ligne(projet_id, ligne_id, data)
+
+    @router.post("/projets/{projet_id}/lignes/{ligne_id}/reintegrate")
+    def reintegrate_budget_ligne(
+        projet_id: int, ligne_id: int, user=Depends(jwt_user)
+    ):
+        """Reintegre une ligne archivee (hors_scope=TRUE -> FALSE).
+
+        Endpoint dedie (vs PATCH generic avec {hors_scope: false}) pour avoir
+        une semantique claire dans les logs et permettre au frontend un
+        bouton "Reintegrer dans scope" simple (POST sans body).
+
+        Permission : owner du projet (verifie via JOIN projets.user_id).
+        Validation : ligne existe + appartient au projet + actuellement
+        hors_scope=TRUE (sinon 409, evite confusion).
+        """
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute(
+                """
+                SELECT bl.id, bl.hors_scope, bl.section, p.user_id
+                FROM ad_budget.budget_lignes bl
+                JOIN ad_budget.projets p ON p.id = bl.projet_id
+                WHERE bl.id = %s AND bl.projet_id = %s
+                """,
+                (ligne_id, projet_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Ligne introuvable")
+            if row["user_id"] != user["id"]:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Cette ligne appartient a un autre utilisateur",
+                )
+            if not row["hors_scope"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Cette ligne n'est pas en hors scope (deja in scope)",
+                )
+
+            cur.execute(
+                """
+                UPDATE ad_budget.budget_lignes
+                SET hors_scope = FALSE, updated_at = NOW()
+                WHERE id = %s
+                """,
+                (ligne_id,),
+            )
+            conn.commit()
+
+            print(
+                f"[ad_budget_api] ligne {ligne_id} (section='{row['section']}') "
+                f"reintegrated by user {user.get('email','?')} (id={user['id']}) "
+                f"in projet {projet_id}",
+                flush=True,
+            )
+
+            return {"status": "reintegrated", "ligne_id": ligne_id}
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(
+                status_code=500, detail=f"Erreur reintegration : {e}"
+            )
+        finally:
+            cur.close()
+            conn.close()
 
     @router.get("/sous-traitants/suggestions")
     def get_sous_traitants_suggestions(user=Depends(jwt_user)):

@@ -244,6 +244,37 @@ def _ensure_schema():
             "ON ad_budget.budget_lignes (source_viu_item_id) "
             "WHERE source_viu_item_id IS NOT NULL"
         )
+        # === Hors scope filter (mai 2026) ===
+        # Marque les lignes dont la division CSI n'est pas dans la liste des
+        # divisions autorisees Ad BUD (constante AUTHORIZED_DIVISIONS dans
+        # modules/ad_budget_constants.py). Items pousses depuis Ad VIU avec
+        # une division hors scope (ex: division 09 finitions interieures,
+        # 04 maconnerie) sont marques hors_scope=TRUE a l'import et affiches
+        # separement dans le frontend (section "Hors scope" en queue).
+        cur.execute(
+            "ALTER TABLE ad_budget.budget_lignes "
+            "ADD COLUMN IF NOT EXISTS hors_scope BOOLEAN NOT NULL DEFAULT FALSE"
+        )
+        # Backfill : marque les lignes existantes dont la division est hors
+        # de la liste autorisee. REPLACE(' ','') normalise le format
+        # '23 05 00' -> '230500', puis on prend les 2 premiers chiffres.
+        # Liste hardcodee ici (vs import du constants.py) pour rester en
+        # SQL pur, executable a la main sur Railway/psql si besoin.
+        cur.execute(
+            "UPDATE ad_budget.budget_lignes "
+            "SET hors_scope = TRUE "
+            "WHERE hors_scope = FALSE "
+            "  AND LEFT(REPLACE(section, ' ', ''), 2) NOT IN "
+            "      ('01','20','21','22','23','25','26','27','28','31')"
+        )
+        # Index partiel sur hors_scope=TRUE : la requete typique est
+        # "donne-moi les lignes hors_scope d'un projet" (affichage section
+        # dediee), bien plus rare que les requetes in-scope normales.
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_budget_lignes_hors_scope "
+            "ON ad_budget.budget_lignes (projet_id) "
+            "WHERE hors_scope = TRUE"
+        )
         conn.commit()
         cur.close()
         conn.close()
