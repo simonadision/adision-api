@@ -1138,6 +1138,15 @@ def register_ad_budget_routes(get_conn):
             inserted_count = 0
             lines_skipped = 0
 
+            # Defensive dedup : evite les doublons quand Ad VIU envoie 2 items
+            # avec meme (section, description) dans le meme payload. Cas
+            # observe en prod 2026-05-12 sur projet 93 / analyse #18 (la
+            # cause exacte cote Ad VIU reste a investiguer separement, mais
+            # le defensive dedup ici evite la corruption d'Ad BUD).
+            # Cle = (section_normalized, description_normalized.lower()) pour
+            # matcher meme avec variance de casse ou espaces.
+            seen_keys: set[tuple[str, str]] = set()
+
             note_prefix = (
                 f"Importe d'Ad VIU v2 - Analyse #{source_analysis_id}"
                 if source_analysis_id else "Importe d'Ad VIU v2"
@@ -1148,6 +1157,19 @@ def register_ad_budget_routes(get_conn):
                 description = (item.get("description") or "").strip()
                 if not description:
                     continue
+
+                # Dedup intra-push : si on a deja INSERTed un item avec meme
+                # (section, description) dans cette transaction, on skip.
+                dedup_key = (section, description.lower())
+                if dedup_key in seen_keys:
+                    lines_skipped += 1
+                    print(
+                        f"[from_viu_v2] project {project_id}: dedup skip — "
+                        f"section={section!r} description={description[:60]!r}",
+                        flush=True,
+                    )
+                    continue
+                seen_keys.add(dedup_key)
 
                 unite = (item.get("unite") or "global").strip() or "global"
                 # Mapping ASCII (Ad VIU v2) -> Unicode/libelle long (Ad BUD
