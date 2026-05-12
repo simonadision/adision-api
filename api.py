@@ -29,7 +29,13 @@ def _sqlalchemy_url(url: str) -> str:
 engine = create_engine(_sqlalchemy_url(DATABASE_URL))
 
 
+def _is_local(url: str) -> bool:
+    return "localhost" in url or "127.0.0.1" in url
+
+
 def get_conn():
+    if _is_local(DATABASE_URL):
+        return psycopg.connect(DATABASE_URL)
     return psycopg.connect(DATABASE_URL, sslmode="require")
 
 
