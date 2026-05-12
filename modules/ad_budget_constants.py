@@ -2,35 +2,35 @@
 Ad BUD — Constantes metier partagees.
 
 Source de verite pour les valeurs hardcodees referencees a plusieurs endroits
-du code (endpoints d'import Ad VIU, generation de squelette CSI, frontend
-filter via API). Eviter de dupliquer ces listes — toute modification doit
-passer par ce fichier.
+du code (endpoint d'import Ad VIU notamment). Eviter de dupliquer ces listes
+— toute modification doit passer par ce fichier.
 """
 from __future__ import annotations
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Divisions CSI autorisees pour le scope Ad BUD.
+# Divisions CSI = "angles morts" Ad VIU.
 #
-# Decision produit (mai 2026, Simon) : Ad BUD couvre uniquement les divisions
-# techniques transversales qu'un sous-module specifique (architecture Ad VIU
-# par exemple) ne traite pas. Les items pousses depuis Ad VIU avec une
-# division HORS de cette liste sont marques `hors_scope=true` a l'import,
-# conserves pour audit/traceabilite mais affiches separement dans l'UI.
-#
+# Ad VIU analyse les plans architecturaux et structuraux ; il ne lit PAS :
 #   01     = frais generaux / conditions generales
 #   20-23  = mecanique / CVAC / plomberie
 #   25     = controles automatises
 #   26-28  = electrique / communications / securite
-#   31     = excavation / pieux
+#   31-33  = genie civil / excavation / amenagement exterieur / utilites
 #
-# Le `is_in_scope(section)` helper compare les 2 premiers chiffres de la
-# section (apres normalisation des espaces) a ce set. Tuple (immutable)
-# pour eviter les modifications accidentelles + signal "constante".
+# Lors d'un push Ad VIU -> Ad BUD, le backend DELETE toutes les lignes
+# existantes du projet SAUF celles de ces 12 divisions (preservees parce
+# qu'Ad VIU n'a aucune autorite dessus), puis INSERT tous les items
+# detectes par Ad VIU sans filtre. Resultat : le squelette mecanique/civil
+# Ad BUD reste intact, l'architectural est remplace par la detection IA.
+#
+# Tuple (immutable) pour signaler "constante" + eviter modifications
+# accidentelles. Le frontend Ad VIU n'utilise pas cette liste (filtre
+# pur backend, le frontend envoie tous les items sans pre-tri).
 # ─────────────────────────────────────────────────────────────────────────────
 
-AUTHORIZED_DIVISIONS: tuple[str, ...] = (
-    "01", "20", "21", "22", "23", "25", "26", "27", "28", "31",
+AD_VIU_BLINDSPOT_DIVISIONS: tuple[str, ...] = (
+    "01", "20", "21", "22", "23", "25", "26", "27", "28", "31", "32", "33",
 )
 
 
@@ -52,11 +52,17 @@ def get_division_code(section: str | None) -> str | None:
     return normalized[:2]
 
 
-def is_in_scope(section: str | None) -> bool:
-    """True si la section CSI est dans une division autorisee Ad BUD.
+def is_ad_viu_blindspot(section: str | None) -> bool:
+    """True si la section appartient a une division qu'Ad VIU n'analyse pas.
 
-    Une section avec format non reconnu (None, vide, ne commence pas par
-    chiffres) est consideree HORS scope par defaut (conservatif : evite
-    d'inclure du junk dans le scope par accident)."""
+    Utilise par le endpoint /budget/projects/from-viu-v2 pour determiner
+    quelles lignes preserver lors du DELETE (REPLACE behavior) : les lignes
+    dans une division "blindspot" (mecanique, civil, conditions generales)
+    sont conservees ; les autres (architectural) sont effacees pour faire
+    place aux items detectes par Ad VIU.
+
+    Format non reconnu (None, vide, ne commence pas par chiffres) -> False
+    (conservatif : on prefere DELETE une ligne au format douteux plutot
+    que la garder a tort dans le squelette preserve)."""
     code = get_division_code(section)
-    return code is not None and code in AUTHORIZED_DIVISIONS
+    return code is not None and code in AD_VIU_BLINDSPOT_DIVISIONS
