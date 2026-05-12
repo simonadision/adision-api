@@ -1030,28 +1030,42 @@ def register_ad_budget_routes(get_conn):
 
             project_id = proj["id"]
 
-            # === DELETE REPLACE (2026-05-12, fix format 2026-05-12 v2) ===
-            # Efface toutes les lignes du projet SAUF celles dans les
-            # divisions blindspot Ad VIU (mecanique, civil, conditions
-            # generales — Ad VIU ne les analyse pas, donc on les preserve).
+            # === DELETE REPLACE v3 (2026-05-12, fix doublons re-push) =====
+            # Efface :
+            #   (a) Toutes les lignes des divisions NON-blindspot
+            #       (architectural skeleton + items Ad VIU precedents la-bas)
+            #   (b) Tous les items Ad VIU (type_source='viu_v2') peu importe
+            #       la division, INCLUANT les divisions blindspot
             #
-            # BUG fix v2 : la v1 utilisait REPLACE(section, ' ', '') qui ne
-            # gerait QUE les espaces. Les sections du master template
-            # peuvent etre stockees avec d'autres separateurs (dash, slash,
-            # texte suffix type "02 - Site Preparation", NBSP, etc.) qui
-            # faisaient que LEFT(REPLACE, 2) ne donnait PAS les 2 premiers
-            # chiffres CSI. REGEXP_REPLACE(... '\D', '', 'g') strip TOUS les
-            # caracteres non-chiffres → robuste a tous les formats.
+            # Le (b) corrige le bug doublons : sans lui, un re-push avec des
+            # source_viu_item_id differents (suite a un Refaire de l'analyse
+            # Ad VIU) ajoutait des copies des items dans les divisions
+            # blindspot car le DELETE (a) ne les touchait pas et l'idempotence
+            # par source_viu_item_id ne reconnaissait pas les nouveaux IDs.
             #
-            # Log diagnostic avant + apres pour visibilite Railway au cas
-            # ou le format BD change a nouveau.
+            # Resultat : apres push, dans les divisions blindspot subsistent
+            # UNIQUEMENT les lignes manuelles / master template (squelette
+            # Ad BUD), pas d'items Ad VIU des pushs precedents. Push = REPLACE
+            # propre de la contribution Ad VIU au projet.
+            #
+            # Format section : REGEXP_REPLACE(..., '\D', '') strip tous les
+            # non-chiffres pour matcher "02 - Site Preparation" comme "02".
             cur.execute(
                 """
-                SELECT COUNT(*) AS total,
-                       COUNT(*) FILTER (
-                           WHERE LEFT(REGEXP_REPLACE(COALESCE(section, ''), '\\D', '', 'g'), 2)
-                                 IN ('01','20','21','22','23','25','26','27','28','31','32','33')
-                       ) AS blindspot_count
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (
+                        WHERE LEFT(REGEXP_REPLACE(COALESCE(section, ''), '\\D', '', 'g'), 2)
+                              NOT IN ('01','20','21','22','23','25','26','27','28','31','32','33')
+                    ) AS non_blindspot,
+                    COUNT(*) FILTER (
+                        WHERE type_source = 'viu_v2'
+                    ) AS viu_items,
+                    COUNT(*) FILTER (
+                        WHERE LEFT(REGEXP_REPLACE(COALESCE(section, ''), '\\D', '', 'g'), 2)
+                              IN ('01','20','21','22','23','25','26','27','28','31','32','33')
+                          AND (type_source IS NULL OR type_source <> 'viu_v2')
+                    ) AS blindspot_skeleton
                 FROM ad_budget.budget_lignes
                 WHERE projet_id = %s
                 """,
@@ -1061,8 +1075,9 @@ def register_ad_budget_routes(get_conn):
             print(
                 f"[from_viu_v2] project {project_id}: BEFORE DELETE — "
                 f"total={counts_before['total']}, "
-                f"blindspot_preserved={counts_before['blindspot_count']}, "
-                f"to_delete={counts_before['total'] - counts_before['blindspot_count']}",
+                f"non_blindspot_to_delete={counts_before['non_blindspot']}, "
+                f"viu_items_to_delete={counts_before['viu_items']}, "
+                f"blindspot_skeleton_preserved={counts_before['blindspot_skeleton']}",
                 flush=True,
             )
 
@@ -1070,8 +1085,11 @@ def register_ad_budget_routes(get_conn):
                 """
                 DELETE FROM ad_budget.budget_lignes
                 WHERE projet_id = %s
-                  AND LEFT(REGEXP_REPLACE(COALESCE(section, ''), '\\D', '', 'g'), 2) NOT IN (
-                      '01','20','21','22','23','25','26','27','28','31','32','33'
+                  AND (
+                      LEFT(REGEXP_REPLACE(COALESCE(section, ''), '\\D', '', 'g'), 2) NOT IN (
+                          '01','20','21','22','23','25','26','27','28','31','32','33'
+                      )
+                      OR type_source = 'viu_v2'
                   )
                 """,
                 (project_id,),
@@ -1084,8 +1102,8 @@ def register_ad_budget_routes(get_conn):
             )
 
             # Log samples post-DELETE pour identifier format du squelette
-            # qui survit (utile si on detecte que des lignes architecturales
-            # restent encore = format non reconnu meme par regex).
+            # qui survit. Apres ce DELETE, ne devraient survivre QUE des
+            # lignes blindspot non-viu (squelette Ad BUD manuel/master).
             cur.execute(
                 """
                 SELECT section, COUNT(*) AS n
@@ -1152,22 +1170,12 @@ def register_ad_budget_routes(get_conn):
                 except (TypeError, ValueError):
                     viu_item_id = None
 
-                # Idempotence par source_viu_item_id : utile pour les items
-                # dans les divisions blindspot (qui n'ont PAS ete DELETE).
-                # Pour les items architecturaux, le DELETE prealable les a
-                # deja effaces, donc cet INSERT recree systematiquement.
-                if viu_item_id is not None:
-                    cur.execute(
-                        """
-                        SELECT id FROM ad_budget.budget_lignes
-                        WHERE projet_id = %s AND source_viu_item_id = %s
-                        LIMIT 1
-                        """,
-                        (project_id, viu_item_id),
-                    )
-                    if cur.fetchone():
-                        lines_skipped += 1
-                        continue
+                # L'idempotence par source_viu_item_id n'est PLUS necessaire
+                # depuis le DELETE REPLACE v3 (2026-05-12) : tous les items
+                # type_source='viu_v2' precedents sont effaces avant cet
+                # INSERT, peu importe leur source_viu_item_id. lines_skipped
+                # reste a 0 (champ conserve dans response pour backward compat
+                # frontend mais semantiquement obsolete).
 
                 note_parts = [note_prefix]
                 item_notes = (item.get("notes") or "").strip()
