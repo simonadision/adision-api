@@ -290,9 +290,20 @@ app = FastAPI(title="Adision API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    # Whitelist explicite : Ad ADM (panneau super_admin), Ad BUD et Ad ANA
+    # (les 2 frontends servis par ce backend), + dev local. allow_credentials
+    # impose une whitelist nommée (le wildcard "*" est refusé par le navigateur
+    # quand credentials=true).
+    allow_origins=[
+        "https://admin.adision.ca",
+        "https://bud.adision.ca",
+        "https://ana.adision.ca",
+        "http://localhost:5173",
+    ],
+    # Couvre les preview deploys Vercel des frontends ad-bud / ad-ana.
+    allow_origin_regex=r"^https://[a-z0-9-]+\.vercel\.app$",
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
