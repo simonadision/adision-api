@@ -312,7 +312,7 @@ app.include_router(register_ad_ana_routes(get_conn))
 
 # JWT auth deps (vérifie signature + module ad_bud, auto-provisionne dans
 # ad_budget.users).
-jwt_user, _jwt_user_or_token, _jwt_admin = make_jwt_deps(get_conn)
+jwt_user, _jwt_user_or_token, _jwt_admin, _jwt_super_admin = make_jwt_deps(get_conn)
 # _jwt_user_or_token est un alias de jwt_user (header OU ?token=) ; conservé
 # dans le tuple pour compat avec d'éventuels imports externes.
 

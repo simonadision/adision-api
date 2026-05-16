@@ -32,9 +32,21 @@ def _get_jwt_secret() -> str:
 
 
 def _decode_token(token: str) -> dict:
-    """Vérifie signature + expiration. Lève 401 si invalide."""
+    """Vérifie signature + expiration. Lève 401 si invalide.
+
+    Rotation gracieuse : si la signature échoue avec JWT_SECRET et qu'un
+    JWT_SECRET_OLD est configuré, réessaie avec l'ancien secret — permet
+    de tourner JWT_SECRET sans déconnecter les utilisateurs. Seul un échec
+    de signature déclenche le repli ; un token expiré ou malformé non.
+    """
     try:
-        return jwt.decode(token, _get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+        try:
+            return jwt.decode(token, _get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+        except jwt.InvalidSignatureError:
+            old = os.environ.get("JWT_SECRET_OLD", "")
+            if old:
+                return jwt.decode(token, old, algorithms=[JWT_ALGORITHM])
+            raise
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expiré, reconnexion nécessaire")
     except jwt.InvalidTokenError as e:
@@ -139,6 +151,31 @@ def make_jwt_deps(get_conn):
             raise HTTPException(status_code=403, detail="Accès admin requis")
         return user
 
+    def jwt_super_admin(
+        authorization: Optional[str] = Header(None),
+        token: Optional[str] = Query(None),
+    ) -> dict:
+        """Dependency réservée aux super_admin (administration transverse :
+        grille des taux horaires, etc.).
+
+        Différences volontaires avec jwt_user / jwt_admin :
+          - NE vérifie PAS le module ad_bud (`_check_module`) : ces endpoints
+            d'administration ne sont pas un usage du module Ad BUD, ils sont
+            appelés depuis Ad ADM. Un super_admin n'a pas forcément le flag
+            ad_bud dans son JWT.
+          - NE provisionne PAS de user local dans ad_budget.users : pas besoin
+            du user_id local ici. Retourne le payload JWT brut (claims sub,
+            email, role, modules, exp) — l'appelant prend `sub`/`email` pour
+            renseigner les colonnes updated_by.
+        """
+        jwt_token = _extract_bearer(authorization, token)
+        payload = _decode_token(jwt_token)
+        if payload.get("role") != "super_admin":
+            raise HTTPException(
+                status_code=403, detail="Accès super_admin requis"
+            )
+        return payload
+
     # On garde jwt_user_or_token comme alias pour la lisibilité des routes
     # de download (PDF / Excel), mais c'est exactement la même fonction.
-    return jwt_user, jwt_user, jwt_admin
+    return jwt_user, jwt_user, jwt_admin, jwt_super_admin
