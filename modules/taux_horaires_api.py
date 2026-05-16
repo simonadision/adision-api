@@ -80,6 +80,11 @@ def _resolve_taux_default(csi_section: Optional[str], conn) -> Optional[Decimal]
         Le taux_col17 (Decimal) du métier mappé à la division, ou None si :
         section vide/None, < 2 caractères, division non mappée, ou taux
         résolu marqué actif=false.
+
+    NB : la logique de résolution (division = 2 premiers caractères de la
+    section, JOIN filtré sur actif = TRUE) est aussi implémentée dans
+    _load_taux_default_map (variante « batch », 1 requête pour les N lignes
+    d'un push). Garder la logique de résolution synchronisée entre les deux.
     """
     if not csi_section:
         return None
@@ -101,6 +106,44 @@ def _resolve_taux_default(csi_section: Optional[str], conn) -> Optional[Decimal]
     finally:
         cur.close()
     return row["taux_col17"] if row else None
+
+
+def _load_taux_default_map(conn) -> dict:
+    """Charge tout le mapping division CSI -> taux par défaut en UNE requête.
+
+    Variante « batch » de _resolve_taux_default, pour les call sites qui
+    créent N lignes de budget d'un coup (push Ad VIU v2, import multi-items) :
+    on charge la table une fois et on résout en mémoire, au lieu de N appels
+    SQL (anti-pattern N+1).
+
+    Args:
+        conn: connexion psycopg active (transaction de l'appelant réutilisée).
+
+    Returns:
+        dict { csi_division (str, 2 caractères) : taux_col17 (Decimal) }.
+        Seuls les taux actifs y figurent ; une division non mappée — ou
+        mappée à un taux inactif — est simplement ABSENTE du dict. L'appelant
+        résout avec map.get(section.strip()[:2], 0).
+
+    NB : la logique de résolution (division = 2 premiers caractères de la
+    section, JOIN filtré sur actif = TRUE) est aussi implémentée dans
+    _resolve_taux_default (variante unitaire). Garder la logique de
+    résolution synchronisée entre les deux.
+    """
+    cur = conn.cursor(row_factory=dict_row)
+    try:
+        cur.execute(
+            """
+            SELECT m.csi_division, t.taux_col17
+            FROM ad_budget.csi_division_default_metier m
+            JOIN ad_budget.taux_horaires t ON t.id = m.taux_id
+            WHERE t.actif = TRUE
+            """
+        )
+        rows = cur.fetchall()
+    finally:
+        cur.close()
+    return {r["csi_division"]: r["taux_col17"] for r in rows}
 
 
 # ─────────────────────────────────────────────────────────────────────────

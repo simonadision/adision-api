@@ -16,6 +16,10 @@ from psycopg.types.json import Json
 from modules.ad_budget_constants import AD_VIU_BLINDSPOT_DIVISIONS
 from modules.aggregates import adapt_budget_lines, compute_aggregates
 from modules.auth_jwt import make_jwt_deps
+from modules.taux_horaires_api import (
+    _load_taux_default_map,
+    _resolve_taux_default,
+)
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import landscape, letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -316,24 +320,35 @@ def _apply_master_template(
         raise ValueError(
             "skip_section_01 et default_divisions sont mutuellement exclusifs"
         )
+    # taux_horaire : auto-fill du taux par défaut (D5), résolu directement en
+    # SQL via la division CSI = LEFT(section, 2), JOIN sur le taux actif du
+    # métier mappé. COALESCE -> 0 si division non mappée ou taux inactif.
+    # Même logique de résolution que _resolve_taux_default (taux_horaires_api)
+    # — garder synchronisé. ad_budget_prix_moyens est aliasé `pm` : le JOIN
+    # sur taux_horaires (qui a aussi une colonne `id`) rendrait `id` ambigu.
     sql = (
         "INSERT INTO ad_budget.budget_lignes "
         "(projet_id, source_item_id, section, description, unite, "
-        " prix_unitaire, qte, ajustement_pct, note, actif) "
-        "SELECT %s, id, section, description, COALESCE(unite, 'global'), "
-        "       COALESCE(prix_unitaire, 0), 0, 0, COALESCE(note, ''), TRUE "
-        "FROM ad_budget.ad_budget_prix_moyens"
+        " prix_unitaire, qte, ajustement_pct, note, actif, taux_horaire) "
+        "SELECT %s, pm.id, pm.section, pm.description, "
+        "       COALESCE(pm.unite, 'global'), COALESCE(pm.prix_unitaire, 0), "
+        "       0, 0, COALESCE(pm.note, ''), TRUE, COALESCE(t.taux_col17, 0) "
+        "FROM ad_budget.ad_budget_prix_moyens pm "
+        "LEFT JOIN ad_budget.csi_division_default_metier dm "
+        "       ON dm.csi_division = LEFT(pm.section, 2) "
+        "LEFT JOIN ad_budget.taux_horaires t "
+        "       ON t.id = dm.taux_id AND t.actif = TRUE"
     )
     params: list = [projet_id]
     if skip_section_01:
         # Le pattern LIKE est parametrise (au lieu de '01 %' inline) pour
         # eviter que psycopg3 interprete le % comme placeholder mal forme.
-        sql += " WHERE section NOT LIKE %s"
+        sql += " WHERE pm.section NOT LIKE %s"
         params.append("01 %")
     elif default_divisions:
         # Filtre sur les 2 premiers chars de section (= code division CSI).
         # ANY(%s::text[]) accepte un array Python, idiomatique psycopg3.
-        sql += " WHERE LEFT(section, 2) = ANY(%s)"
+        sql += " WHERE LEFT(pm.section, 2) = ANY(%s)"
         params.append(list(default_divisions))
     cur.execute(sql, params)
     return cur.rowcount
@@ -1152,6 +1167,11 @@ def register_ad_budget_routes(get_conn):
                 if source_analysis_id else "Importe d'Ad VIU v2"
             )
 
+            # D5 — auto-fill du taux horaire par défaut. Le mapping division
+            # CSI -> taux est chargé UNE seule fois ici (et non par item) pour
+            # éviter le N+1 ; résolution en mémoire dans la boucle ci-dessous.
+            taux_default_map = _load_taux_default_map(conn)
+
             for item in items:
                 section = (item.get("csi_section") or "").strip()
                 description = (item.get("description") or "").strip()
@@ -1205,20 +1225,25 @@ def register_ad_budget_routes(get_conn):
                     note_parts.append(item_notes)
                 note_text = " | ".join(note_parts)
 
+                # D5 — taux horaire par défaut résolu via la division CSI
+                # (section déjà strippée plus haut ; peut être vide ici -> 0).
+                taux_horaire = (
+                    taux_default_map.get(section[:2], 0) if section else 0
+                )
                 cur.execute(
                     """
                     INSERT INTO ad_budget.budget_lignes
                       (projet_id, section, description, unite, prix_unitaire,
                        qte, ajustement_pct, note, actif, source_file, type_source,
-                       source_viu_analysis_id, source_viu_item_id)
+                       source_viu_analysis_id, source_viu_item_id, taux_horaire)
                     VALUES (%s, %s, %s, %s, 0, %s, 0, %s, TRUE, %s, 'viu_v2',
-                            %s, %s)
+                            %s, %s, %s)
                     """,
                     (
                         project_id, section or None, description, unite,
                         qte, note_text,
                         source_file,
-                        source_analysis_id, viu_item_id,
+                        source_analysis_id, viu_item_id, taux_horaire,
                     ),
                 )
                 inserted_count += 1
@@ -2285,11 +2310,20 @@ def register_ad_budget_routes(get_conn):
             unite = data.get("unite", "global")
             prix_unitaire = data.get("prix_unitaire", 0)
 
+        # D5 — auto-fill du taux horaire par défaut. On ne l'applique QUE si
+        # l'appelant n'a pas fourni de taux explicite (ne jamais écraser une
+        # valeur saisie). _resolve_taux_default -> None (division non mappée
+        # ou section vide) => 0.
+        taux_horaire = data.get("taux_horaire")
+        if taux_horaire is None:
+            resolved = _resolve_taux_default(section, conn)
+            taux_horaire = resolved if resolved is not None else 0
+
         cur.execute("""
             INSERT INTO ad_budget.budget_lignes
             (projet_id, source_item_id, section, description, unite, prix_unitaire, qte, ajustement_pct, note, actif,
-             item_id_ad_mat, ad_hub_pending_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             item_id_ad_mat, ad_hub_pending_id, taux_horaire)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """, (
             projet_id,
@@ -2304,6 +2338,7 @@ def register_ad_budget_routes(get_conn):
             data.get("actif", True),
             data.get("item_id_ad_mat"),
             data.get("ad_hub_pending_id"),
+            taux_horaire,
         ))
         row = cur.fetchone()
         conn.commit()
@@ -2324,6 +2359,11 @@ def register_ad_budget_routes(get_conn):
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
 
+        # D5 — auto-fill du taux par défaut. Mapping division CSI -> taux
+        # chargé UNE fois (pas par item) pour éviter le N+1 ; résolution en
+        # mémoire dans la boucle.
+        taux_default_map = _load_taux_default_map(conn)
+
         inserted = 0
         for item_id in item_ids:
             cur.execute("""
@@ -2334,17 +2374,22 @@ def register_ad_budget_routes(get_conn):
             source = cur.fetchone()
             if not source:
                 continue
+            section = source["section"]
+            taux_horaire = (
+                taux_default_map.get(section.strip()[:2], 0) if section else 0
+            )
             cur.execute("""
                 INSERT INTO ad_budget.budget_lignes
-                (projet_id, source_item_id, section, description, unite, prix_unitaire)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                (projet_id, source_item_id, section, description, unite, prix_unitaire, taux_horaire)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
             """, (
                 projet_id,
                 item_id,
-                source["section"],
+                section,
                 source["description"],
                 source["unite"],
-                source["prix_unitaire"] or 0
+                source["prix_unitaire"] or 0,
+                taux_horaire,
             ))
             inserted += 1
 

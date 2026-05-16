@@ -24,7 +24,12 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from modules.taux_horaires_api import register_taux_horaires_routes
+from modules.ad_budget_api import register_ad_budget_routes
+from modules.taux_horaires_api import (
+    _load_taux_default_map,
+    _resolve_taux_default,
+    register_taux_horaires_routes,
+)
 
 # Secret de test ≥ 32 octets (évite InsecureKeyLengthWarning de PyJWT).
 TEST_SECRET = "taux-horaires-pytest-secret-au-moins-32-octets-ok"
@@ -69,6 +74,9 @@ class FakeCursor:
     def __init__(self, responses):
         self._responses = list(responses)
         self.executed = []
+        # Certains endpoints (ex. from-viu-v2) lisent cur.rowcount après un
+        # DELETE/INSERT. Le FakeCursor n'exécute rien -> 0 suffit.
+        self.rowcount = 0
 
     def execute(self, sql, params=None):
         self.executed.append((sql, params))
@@ -91,6 +99,9 @@ class FakeConn:
         return self._cursor
 
     def commit(self):
+        pass
+
+    def rollback(self):
         pass
 
     def close(self):
@@ -433,3 +444,174 @@ def test_22_jwt_user_403_sur_admin():
     client, _ = make_client([])
     r = client.get("/admin/taux-horaires", headers=headers_user())
     assert r.status_code == 403
+
+
+# ── D5 — helper _load_taux_default_map ────────────────────────────────────
+
+def test_23_load_taux_map_construit_dict():
+    """fetchall des mappings -> dict { csi_division: taux_col17 }."""
+    cur = FakeCursor([[
+        {"csi_division": "06", "taux_col17": Decimal("84.64")},
+        {"csi_division": "22", "taux_col17": Decimal("80.00")},
+    ]])
+    m = _load_taux_default_map(FakeConn(cur))
+    assert m == {"06": Decimal("84.64"), "22": Decimal("80.00")}
+
+
+def test_23_load_taux_map_vide():
+    """Aucun mapping -> dict vide."""
+    assert _load_taux_default_map(FakeConn(FakeCursor([[]]))) == {}
+
+
+def test_24_load_taux_map_sql_filtre_actif_join():
+    """La requête filtre les taux actifs et joint les 2 tables — c'est le SQL
+    qui exclut division non mappée / taux inactif. Le FakeCursor n'exécute
+    rien : on vérifie donc que le filtre est bien présent dans la requête."""
+    cur = FakeCursor([[]])
+    _load_taux_default_map(FakeConn(cur))
+    sql = cur.executed[0][0]
+    assert "t.actif = TRUE" in sql
+    assert "ad_budget.csi_division_default_metier" in sql
+    assert "JOIN ad_budget.taux_horaires" in sql
+
+
+# ── D5 — helper _resolve_taux_default ─────────────────────────────────────
+
+def test_25_resolve_taux_section_mappee():
+    """Section dont la division est mappée -> taux_col17 retourné ; la
+    requête est paramétrée sur les 2 premiers caractères de la section."""
+    cur = FakeCursor([{"taux_col17": Decimal("77.00")}])
+    assert _resolve_taux_default("06 40 0", FakeConn(cur)) == Decimal("77.00")
+    assert cur.executed[0][1] == ("06",)
+
+
+def test_25_resolve_taux_division_non_mappee():
+    """fetchone -> None (division absente du mapping) -> None."""
+    assert _resolve_taux_default("99 99 9", FakeConn(FakeCursor([None]))) is None
+
+
+def test_25_resolve_taux_section_vide_ou_courte():
+    """Section None / vide / < 2 caractères -> None, sans aucune requête."""
+    cur = FakeCursor([])
+    assert _resolve_taux_default(None, FakeConn(cur)) is None
+    assert _resolve_taux_default("", FakeConn(FakeCursor([]))) is None
+    assert _resolve_taux_default("0", FakeConn(FakeCursor([]))) is None
+    assert cur.executed == []
+
+
+# ── D5 — site D : auto-fill à l'ajout manuel d'une ligne ──────────────────
+# create_budget_ligne (POST /budget/projets/{id}/lignes, modules/ad_budget_api).
+# Flux des requêtes consommées sur le FakeCursor partagé : 1) jwt_user ->
+# _provision_user (SELECT users) ; 2) éventuel _resolve_taux_default ;
+# 3) INSERT ... RETURNING *.
+
+def make_budget_client(responses):
+    """Monte le router Ad BUD sur une app de test, get_conn stubbé.
+    Retourne (TestClient, FakeCursor)."""
+    cursor = FakeCursor(responses)
+    conn = FakeConn(cursor)
+    app = FastAPI()
+    app.include_router(register_ad_budget_routes(lambda: conn))
+    return TestClient(app), cursor
+
+
+def _insert_budget_ligne(cur):
+    """(sql, params) de l'INSERT budget_lignes RETURNING * (site D)."""
+    return next((s, p) for s, p in cur.executed
+                if "INSERT INTO ad_budget.budget_lignes" in s)
+
+
+def test_26_site_d_absence_declenche_resolution():
+    """Sans taux_horaire fourni : _resolve_taux_default est appelé et son
+    résultat est inséré comme dernier paramètre de l'INSERT."""
+    client, cur = make_budget_client([
+        SAMPLE_USER_ROW,                       # _provision_user
+        {"taux_col17": Decimal("77.00")},      # _resolve_taux_default
+        {"id": 1, "taux_horaire": Decimal("77.00")},  # INSERT RETURNING *
+    ])
+    r = client.post("/budget/projets/1/lignes",
+                     json={"section": "06 40 0", "description": "Test"},
+                     headers=headers_user())
+    assert r.status_code == 200
+    assert any("csi_division_default_metier" in s for s, _ in cur.executed)
+    _, params = _insert_budget_ligne(cur)
+    assert params[-1] == Decimal("77.00")
+
+
+def test_26_site_d_division_non_mappee_zero():
+    """Sans taux fourni et division non mappée (_resolve -> None) -> 0 inséré."""
+    client, cur = make_budget_client([
+        SAMPLE_USER_ROW,
+        None,                                  # _resolve_taux_default -> None
+        {"id": 1, "taux_horaire": 0},
+    ])
+    r = client.post("/budget/projets/1/lignes",
+                     json={"section": "99 99 9", "description": "Test"},
+                     headers=headers_user())
+    assert r.status_code == 200
+    _, params = _insert_budget_ligne(cur)
+    assert params[-1] == 0
+
+
+def test_27_site_d_taux_explicite_non_ecrase():
+    """Si taux_horaire est fourni explicitement : il n'est PAS écrasé et
+    _resolve_taux_default n'est PAS appelé."""
+    client, cur = make_budget_client([
+        SAMPLE_USER_ROW,
+        {"id": 1, "taux_horaire": 95.5},       # pas de réponse de résolution
+    ])
+    r = client.post("/budget/projets/1/lignes",
+                     json={"section": "06 40 0", "description": "Test",
+                           "taux_horaire": 95.5},
+                     headers=headers_user())
+    assert r.status_code == 200
+    assert not any("csi_division_default_metier" in s for s, _ in cur.executed)
+    _, params = _insert_budget_ligne(cur)
+    assert params[-1] == 95.5
+
+
+# ── D5 — site C : auto-fill au push from-viu-v2 ───────────────────────────
+# projects_from_viu_v2 (POST /budget/projects/from-viu-v2). En mode=existing,
+# le FakeCursor sert dans l'ordre : 1) _provision_user (SELECT users) ;
+# 2) SELECT projets ; 3) counts_before ; 4) samples post-DELETE (fetchall) ;
+# 5) sections existantes (fetchall) ; 6) _load_taux_default_map (fetchall).
+# Les INSERT de la boucle ne consomment rien (pas de RETURNING).
+
+def test_28_site_c_from_viu_v2_autofill():
+    """Push from-viu-v2 : le taux par défaut est résolu par division CSI,
+    le mapping est chargé une seule fois, chaque INSERT reçoit son taux."""
+    client, cur = make_budget_client([
+        SAMPLE_USER_ROW,                                  # _provision_user
+        {"id": 1, "nom": "Projet test", "user_id": 7},    # SELECT projets
+        {"total": 0, "non_blindspot": 0,                  # counts_before
+         "viu_items": 0, "blindspot_skeleton": 0},
+        [],                                               # samples post-DELETE
+        [],                                               # sections existantes
+        [{"csi_division": "06",                           # _load_taux_default_map
+          "taux_col17": Decimal("84.64")}],
+    ])
+    r = client.post("/budget/projects/from-viu-v2", json={
+        "mode": "existing",
+        "project_id": 1,
+        "source_analysis_id": 18,
+        "items": [
+            {"csi_section": "06 40 0", "description": "Item mappé", "id": 1},
+            {"csi_section": "99 10 0", "description": "Item non mappé", "id": 2},
+            {"description": "Item sans section", "id": 3},
+        ],
+    }, headers=headers_user())
+    assert r.status_code == 200
+
+    # _load_taux_default_map appelé UNE seule fois (pas par item) : son JOIN
+    # sur csi_division_default_metier ne doit apparaître qu'une fois.
+    map_queries = [s for s, _ in cur.executed
+                   if "csi_division_default_metier" in s]
+    assert len(map_queries) == 1
+
+    # Chaque INSERT budget_lignes (viu_v2) reçoit le bon taux_horaire en
+    # dernier paramètre : division mappée -> 84.64 ; non mappée -> 0 ;
+    # section absente -> 0.
+    inserts = [p for s, p in cur.executed
+               if "INSERT INTO ad_budget.budget_lignes" in s and "viu_v2" in s]
+    assert len(inserts) == 3
+    assert [p[-1] for p in inserts] == [Decimal("84.64"), 0, 0]
