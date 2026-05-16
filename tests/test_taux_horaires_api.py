@@ -48,6 +48,21 @@ def headers(role="super_admin"):
     return {"Authorization": f"Bearer {forge_jwt(role)}"}
 
 
+def forge_jwt_user(email="estimateur@adision.ca"):
+    """JWT d'un user normal Ad BUD : role 'user' + module ad_bud (requis par
+    jwt_user._check_module). Utilisé pour /budget/taux-horaires."""
+    now = int(time.time())
+    return jwt.encode(
+        {"sub": email, "email": email, "role": "user",
+         "modules": ["ad_bud"], "exp": now + 3600},
+        TEST_SECRET, algorithm="HS256",
+    )
+
+
+def headers_user(email="estimateur@adision.ca"):
+    return {"Authorization": f"Bearer {forge_jwt_user(email)}"}
+
+
 class FakeCursor:
     """Curseur factice scripté : fetchone()/fetchall() consomment `responses`
     dans l'ordre. `executed` enregistre les (sql, params) pour inspection."""
@@ -106,6 +121,19 @@ SAMPLE_MAPPING = {
     "updated_by": "seed", "taux_code": "CHARPENTIER_C",
     "taux_metier": "Charpentier-menuisier", "taux_col17": Decimal("84.64"),
     "taux_actif": True,
+}
+
+# Row renvoyé par _provision_user (jwt_user) : user local ad_budget.users.
+# Non-None -> jwt_user ne déclenche pas l'INSERT d'auto-provision.
+SAMPLE_USER_ROW = {
+    "id": 7, "nom": "Estimateur", "email": "estimateur@adision.ca",
+    "role": "user", "created_at": "2026-01-01T00:00:00",
+}
+# Row taux tel que renvoyé par GET /budget/taux-horaires : 6 champs only.
+PUBLIC_TAUX = {
+    "id": 1, "code": "CHARPENTIER_C", "metier": "Charpentier-menuisier",
+    "qualification": "Compagnon", "taux_col17": Decimal("84.64"),
+    "groupe": "metier",
 }
 
 
@@ -333,3 +361,75 @@ def test_18_patch_mapping_valide_200():
                       headers=headers())
     assert r.status_code == 200
     assert r.json()["taux_id"] == 5
+
+
+# ── GET /budget/taux-horaires — lecture user (D4.0) ───────────────────────
+# Le flux jwt_user consomme d'abord 1 fetchone (SAMPLE_USER_ROW, via
+# _provision_user — non-None pour éviter l'INSERT), puis l'endpoint consomme
+# 1 fetchall (la liste des taux).
+
+def _taux_sql(cur):
+    """Extrait le (sql, params) du SELECT sur ad_budget.taux_horaires —
+    le 1er execute (SELECT users de _provision_user) est ignoré."""
+    return next((s, p) for s, p in cur.executed
+                if "ad_budget.taux_horaires" in s)
+
+
+def test_19_budget_taux_jwt_user_200():
+    """Un user normal (role=user + module ad_bud) accède à la lecture."""
+    client, _ = make_client([SAMPLE_USER_ROW, [PUBLIC_TAUX]])
+    r = client.get("/budget/taux-horaires", headers=headers_user())
+    assert r.status_code == 200
+    items = r.json()["items"]
+    assert len(items) == 1 and items[0]["code"] == "CHARPENTIER_C"
+
+
+def test_19_budget_taux_sans_token_401():
+    client, _ = make_client([])
+    r = client.get("/budget/taux-horaires")
+    assert r.status_code == 401
+
+
+def test_20_budget_taux_6_champs_seulement():
+    """Le SELECT ne projette que les 6 champs du picker — pas updated_*/notes."""
+    client, cur = make_client([SAMPLE_USER_ROW, [PUBLIC_TAUX]])
+    client.get("/budget/taux-horaires", headers=headers_user())
+    sql, _ = _taux_sql(cur)
+    select_part = sql.split("FROM")[0]
+    for col in ("id", "code", "metier", "qualification", "taux_col17", "groupe"):
+        assert col in select_part
+    assert "notes" not in select_part
+    assert "updated_by" not in select_part
+    assert "updated_at" not in select_part
+
+
+def test_20_budget_taux_filtre_actif():
+    """La lecture user ne renvoie que les taux actifs."""
+    client, cur = make_client([SAMPLE_USER_ROW, []])
+    client.get("/budget/taux-horaires", headers=headers_user())
+    sql, _ = _taux_sql(cur)
+    assert "actif = TRUE" in sql
+
+
+def test_21_budget_taux_filtre_groupe():
+    client, cur = make_client([SAMPLE_USER_ROW, []])
+    client.get("/budget/taux-horaires?groupe=occupation", headers=headers_user())
+    sql, params = _taux_sql(cur)
+    assert "groupe = %s" in sql
+    assert "occupation" in params
+
+
+def test_21_budget_taux_search_ilike():
+    client, cur = make_client([SAMPLE_USER_ROW, []])
+    client.get("/budget/taux-horaires?search=charp", headers=headers_user())
+    sql, params = _taux_sql(cur)
+    assert "ILIKE" in sql
+    assert "%charp%" in params
+
+
+def test_22_jwt_user_403_sur_admin():
+    """Le même user normal qui lit /budget/taux-horaires reste refusé (403)
+    sur les endpoints d'administration /admin/* (dependency jwt_super_admin)."""
+    client, _ = make_client([])
+    r = client.get("/admin/taux-horaires", headers=headers_user())
+    assert r.status_code == 403

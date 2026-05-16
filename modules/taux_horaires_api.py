@@ -109,16 +109,24 @@ def _resolve_taux_default(csi_section: Optional[str], conn) -> Optional[Decimal]
 
 def register_taux_horaires_routes(get_conn):
     # make_jwt_deps retourne (jwt_user, jwt_user_or_token, jwt_admin, jwt_super_admin)
-    _, _, _, jwt_super_admin = make_jwt_deps(get_conn)
+    jwt_user, _, _, jwt_super_admin = make_jwt_deps(get_conn)
 
-    router = APIRouter(
+    # Router parent neutre — aucun prefix, aucune dependency propre. Il agrège
+    # deux sous-routers aux contrôles d'accès distincts (include_router en fin
+    # de fonction). api.py monte ce parent tel quel : la refonte est invisible
+    # côté appelant.
+    parent = APIRouter()
+
+    # Sous-router ADMIN — les 7 endpoints d'administration, réservés super_admin
+    # (dependency posée au niveau du sous-router).
+    admin = APIRouter(
         prefix="/admin",
         tags=["Taux horaires"],
         dependencies=[Depends(jwt_super_admin)],
     )
 
     # ── GET /admin/taux-horaires — liste paginée + filtres ───────────────
-    @router.get("/taux-horaires")
+    @admin.get("/taux-horaires")
     def list_taux_horaires(
         groupe: Optional[str] = None,
         actif: str = "true",
@@ -170,7 +178,7 @@ def register_taux_horaires_routes(get_conn):
         return {"total": total, "items": items, "limit": limit, "offset": offset}
 
     # ── GET /admin/taux-horaires/{id} — détail ───────────────────────────
-    @router.get("/taux-horaires/{taux_id}")
+    @admin.get("/taux-horaires/{taux_id}")
     def get_taux_horaire(taux_id: int):
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
@@ -188,7 +196,7 @@ def register_taux_horaires_routes(get_conn):
         return row
 
     # ── POST /admin/taux-horaires — création ─────────────────────────────
-    @router.post("/taux-horaires", status_code=201)
+    @admin.post("/taux-horaires", status_code=201)
     def create_taux_horaire(
         body: TauxHoraireCreate,
         payload: dict = Depends(jwt_super_admin),
@@ -234,7 +242,7 @@ def register_taux_horaires_routes(get_conn):
         return row
 
     # ── PATCH /admin/taux-horaires/{id} — modification partielle ─────────
-    @router.patch("/taux-horaires/{taux_id}")
+    @admin.patch("/taux-horaires/{taux_id}")
     def update_taux_horaire(
         taux_id: int,
         body: TauxHorairePatch,
@@ -295,7 +303,7 @@ def register_taux_horaires_routes(get_conn):
         return row
 
     # ── DELETE /admin/taux-horaires/{id} — soft-delete (actif=false) ─────
-    @router.delete("/taux-horaires/{taux_id}")
+    @admin.delete("/taux-horaires/{taux_id}")
     def soft_delete_taux_horaire(
         taux_id: int,
         payload: dict = Depends(jwt_super_admin),
@@ -345,7 +353,7 @@ def register_taux_horaires_routes(get_conn):
         return row
 
     # ── GET /admin/csi-division-mapping — liste des 19 mappings ──────────
-    @router.get("/csi-division-mapping")
+    @admin.get("/csi-division-mapping")
     def list_csi_division_mapping():
         """Liste les mappings division CSI -> taux par défaut, avec les infos
         du métier joint. Réponse : { items[] }."""
@@ -369,7 +377,7 @@ def register_taux_horaires_routes(get_conn):
         return {"items": items}
 
     # ── PATCH /admin/csi-division-mapping/{csi_division} ─────────────────
-    @router.patch("/csi-division-mapping/{csi_division}")
+    @admin.patch("/csi-division-mapping/{csi_division}")
     def update_csi_division_mapping(
         csi_division: str,
         body: CsiMappingPatch,
@@ -424,4 +432,54 @@ def register_taux_horaires_routes(get_conn):
             conn.close()
         return row
 
-    return router
+    # Sous-router USER — lecture seule de la grille des taux, ouverte à tout
+    # utilisateur Ad BUD authentifié (alimente le TauxHorairePicker côté
+    # frontend, phase D4). Aucun accès aux mutations ni au mapping CSI.
+    user = APIRouter(
+        prefix="/budget",
+        tags=["Taux horaires"],
+        dependencies=[Depends(jwt_user)],
+    )
+
+    # ── GET /budget/taux-horaires — liste des taux actifs (lecture user) ──
+    @user.get("/taux-horaires")
+    def list_taux_horaires_public(
+        groupe: Optional[str] = None,
+        search: Optional[str] = None,
+    ):
+        """Liste des taux horaires actifs — alimente le picker côté Ad BUD.
+
+        Réponse : { items[] }. N'expose que les 6 champs utiles au picker
+        (id, code, metier, qualification, taux_col17, groupe) — pas de
+        notes / ordre / actif / updated_*. Pas de pagination (jeu réduit,
+        ~175 lignes). Filtres groupe / search optionnels.
+        """
+        where = ["actif = TRUE"]
+        params: list = []
+        if groupe:
+            where.append("groupe = %s")
+            params.append(groupe)
+        if search:
+            where.append("(metier ILIKE %s OR code ILIKE %s)")
+            like = f"%{search}%"
+            params.extend([like, like])
+        where_sql = " AND ".join(where)
+
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute(
+                f"SELECT id, code, metier, qualification, taux_col17, groupe "
+                f"FROM ad_budget.taux_horaires WHERE {where_sql} "
+                f"ORDER BY groupe, ordre, metier",
+                params,
+            )
+            items = cur.fetchall()
+        finally:
+            cur.close()
+            conn.close()
+        return {"items": items}
+
+    parent.include_router(admin)
+    parent.include_router(user)
+    return parent
