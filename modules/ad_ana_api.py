@@ -39,7 +39,7 @@ def _parse_csv(value: Optional[str]) -> list:
 
 
 def register_ad_ana_routes(get_conn):
-    jwt_user, _, _ = make_jwt_deps(get_conn)
+    jwt_user, _, _, _ = make_jwt_deps(get_conn)
 
     # Toutes les routes /ana/* exigent un JWT valide. Pas de check de module
     # spécifique (ad_ana) en Sprint C v1 — n'importe quel user authentifié

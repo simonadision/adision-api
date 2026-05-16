@@ -367,7 +367,7 @@ def build_pdf_logo(logo_base64: str, max_width: float = 180):
 
 def register_ad_budget_routes(get_conn):
 
-    jwt_user, jwt_user_or_token, jwt_admin = make_jwt_deps(get_conn)
+    jwt_user, jwt_user_or_token, jwt_admin, _ = make_jwt_deps(get_conn)
 
     # Toutes les routes /budget/* exigent un JWT valide avec module ad_bud.
     # Les routes admin imposent en plus role="admin" (Depends(jwt_admin)).

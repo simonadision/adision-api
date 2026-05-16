@@ -109,8 +109,11 @@ def _provision_user(conn, payload: dict) -> dict:
 def make_jwt_deps(get_conn):
     """Crée les FastAPI dependencies bound au get_conn de l'app.
 
-    Usage :
-        jwt_user, jwt_user_or_token = make_jwt_deps(get_conn)
+    Retourne un 4-uple :
+        jwt_user, jwt_user_or_token, jwt_admin, jwt_super_admin = make_jwt_deps(get_conn)
+
+    Tout appelant qui déballe ce retour DOIT prévoir 4 variables (utiliser
+    `_` pour celles non utilisées). Exemple :
         @router.get("/budget/projets")
         def get_projets(user=Depends(jwt_user)):
             ...
