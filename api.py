@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -281,9 +282,95 @@ def _ensure_schema():
         print(f"[startup] schema migration failed: {e}", flush=True)
 
 
+# Migrations migrations/sprint_*.sql appliquées AVANT l'existence de
+# _bootstrap_db (à la main par le passé). Pré-enregistrées « jouées » ->
+# jamais ré-exécutées. sprint2_taux_horaires_seed.sql est un SEED : un
+# rejouage dupliquerait les données — d'où ce garde-fou.
+_LEGACY_MIGRATIONS = (
+    "sprint1_5_ad_mat_links.sql",
+    "sprint2_taux_horaires_schema.sql",
+    "sprint2_taux_horaires_seed.sql",
+    "sprint_a_ad_bud_metadata.sql",
+)
+
+
+def _bootstrap_db():
+    """Applique au démarrage les migrations migrations/*.sql non encore jouées.
+
+    Suivi : table ad_budget.schema_migrations (une ligne par fichier joué) —
+    un fichier déjà enregistré est ignoré ; chaque migration ne tourne qu'UNE
+    fois, quelle que soit l'idempotence de son SQL. Les fichiers legacy
+    (_LEGACY_MIGRATIONS) sont pré-enregistrés : appliqués avant ce mécanisme,
+    on ne les rejoue jamais.
+
+    Best-effort : toute erreur est logguée, l'app démarre quand même (même
+    esprit que _ensure_schema). Migration + enregistrement = une transaction ;
+    une migration en échec n'est pas enregistrée -> réessayée au prochain boot.
+    """
+    try:
+        conn = get_conn()
+    except Exception as e:
+        print(f"[bootstrap] connexion BD échouée : {e}", flush=True)
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS ad_budget.schema_migrations ("
+            " filename TEXT PRIMARY KEY,"
+            " applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+        )
+        for legacy in _LEGACY_MIGRATIONS:
+            cur.execute(
+                "INSERT INTO ad_budget.schema_migrations (filename) VALUES (%s)"
+                " ON CONFLICT (filename) DO NOTHING",
+                (legacy,),
+            )
+        conn.commit()
+        cur.execute("SELECT filename FROM ad_budget.schema_migrations")
+        done = {r[0] for r in cur.fetchall()}
+        cur.close()
+
+        migrations_dir = Path(__file__).parent / "migrations"
+        if not migrations_dir.is_dir():
+            print("[bootstrap] dossier migrations/ absent", flush=True)
+            return
+        files = sorted(migrations_dir.glob("*.sql"))
+        print(
+            f"[bootstrap] {len(files)} fichier(s) SQL ; déjà joués : "
+            f"{sorted(done)}",
+            flush=True,
+        )
+        for f in files:
+            if f.name in done:
+                continue
+            sql = f.read_text(encoding="utf-8")
+            cur = conn.cursor()
+            try:
+                cur.execute(sql)
+                cur.execute(
+                    "INSERT INTO ad_budget.schema_migrations (filename)"
+                    " VALUES (%s) ON CONFLICT (filename) DO NOTHING",
+                    (f.name,),
+                )
+                conn.commit()
+                print(f"[bootstrap] {f.name} ✓", flush=True)
+            except Exception as e:
+                conn.rollback()
+                print(
+                    f"[bootstrap] ERREUR sur {f.name} : "
+                    f"{type(e).__name__} : {e}",
+                    flush=True,
+                )
+            finally:
+                cur.close()
+    finally:
+        conn.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _ensure_schema()
+    _bootstrap_db()
     yield
 
 
