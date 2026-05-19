@@ -380,6 +380,78 @@ def build_pdf_logo(logo_base64: str, max_width: float = 180):
     except Exception:
         return ""
 
+def _authorize_projet(projet, user, mode):
+    """Contrôle d'accès centralisé à un projet Ad BUD (PHASE 3A multi-tenant).
+
+    projet : ligne ad_budget.projets déjà chargée — doit contenir `user_id` et
+             `organization_id` — ou None si le projet est introuvable.
+    user   : objet retourné par Depends(jwt_user) — id, platform_role,
+             org_role, organization_id.
+    mode   : 'read' ou 'write'.
+
+    LECTURE  : propriétaire OU super_admin OU superviseur.
+    ÉCRITURE : propriétaire OU super_admin (jamais superviseur — un
+               org_role='admin' supervise en lecture seule).
+    Lève 404 si le projet est inexistant OU hors du périmètre visible (on ne
+    révèle pas l'existence d'un projet d'une autre organisation). Lève 403 si
+    le projet est visible mais l'écriture refusée (superviseur en mode 'write').
+    """
+    if projet is None:
+        raise HTTPException(status_code=404, detail="Projet introuvable")
+
+    is_owner = projet["user_id"] == user["id"]
+    is_super_admin = user.get("platform_role") == "super_admin"
+
+    # Superviseur : org_role='admin' ET les DEUX organization_id non-NULL et
+    # égaux. La double non-nullité est CRITIQUE — sans elle, NULL == NULL
+    # ferait tout matcher (aujourd'hui presque tous les organization_id sont
+    # NULL).
+    user_org = user.get("organization_id")
+    projet_org = projet.get("organization_id")
+    is_supervisor = (
+        user.get("org_role") == "admin"
+        and user_org is not None
+        and projet_org is not None
+        and projet_org == user_org
+    )
+
+    if is_owner or is_super_admin:
+        return  # accès total (lecture + écriture)
+    if mode == "read" and is_supervisor:
+        return  # superviseur : lecture seule
+    if is_supervisor:
+        # mode 'write' : projet VISIBLE mais non modifiable -> 403.
+        raise HTTPException(
+            status_code=403,
+            detail="Lecture seule : vous ne pouvez pas modifier le projet "
+                   "d'un autre utilisateur de votre organisation",
+        )
+    # Ni propriétaire, ni super_admin, ni superviseur du périmètre : projet
+    # hors périmètre -> 404 (ne pas révéler son existence).
+    raise HTTPException(status_code=404, detail="Projet introuvable")
+
+
+def _load_and_authorize_projet(get_conn, projet_id, user, mode):
+    """Charge le projet {projet_id} sur une connexion DÉDIÉE (fermée aussitôt
+    via try/finally — aucune fuite de connexion, même sur un rejet 403/404)
+    puis applique _authorize_projet. À appeler en PREMIÈRE ligne de chaque
+    endpoint projet ; pour les endpoints budget_lignes, avec le projet_id du
+    PROJET PARENT de la route."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor(row_factory=dict_row)
+        cur.execute(
+            "SELECT user_id, organization_id FROM ad_budget.projets "
+            "WHERE id = %s",
+            (projet_id,),
+        )
+        projet = cur.fetchone()
+        cur.close()
+    finally:
+        conn.close()
+    _authorize_projet(projet, user, mode)
+
+
 def register_ad_budget_routes(get_conn):
 
     jwt_user, jwt_user_or_token, jwt_admin, _ = make_jwt_deps(get_conn)
@@ -705,8 +777,21 @@ def register_ad_budget_routes(get_conn):
         # Sprint A : nouveaux query params pour la liste filtrée. Par défaut,
         # les projets 'archive' sont masqués (sauf si include_archived=true ou
         # si on demande explicitement statut=archive).
-        where = ["p.user_id = %s"]
-        params = [user["id"]]
+        # PHASE 3A — périmètre de visibilité :
+        #   super_admin                       -> tous les projets ;
+        #   org_role='admin' + organization_id -> ses projets + ceux de son
+        #       organisation (vue superviseur, lecture seule) ;
+        #   sinon                             -> ses propres projets (legacy).
+        if user.get("platform_role") == "super_admin":
+            where = ["TRUE"]
+            params = []
+        elif (user.get("org_role") == "admin"
+              and user.get("organization_id") is not None):
+            where = ["(p.user_id = %s OR p.organization_id = %s)"]
+            params = [user["id"], user["organization_id"]]
+        else:
+            where = ["p.user_id = %s"]
+            params = [user["id"]]
         if statut:
             where.append("p.statut = %s")
             params.append(statut)
@@ -822,11 +907,12 @@ def register_ad_budget_routes(get_conn):
                     )
                 cur.execute(
                     """
-                    INSERT INTO ad_budget.projets (user_id, nom, statut)
-                    VALUES (%s, %s, 'brouillon')
+                    INSERT INTO ad_budget.projets
+                        (user_id, organization_id, nom, statut)
+                    VALUES (%s, %s, %s, 'brouillon')
                     RETURNING id, nom
                     """,
-                    (user["id"], project_name),
+                    (user["id"], user["organization_id"], project_name),
                 )
                 proj = cur.fetchone()
                 # Squelette standard appliqué au nouveau projet — même logique
@@ -1009,11 +1095,12 @@ def register_ad_budget_routes(get_conn):
                     )
                 cur.execute(
                     """
-                    INSERT INTO ad_budget.projets (user_id, nom, statut)
-                    VALUES (%s, %s, 'brouillon')
+                    INSERT INTO ad_budget.projets
+                        (user_id, organization_id, nom, statut)
+                    VALUES (%s, %s, %s, 'brouillon')
                     RETURNING id, nom
                     """,
-                    (user["id"], project_name),
+                    (user["id"], user["organization_id"], project_name),
                 )
                 proj = cur.fetchone()
                 # Squelette complet sans filtre. Le DELETE REPLACE ci-dessous
@@ -1306,7 +1393,7 @@ def register_ad_budget_routes(get_conn):
 
         cur.execute("""
             INSERT INTO ad_budget.projets
-              (user_id, nom, client, adresse, description, statut,
+              (user_id, organization_id, nom, client, adresse, description, statut,
                nom_client, contact_client, email_client, telephone_client,
                numero_projet, date_debut, date_fin,
                contact_entrepreneur, email_entrepreneur, telephone_entrepreneur,
@@ -1314,7 +1401,7 @@ def register_ad_budget_routes(get_conn):
                pct_admin_conditions, pct_admin_architecture,
                pct_admin_mecanique, pct_admin_excavation,
                type_batiment, region, date_adjudication, superficie_m2)
-            VALUES (%s, %s, %s, %s, %s, %s,
+            VALUES (%s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s,
                     %s, %s, %s,
                     %s, %s, %s,
@@ -1324,6 +1411,7 @@ def register_ad_budget_routes(get_conn):
             RETURNING *
         """, (
             data["user_id"],
+            user["organization_id"],
             data["nom"],
             data.get("client", ""),
             data.get("adresse", ""),
@@ -1365,7 +1453,9 @@ def register_ad_budget_routes(get_conn):
         return {"status": "created", "projet": row, "nb_lignes_creees": nb_lignes}
 
     @router.get("/projets/{projet_id}")
-    def get_projet(projet_id: int):
+    def get_projet(projet_id: int, user=Depends(jwt_user)):
+        # PHASE 3A — authentification + autorisation (lecture).
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         # LEFT JOIN : meme rationale que get_projets ci-dessus. Sans LEFT
@@ -1387,7 +1477,9 @@ def register_ad_budget_routes(get_conn):
         return row
 
     @router.put("/projets/{projet_id}")
-    def update_projet(projet_id: int, data: dict):
+    def update_projet(projet_id: int, data: dict, user=Depends(jwt_user)):
+        # PHASE 3A — authentification + autorisation (écriture).
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         # Sprint A : récupère le statut actuel pour la cross-field validation
@@ -1475,7 +1567,9 @@ def register_ad_budget_routes(get_conn):
         return updated
 
     @router.delete("/projets/{projet_id}")
-    def delete_projet(projet_id: int):
+    def delete_projet(projet_id: int, user=Depends(jwt_user)):
+        # PHASE 3A — authentification + autorisation (écriture).
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
         conn = get_conn()
         cur = conn.cursor()
         # Les budget_lignes sont supprimées automatiquement (CASCADE)
@@ -1486,7 +1580,9 @@ def register_ad_budget_routes(get_conn):
         return {"status": "deleted"}
 
     @router.patch("/projets/{projet_id}/notes")
-    def update_projet_notes(projet_id: int, data: dict):
+    def update_projet_notes(projet_id: int, data: dict, user=Depends(jwt_user)):
+        # PHASE 3A — authentification + autorisation (écriture).
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
         conn = get_conn()
         cur = conn.cursor()
         cur.execute(
@@ -1499,7 +1595,10 @@ def register_ad_budget_routes(get_conn):
         return {"status": "updated"}
 
     @router.post("/projets/{projet_id}/duplicate")
-    def duplicate_projet(projet_id: int):
+    def duplicate_projet(projet_id: int, user=Depends(jwt_user)):
+        # PHASE 3A — authentification + autorisation (écriture : dupliquer le
+        # projet d'un autre user est refusé, même à un superviseur d'org).
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         cur.execute("SELECT id, nom FROM ad_budget.projets WHERE id = %s", (projet_id,))
@@ -1510,14 +1609,14 @@ def register_ad_budget_routes(get_conn):
             raise HTTPException(status_code=404, detail="Projet not found")
         cur.execute("""
             INSERT INTO ad_budget.projets
-              (user_id, nom, client, adresse, description, statut, notes,
+              (user_id, organization_id, nom, client, adresse, description, statut, notes,
                nom_client, contact_client, email_client, telephone_client,
                numero_projet, date_debut, date_fin,
                contact_entrepreneur, email_entrepreneur, telephone_entrepreneur,
                logo_base64,
                pct_admin_conditions, pct_admin_architecture,
                pct_admin_mecanique, pct_admin_excavation)
-            SELECT user_id, %s, client, adresse, description, statut, notes,
+            SELECT %s, %s, %s, client, adresse, description, statut, notes,
                    nom_client, contact_client, email_client, telephone_client,
                    numero_projet, date_debut, date_fin,
                    contact_entrepreneur, email_entrepreneur, telephone_entrepreneur,
@@ -1527,7 +1626,7 @@ def register_ad_budget_routes(get_conn):
             FROM ad_budget.projets
             WHERE id = %s
             RETURNING *
-        """, (f"{src['nom']} (copie)", projet_id))
+        """, (user["id"], user["organization_id"], f"{src['nom']} (copie)", projet_id))
         new_projet = cur.fetchone()
         new_id = new_projet["id"]
         cur.execute("""
@@ -1552,7 +1651,9 @@ def register_ad_budget_routes(get_conn):
         return {"status": "duplicated", "projet": new_projet, "nb_lignes_copiees": nb_lignes}
 
     @router.get("/projets/{projet_id}/export")
-    def export_projet_excel(projet_id: int):
+    def export_projet_excel(projet_id: int, user=Depends(jwt_user)):
+        # PHASE 3A — authentification + autorisation (lecture : export = lecture).
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         cur.execute("SELECT nom FROM ad_budget.projets WHERE id = %s", (projet_id,))
@@ -1645,6 +1746,7 @@ def register_ad_budget_routes(get_conn):
     @router.get("/projets/{projet_id}/pdf")
     def export_projet_pdf(
         projet_id: int,
+        user=Depends(jwt_user),
         actifs_seulement: bool = True,
         avec_prix: bool = True,
         sections: str = Query("", description="CSV des sections à inclure ; vide = toutes"),
@@ -1660,6 +1762,8 @@ def register_ad_budget_routes(get_conn):
         hauteur_cloisons: float = 0,
         longueur_cloisons: float = 0,
     ):
+        # PHASE 3A — authentification + autorisation (lecture : PDF = lecture).
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         cur.execute("SELECT * FROM ad_budget.projets WHERE id = %s", (projet_id,))
@@ -2213,12 +2317,16 @@ def register_ad_budget_routes(get_conn):
     )
 
     @router.get("/projets/{projet_id}/snapshots")
-    def list_projet_snapshots(projet_id: int, include_lines: bool = False):
+    def list_projet_snapshots(
+        projet_id: int, include_lines: bool = False, user=Depends(jwt_user),
+    ):
         """Liste tous les snapshots d'un projet, du plus récent au plus ancien.
 
         budget_lines_jsonb est OMIS par défaut (champ lourd). Opt-in via
         ?include_lines=true (utile pour Ad ANA recalcul).
         """
+        # PHASE 3A — authentification + autorisation (lecture).
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         columns = _SNAPSHOT_DEFAULT_COLS
@@ -2235,10 +2343,14 @@ def register_ad_budget_routes(get_conn):
         return rows
 
     @router.get("/projets/{projet_id}/snapshots/latest")
-    def get_latest_snapshot(projet_id: int, include_lines: bool = False):
+    def get_latest_snapshot(
+        projet_id: int, include_lines: bool = False, user=Depends(jwt_user),
+    ):
         """Retourne le snapshot le plus récent (is_latest = TRUE) du projet.
         404 si aucun snapshot n'existe.
         """
+        # PHASE 3A — authentification + autorisation (lecture).
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         columns = _SNAPSHOT_DEFAULT_COLS
@@ -2263,7 +2375,9 @@ def register_ad_budget_routes(get_conn):
     # ══════════════════════════════════════════════════════════
 
     @router.get("/projets/{projet_id}/lignes")
-    def get_budget_lignes(projet_id: int):
+    def get_budget_lignes(projet_id: int, user=Depends(jwt_user)):
+        # PHASE 3A — authentification + autorisation (lecture) sur le projet parent.
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         cur.execute("""
@@ -2278,12 +2392,14 @@ def register_ad_budget_routes(get_conn):
         return rows
 
     @router.post("/projets/{projet_id}/lignes")
-    def create_budget_ligne(projet_id: int, data: dict):
+    def create_budget_ligne(projet_id: int, data: dict, user=Depends(jwt_user)):
         """
         Ajoute un item au budget d'un projet.
         Si source_item_id est fourni, copie les données de la base principale.
         Sinon, utilise les données fournies directement.
         """
+        # PHASE 3A — authentification + autorisation (écriture) sur le projet parent.
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
 
@@ -2347,11 +2463,13 @@ def register_ad_budget_routes(get_conn):
         return {"status": "created", "ligne": row}
 
     @router.post("/projets/{projet_id}/lignes/import")
-    def import_items_to_projet(projet_id: int, data: dict):
+    def import_items_to_projet(projet_id: int, data: dict, user=Depends(jwt_user)):
         """
         Importe plusieurs items de la base principale vers un projet.
         data = { "item_ids": [1, 2, 3, ...] }
         """
+        # PHASE 3A — authentification + autorisation (écriture) sur le projet parent.
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
         item_ids = data.get("item_ids", [])
         if not item_ids:
             return {"error": "No item_ids provided"}
@@ -2402,7 +2520,13 @@ def register_ad_budget_routes(get_conn):
     SOUS_TRAITANT_TYPES = {"Budget", "Soumission", "BSDQ", "Allocation"}
 
     @router.put("/projets/{projet_id}/lignes/{ligne_id}")
-    def update_budget_ligne(projet_id: int, ligne_id: int, data: dict):
+    def update_budget_ligne(projet_id: int, ligne_id: int, data: dict,
+                            user=Depends(jwt_user)):
+        # PHASE 3A — authentification + autorisation (écriture) sur le projet
+        # PARENT. La mutation ci-dessous reste scopée WHERE id=%s AND
+        # projet_id=%s : un ligne_id appartenant à un autre projet ne matche
+        # rien -> aucune ligne modifiée.
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
         # Validation du type de sous-traitant. On accepte vide / null ou un
         # des types whitelist — refus 400 sur valeur inconnue pour éviter
         # qu'une typo silencieuse pollue la BD.
@@ -2450,9 +2574,11 @@ def register_ad_budget_routes(get_conn):
         return {"status": "updated"}
 
     @router.patch("/projets/{projet_id}/lignes/{ligne_id}")
-    def patch_budget_ligne(projet_id: int, ligne_id: int, data: dict):
+    def patch_budget_ligne(projet_id: int, ligne_id: int, data: dict,
+                           user=Depends(jwt_user)):
         # Alias PATCH du PUT — même comportement, même whitelist de champs.
-        return update_budget_ligne(projet_id, ligne_id, data)
+        # L'autorisation est faite par update_budget_ligne (on lui transmet user).
+        return update_budget_ligne(projet_id, ligne_id, data, user)
 
     @router.get("/sous-traitants/suggestions")
     def get_sous_traitants_suggestions(user=Depends(jwt_user)):
@@ -2478,7 +2604,12 @@ def register_ad_budget_routes(get_conn):
         return rows
 
     @router.delete("/projets/{projet_id}/lignes/{ligne_id}")
-    def delete_budget_ligne(projet_id: int, ligne_id: int):
+    def delete_budget_ligne(projet_id: int, ligne_id: int,
+                            user=Depends(jwt_user)):
+        # PHASE 3A — authentification + autorisation (écriture) sur le projet
+        # PARENT. Le DELETE reste scopé WHERE id=%s AND projet_id=%s : un
+        # ligne_id d'un autre projet ne matche rien.
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
         conn = get_conn()
         cur = conn.cursor()
         cur.execute("""
@@ -2491,8 +2622,10 @@ def register_ad_budget_routes(get_conn):
         return {"status": "deleted"}
 
     @router.get("/projets/{projet_id}/total")
-    def get_projet_total(projet_id: int):
+    def get_projet_total(projet_id: int, user=Depends(jwt_user)):
         """Retourne le total du budget d'un projet groupé par section."""
+        # PHASE 3A — authentification + autorisation (lecture) sur le projet parent.
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         cur.execute("""
