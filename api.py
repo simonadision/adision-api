@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine
 import pandas as pd
@@ -12,6 +12,7 @@ from modules.ad_budget_api import register_ad_budget_routes
 from modules.taux_horaires_api import register_taux_horaires_routes
 from modules.auth_jwt import make_jwt_deps
 import os
+import secrets
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:6268605Ss@localhost:5432/Adision")
 
@@ -622,3 +623,62 @@ def reject_suggestion(suggestion_id: int):
     cur.close()
     conn.close()
     return {"status": "rejected"}
+
+
+@app.post("/internal/backfill-organization")
+def internal_backfill_organization(
+    data: dict,
+    x_internal_secret: str = Header(None),
+):
+    """Endpoint service-à-service (PHASE 4A) : propage organization_id aux
+    projets d'un user, identifié par email. Appelé par adision-app-api au
+    rattachement d'un user à une organisation.
+
+    Auth : header X-Internal-Secret == INTERNAL_SERVICE_SECRET (secret partagé
+    entre les 3 backends). PAS de JWT — appel machine-à-machine.
+
+    Body {email, organization_id} : résout email -> id local ad_budget.users
+    puis UPDATE ad_budget.projets. Email inconnu localement -> no-op silencieux
+    (le user ne s'est jamais connecté à Ad BUD). Retourne {updated: <nb lignes>}.
+    """
+    expected = os.environ.get("INTERNAL_SERVICE_SECRET")
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail="INTERNAL_SERVICE_SECRET non configuré côté serveur",
+        )
+    # compare_digest : comparaison à temps constant. Le `not x_internal_secret`
+    # en court-circuit garantit qu'on n'appelle compare_digest qu'avec deux str
+    # (header absent/vide -> 401 sans l'appeler).
+    if not x_internal_secret or not secrets.compare_digest(x_internal_secret, expected):
+        raise HTTPException(status_code=401, detail="Secret de service invalide")
+
+    email = (data.get("email") or "").strip().lower()
+    organization_id = data.get("organization_id")
+    if not email or not organization_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Champs 'email' et 'organization_id' requis",
+        )
+
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id FROM ad_budget.users WHERE LOWER(email) = LOWER(%s)",
+            (email,),
+        )
+        row = cur.fetchone()
+        if not row:
+            cur.close()
+            return {"updated": 0}
+        cur.execute(
+            "UPDATE ad_budget.projets SET organization_id = %s WHERE user_id = %s",
+            (organization_id, row[0]),
+        )
+        updated = cur.rowcount
+        conn.commit()
+        cur.close()
+    finally:
+        conn.close()
+    return {"updated": updated}
