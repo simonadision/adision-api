@@ -53,6 +53,19 @@ def _decode_token(token: str) -> dict:
         raise HTTPException(status_code=401, detail=f"Token invalide : {e}")
 
 
+def _derive_platform_role(role):
+    """Dérive platform_role depuis l'ancien `role`. Fallback pour les tokens
+    legacy (émis avant l'enrichissement du JWT, encore valides jusqu'à 24h
+    après déploiement) et les users dont la colonne platform_role n'est pas
+    renseignée. Mapping IDENTIQUE au backfill de la migration 006 :
+    super_admin->super_admin, admin->staff, tout le reste->client."""
+    if role == "super_admin":
+        return "super_admin"
+    if role == "admin":
+        return "staff"
+    return "client"
+
+
 def _extract_bearer(authorization: Optional[str], token_query: Optional[str] = None) -> str:
     """Lit le JWT soit du header `Authorization: Bearer <jwt>`, soit du
     query param `?token=<jwt>` (utilisé seulement pour les GET de download
@@ -145,6 +158,16 @@ def make_jwt_deps(get_conn):
         finally:
             conn.close()
         user["modules"] = payload.get("modules") or []
+        # Multi-tenant (PHASE 2) — champs greffés depuis le payload JWT.
+        # Token legacy (émis avant l'enrichissement, valide jusqu'à 24h) :
+        # organization_id / org_role absents -> None ; platform_role dérivé de
+        # `role` (mapping migration 006) pour ne pas perdre le rôle plateforme.
+        user["organization_id"] = payload.get("organization_id")
+        user["platform_role"] = (
+            payload.get("platform_role")
+            or _derive_platform_role(payload.get("role"))
+        )
+        user["org_role"] = payload.get("org_role")
         return user
 
     def jwt_admin(user: dict = Depends(jwt_user)) -> dict:
