@@ -2582,21 +2582,40 @@ def register_ad_budget_routes(get_conn):
 
     @router.get("/sous-traitants/suggestions")
     def get_sous_traitants_suggestions(user=Depends(jwt_user)):
-        """Liste DISTINCT des noms de sous-traitants déjà saisis par ce user
-        (toutes lignes confondues), pour autocomplétion dans l'UI."""
+        """Liste DISTINCT des noms de sous-traitants déjà saisis, pour
+        autocomplétion dans l'UI.
+
+        Scope (PHASE 3D) : par ORGANISATION quand l'utilisateur en a une — les
+        sous-traitants sont un bassin partagé à l'échelle de la firme. Repli sur
+        le scope user (comportement historique) quand organization_id est NULL,
+        même logique de non-nullité que _authorize_projet. Tant que la PHASE 4
+        n'a pas peuplé les organisations, tous les organization_id sont NULL :
+        100% des users retombent sur le scope user et le comportement est
+        STRICTEMENT identique à l'historique. Le changement est inerte d'ici là
+        et s'activera de lui-même une fois les organisations renseignées.
+
+        scope_clause est un littéral fixe (jamais d'entrée utilisateur) — pas
+        d'injection ; seule la valeur passe en paramètre lié."""
+        org_id = user.get("organization_id")
+        if org_id is not None:
+            scope_clause = "p.organization_id = %s"
+            scope_value = org_id
+        else:
+            scope_clause = "p.user_id = %s"
+            scope_value = user["id"]
         conn = get_conn()
         cur = conn.cursor()
         cur.execute(
-            """
+            f"""
             SELECT DISTINCT bl.sous_traitant_nom
             FROM ad_budget.budget_lignes bl
             JOIN ad_budget.projets p ON p.id = bl.projet_id
-            WHERE p.user_id = %s
+            WHERE {scope_clause}
               AND bl.sous_traitant_nom IS NOT NULL
               AND bl.sous_traitant_nom <> ''
             ORDER BY bl.sous_traitant_nom
             """,
-            (user["id"],),
+            (scope_value,),
         )
         rows = [r[0] for r in cur.fetchall()]
         cur.close()
