@@ -406,13 +406,16 @@ def _authorize_projet(projet, user, mode):
     # égaux. La double non-nullité est CRITIQUE — sans elle, NULL == NULL
     # ferait tout matcher (aujourd'hui presque tous les organization_id sont
     # NULL).
+    # Comparaison via str() : projet_org est un uuid.UUID (psycopg3 adapte la
+    # colonne UUID), user_org est une str (le JWT sérialise l'UUID en chaîne) —
+    # un `uuid.UUID == str` renvoie toujours False. On normalise les deux côtés.
     user_org = user.get("organization_id")
     projet_org = projet.get("organization_id")
     is_supervisor = (
         user.get("org_role") == "admin"
         and user_org is not None
         and projet_org is not None
-        and projet_org == user_org
+        and str(projet_org) == str(user_org)
     )
 
     if is_owner or is_super_admin:
