@@ -384,10 +384,14 @@ app.add_middleware(
     # impose une whitelist nommée (le wildcard "*" est refusé par le navigateur
     # quand credentials=true).
     allow_origins=[
-        "https://admin.adision.ca",
-        "https://bud.adision.ca",
-        "https://ana.adision.ca",
+        "https://app.adision.ca",     # Ad HUB (adision-app)
+        "https://admin.adision.ca",   # Ad ADM
+        "https://bud.adision.ca",     # Ad BUD
+        "https://viu.adision.ca",     # Ad VIU (push budget ← v2)
+        "https://ana.adision.ca",     # Ad ANA
         "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost:5175",
     ],
     # Couvre les preview deploys Vercel des frontends ad-bud / ad-ana.
     allow_origin_regex=r"^https://[a-z0-9-]+\.vercel\.app$",
