@@ -8,14 +8,15 @@ from datetime import date
 from typing import Optional
 
 import openpyxl
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
+from modules import hub_service
 from modules.ad_budget_constants import AD_VIU_BLINDSPOT_DIVISIONS
 from modules.aggregates import adapt_budget_lines, compute_aggregates
-from modules.auth_jwt import make_jwt_deps
+from modules.auth_jwt import _extract_bearer, make_jwt_deps
 from modules.taux_horaires_api import (
     _load_taux_default_map,
     _resolve_taux_default,
@@ -1374,14 +1375,82 @@ def register_ad_budget_routes(get_conn):
             cur.close()
             conn.close()
     @router.post("/projets")
-    def create_projet(data: dict, user=Depends(jwt_user)):
+    def create_projet(
+        data: dict,
+        user=Depends(jwt_user),
+        authorization: Optional[str] = Header(None),
+    ):
         # On force user_id depuis le JWT, pas depuis le body — un user ne
         # peut pas créer un projet pour quelqu'un d'autre.
         data["user_id"] = user["id"]
+
+        # Sprint C1 — modes de liaison Ad HUB (pop AVANT _validate_projet_fields
+        # pour éviter qu'il rejette ces champs custom).
+        # Mode A : ad_hub_project_id fourni → set tel quel (projet HUB existant).
+        # Mode B : create_ad_hub_project=true → créer HUB d'abord, lier au BUD.
+        ad_hub_project_id = data.pop("ad_hub_project_id", None)
+        create_ad_hub_project = bool(data.pop("create_ad_hub_project", False))
+        if ad_hub_project_id is not None and create_ad_hub_project:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "ad_hub_project_id et create_ad_hub_project sont "
+                    "mutuellement exclusifs"
+                ),
+            )
+        if ad_hub_project_id is not None:
+            try:
+                ad_hub_project_id = int(ad_hub_project_id)
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    status_code=400,
+                    detail="ad_hub_project_id doit être un entier",
+                )
+
         # Sprint A : valider les champs descriptifs avant d'insérer. Le default
         # de statut à la création est 'brouillon', donc passé en current_statut
         # pour la cross-field validation de date_adjudication.
         _validate_projet_fields(data, current_statut="brouillon")
+
+        # Mode B — créer projet Ad HUB AVANT BUD. Le HUB est source de vérité
+        # pour les docs (règle D-GED) → on crée là d'abord, on lie ensuite.
+        # Atomicité (a) : si l'INSERT BUD échoue après, on soft-delete le HUB
+        # via hub_service.soft_delete_project (best-effort, cf. bloc except).
+        created_hub_id = None
+        if create_ad_hub_project:
+            jwt_token = _extract_bearer(authorization, None)
+            # Mapping des champs BUD → HUB : sous-ensemble commun. Le HUB
+            # exige `name` (>= 1 char) ; les autres sont optionnels et seront
+            # filtrés s'ils sont vides pour ne pas spammer Ad HUB avec des
+            # nulls qu'il refuserait via ses propres validateurs.
+            hub_payload_raw = {
+                "name": data.get("nom"),
+                "client_nom": data.get("nom_client") or data.get("client"),
+                "region": data.get("region"),
+                "superficie_m2": data.get("superficie_m2"),
+                "type_batiment": data.get("type_batiment"),
+                "date_adjudication": data.get("date_adjudication"),
+            }
+            hub_payload = {
+                k: v for k, v in hub_payload_raw.items()
+                if v not in (None, "")
+            }
+            try:
+                hub_project = hub_service.create_project(jwt_token, hub_payload)
+            except hub_service.HubServiceError as e:
+                # Pas encore d'INSERT BUD : rien à rollback.
+                raise HTTPException(
+                    status_code=502 if e.status_code is None else e.status_code,
+                    detail=f"Ad HUB indisponible : {e.detail}",
+                )
+            created_hub_id = hub_project.get("id")
+            if created_hub_id is None:
+                raise HTTPException(
+                    status_code=502,
+                    detail="Ad HUB a accepté la création mais n'a pas retourné d'id",
+                )
+            ad_hub_project_id = created_hub_id
+
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
 
@@ -1394,69 +1463,89 @@ def register_ad_budget_routes(get_conn):
         def _opt(v):
             return None if v in (None, "") else v
 
-        cur.execute("""
-            INSERT INTO ad_budget.projets
-              (user_id, organization_id, nom, client, adresse, description, statut,
-               nom_client, contact_client, email_client, telephone_client,
-               numero_projet, date_debut, date_fin,
-               contact_entrepreneur, email_entrepreneur, telephone_entrepreneur,
-               logo_base64,
-               pct_admin_conditions, pct_admin_architecture,
-               pct_admin_mecanique, pct_admin_excavation,
-               type_batiment, region, date_adjudication, superficie_m2)
-            VALUES (%s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s,
-                    %s, %s, %s,
-                    %s, %s, %s,
-                    %s,
-                    %s, %s, %s, %s,
-                    %s, %s, %s, %s)
-            RETURNING *
-        """, (
-            data["user_id"],
-            user["organization_id"],
-            data["nom"],
-            data.get("client", ""),
-            data.get("adresse", ""),
-            data.get("description", ""),
-            data.get("statut", "brouillon"),
-            data.get("nom_client", ""),
-            data.get("contact_client", ""),
-            data.get("email_client", ""),
-            data.get("telephone_client", ""),
-            data.get("numero_projet", ""),
-            _date(data.get("date_debut")),
-            _date(data.get("date_fin")),
-            data.get("contact_entrepreneur", ""),
-            data.get("email_entrepreneur", ""),
-            data.get("telephone_entrepreneur", ""),
-            data.get("logo_base64", ""),
-            _pct(data.get("pct_admin_conditions")),
-            _pct(data.get("pct_admin_architecture")),
-            _pct(data.get("pct_admin_mecanique")),
-            _pct(data.get("pct_admin_excavation")),
-            # Sprint A — tous nullables.
-            _opt(data.get("type_batiment")),
-            _opt(data.get("region")),
-            _date(data.get("date_adjudication")),
-            _opt(data.get("superficie_m2")),
-        ))
-        row = cur.fetchone()
-        projet_id = row["id"]
-        # Squelette complet (~180 lignes catalogue master, toutes divisions).
-        # Le filtre AUTHORIZED_DIVISIONS du commit 3a35308 (2026-05-11) a ete
-        # reverte : la creation manuelle de projet n'a pas a savoir ce que
-        # Ad VIU analyse, l'estimateur veut son squelette complet pour saisie
-        # manuelle. Le filtre n'est applique que sur push Ad VIU (DELETE
-        # REPLACE dans from-viu-v2).
-        nb_lignes = _apply_master_template(cur, projet_id)
-        conn.commit()
-        cur.close()
-        conn.close()
+        try:
+            cur.execute("""
+                INSERT INTO ad_budget.projets
+                  (user_id, organization_id, nom, client, adresse, description, statut,
+                   nom_client, contact_client, email_client, telephone_client,
+                   numero_projet, date_debut, date_fin,
+                   contact_entrepreneur, email_entrepreneur, telephone_entrepreneur,
+                   logo_base64,
+                   pct_admin_conditions, pct_admin_architecture,
+                   pct_admin_mecanique, pct_admin_excavation,
+                   type_batiment, region, date_adjudication, superficie_m2,
+                   ad_hub_project_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s, %s,
+                        %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s)
+                RETURNING *
+            """, (
+                data["user_id"],
+                user["organization_id"],
+                data["nom"],
+                data.get("client", ""),
+                data.get("adresse", ""),
+                data.get("description", ""),
+                data.get("statut", "brouillon"),
+                data.get("nom_client", ""),
+                data.get("contact_client", ""),
+                data.get("email_client", ""),
+                data.get("telephone_client", ""),
+                data.get("numero_projet", ""),
+                _date(data.get("date_debut")),
+                _date(data.get("date_fin")),
+                data.get("contact_entrepreneur", ""),
+                data.get("email_entrepreneur", ""),
+                data.get("telephone_entrepreneur", ""),
+                data.get("logo_base64", ""),
+                _pct(data.get("pct_admin_conditions")),
+                _pct(data.get("pct_admin_architecture")),
+                _pct(data.get("pct_admin_mecanique")),
+                _pct(data.get("pct_admin_excavation")),
+                # Sprint A — tous nullables.
+                _opt(data.get("type_batiment")),
+                _opt(data.get("region")),
+                _date(data.get("date_adjudication")),
+                _opt(data.get("superficie_m2")),
+                # Sprint C1 — lien Ad HUB (None si ni mode A ni mode B).
+                ad_hub_project_id,
+            ))
+            row = cur.fetchone()
+            projet_id = row["id"]
+            # Squelette complet (~180 lignes catalogue master, toutes divisions).
+            # Le filtre AUTHORIZED_DIVISIONS du commit 3a35308 (2026-05-11) a ete
+            # reverte : la creation manuelle de projet n'a pas a savoir ce que
+            # Ad VIU analyse, l'estimateur veut son squelette complet pour saisie
+            # manuelle. Le filtre n'est applique que sur push Ad VIU (DELETE
+            # REPLACE dans from-viu-v2).
+            nb_lignes = _apply_master_template(cur, projet_id)
+            conn.commit()
+        except Exception:
+            # Sprint C1 — rollback applicatif : si on a créé un projet HUB
+            # en amont (mode B), il devient orphelin sans contrepartie BUD.
+            # On tente un soft-delete best-effort sans masquer l'erreur amont.
+            conn.rollback()
+            if created_hub_id is not None:
+                jwt_token = _extract_bearer(authorization, None)
+                hub_service.soft_delete_project(jwt_token, created_hub_id)
+            raise
+        finally:
+            cur.close()
+            conn.close()
         return {"status": "created", "projet": row, "nb_lignes_creees": nb_lignes}
 
     @router.get("/projets/{projet_id}")
-    def get_projet(projet_id: int, user=Depends(jwt_user)):
+    def get_projet(
+        projet_id: int,
+        include_hub: bool = False,
+        user=Depends(jwt_user),
+        authorization: Optional[str] = Header(None),
+    ):
         # PHASE 3A — authentification + autorisation (lecture).
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
         conn = get_conn()
@@ -1477,7 +1566,32 @@ def register_ad_budget_routes(get_conn):
         conn.close()
         if not row:
             raise HTTPException(status_code=404, detail="Projet not found")
-        return row
+
+        # Sprint C1 — enrichissement Ad HUB optionnel. On échoue
+        # gracieusement (warning log + ad_hub=None + ad_hub_fetch_error)
+        # plutôt que de casser le GET principal si Ad HUB est indispo —
+        # le projet BUD reste consultable même si la branche HUB déconne.
+        result = dict(row)
+        if include_hub and result.get("ad_hub_project_id") is not None:
+            try:
+                jwt_token = _extract_bearer(authorization, None)
+                hub_data = hub_service.fetch_project(
+                    jwt_token, result["ad_hub_project_id"],
+                )
+                result["ad_hub"] = hub_data  # None si 404 (projet HUB supprimé/inaccessible)
+            except hub_service.HubServiceError as e:
+                result["ad_hub"] = None
+                result["ad_hub_fetch_error"] = (
+                    f"Ad HUB {e.status_code}: {e.detail}"
+                )
+            except HTTPException:
+                # _extract_bearer peut lever 401 si pas d'Authorization
+                # côté query (ce qui ne devrait pas arriver puisque
+                # jwt_user a déjà validé le JWT amont — mais ceinture et
+                # bretelles).
+                result["ad_hub"] = None
+                result["ad_hub_fetch_error"] = "JWT token introuvable pour enrichissement"
+        return result
 
     @router.put("/projets/{projet_id}")
     def update_projet(projet_id: int, data: dict, user=Depends(jwt_user)):

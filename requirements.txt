@@ -8,3 +8,6 @@ pandas
 openpyxl
 reportlab
 pyjwt
+# Sprint C1 — client HTTP cross-service Ad BUD → Ad HUB (modules/hub_service.py).
+# Aligné sur Ad VIU qui utilise déjà httpx>=0.27 pour son propre hub_service.
+httpx>=0.27
