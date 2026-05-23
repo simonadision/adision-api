@@ -24,7 +24,7 @@ from modules.taux_horaires_api import (
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import landscape, letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import cm
+from reportlab.lib.units import cm, mm
 from reportlab.lib.utils import ImageReader
 from reportlab.platypus import (
     Image,
@@ -1884,7 +1884,9 @@ def register_ad_budget_routes(get_conn):
     @router.get("/projets/{projet_id}/pdf")
     def export_projet_pdf(
         projet_id: int,
-        user=Depends(jwt_user),
+        user=Depends(jwt_user_or_token),
+        authorization: Optional[str] = Header(None),
+        token: Optional[str] = Query(None),
         actifs_seulement: bool = True,
         avec_prix: bool = True,
         sections: str = Query("", description="CSV des sections à inclure ; vide = toutes"),
@@ -1965,7 +1967,37 @@ def register_ad_budget_routes(get_conn):
         # Non-breaking spaces ( ) au lieu d'espaces normaux : empêchent
         # le wrap de la Paragraph reportlab si la colonne centrale est étroite.
         title_para = Paragraph("RAPPORT DE BUDGET", title_style)
-        logo_flowable = build_pdf_logo(projet.get("logo_base64") or "")
+
+        # Sprint DT-56 D5 — white-label PDF officiel.
+        # Priorité du logo en haut du rapport :
+        #   1. logo du CLIENT lié (projet.client_id non-NULL + client a un
+        #      logo_base64 récupéré via hub_service cross-service)
+        #   2. logo HISTORIQUE du projet (ad_budget.projets.logo_base64 —
+        #      compat anciens projets sans client formel)
+        #   3. Fallback Adision (DEFAULT_LOGO_PATH géré par build_pdf_logo)
+        # Échec gracieux : si fetch Ad HUB plante (network/401/timeout),
+        # on tombe sur le fallback projet/Adision plutôt que de casser
+        # l'export PDF entier.
+        chosen_logo_base64 = projet.get("logo_base64") or ""
+        if projet.get("client_id"):
+            try:
+                jwt_token = _extract_bearer(authorization, token)
+                client_data = hub_service.fetch_client(jwt_token, int(projet["client_id"]))
+                if client_data and client_data.get("logo_base64"):
+                    chosen_logo_base64 = client_data["logo_base64"]
+            except hub_service.HubServiceError as e:
+                # Network/401/etc. — on log et on continue avec le fallback.
+                print(
+                    f"[ad-bud PDF] fetch_client {projet['client_id']} échec, "
+                    f"fallback projet/Adision : {e}",
+                    flush=True,
+                )
+            except HTTPException:
+                # _extract_bearer peut lever 401 si aucun JWT extractible.
+                # Ne devrait pas arriver puisque jwt_user_or_token a déjà
+                # validé en amont, mais ceinture+bretelles.
+                pass
+        logo_flowable = build_pdf_logo(chosen_logo_base64)
         # Logo plus grand (180pt) → colonnes latérales 190pt pour l'accommoder
         # avec une petite marge ; centre = total_w - 380 (~147pt portrait,
         # 327pt landscape) pour que le titre tienne sur une seule ligne.
@@ -2432,7 +2464,21 @@ def register_ad_budget_routes(get_conn):
             story.append(Spacer(1, 14))
             story.append(totals_table)
 
-        doc.build(story)
+        # Sprint DT-56 D5 — footer "Propulsé par Adision" sur chaque page
+        # (cohérent avec PoweredByAdision sidebar D4). Texte gris pâle centré
+        # à 10mm du bord inférieur, fontSize 7 pour rester discret.
+        def _draw_pdf_footer(canvas, _doc):
+            canvas.saveState()
+            canvas.setFont("Helvetica", 7)
+            canvas.setFillColor(colors.HexColor("#94a3b8"))
+            canvas.drawCentredString(
+                _doc.pagesize[0] / 2.0,
+                10 * mm,
+                "Propulsé par Adision",
+            )
+            canvas.restoreState()
+
+        doc.build(story, onFirstPage=_draw_pdf_footer, onLaterPages=_draw_pdf_footer)
         buf.seek(0)
 
         safe_nom = "".join(c if c.isalnum() or c in "-_ " else "_" for c in (projet["nom"] or "projet")).strip() or "projet"

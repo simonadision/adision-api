@@ -175,3 +175,22 @@ def fetch_project(jwt_token: str, project_id: int) -> Optional[dict]:
         if e.status_code == 404:
             return None
         raise
+
+
+def fetch_client(jwt_token: str, client_id: int) -> Optional[dict]:
+    """Récupère les métadonnées d'un client Ad HUB via
+    GET /api/clients/{id} (Sprint DT-56 D1).
+
+    Retourne None si 404 (client supprimé/inaccessible) — comportement
+    gracieux côté Ad BUD : si le client référence par client_id est
+    introuvable côté Ad HUB, le caller utilise un fallback (logo
+    projet ou logo Adision pour le PDF, cf. Sprint D5).
+
+    Lève HubServiceError pour 401/403/5xx/réseau.
+    """
+    try:
+        return _hub_request("GET", f"/api/clients/{client_id}", jwt_token)
+    except HubServiceError as e:
+        if e.status_code == 404:
+            return None
+        raise
