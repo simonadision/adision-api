@@ -1407,6 +1407,20 @@ def register_ad_budget_routes(get_conn):
                     detail="ad_hub_project_id doit être un entier",
                 )
 
+        # Sprint DT-56 D1 — référence applicative vers app_central.clients.id
+        # (cross-base, pas de FK SQL). Optionnel : NULL = client legacy
+        # (texte libre dans nom_client) ou ad hoc. Pop AVANT _validate
+        # pour éviter rejet champ custom.
+        client_id = data.pop("client_id", None)
+        if client_id is not None:
+            try:
+                client_id = int(client_id)
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    status_code=400,
+                    detail="client_id doit être un entier",
+                )
+
         # Sprint A : valider les champs descriptifs avant d'insérer. Le default
         # de statut à la création est 'brouillon', donc passé en current_statut
         # pour la cross-field validation de date_adjudication.
@@ -1474,7 +1488,7 @@ def register_ad_budget_routes(get_conn):
                    pct_admin_conditions, pct_admin_architecture,
                    pct_admin_mecanique, pct_admin_excavation,
                    type_batiment, region, date_adjudication, superficie_m2,
-                   ad_hub_project_id)
+                   ad_hub_project_id, client_id)
                 VALUES (%s, %s, %s, %s, %s, %s, %s,
                         %s, %s, %s, %s,
                         %s, %s, %s,
@@ -1482,7 +1496,7 @@ def register_ad_budget_routes(get_conn):
                         %s,
                         %s, %s, %s, %s,
                         %s, %s, %s, %s,
-                        %s)
+                        %s, %s)
                 RETURNING *
             """, (
                 data["user_id"],
@@ -1514,6 +1528,9 @@ def register_ad_budget_routes(get_conn):
                 _opt(data.get("superficie_m2")),
                 # Sprint C1 — lien Ad HUB (None si ni mode A ni mode B).
                 ad_hub_project_id,
+                # Sprint DT-56 D1 — lien app_central.clients.id (None si
+                # legacy ou client ad hoc texte libre).
+                client_id,
             ))
             row = cur.fetchone()
             projet_id = row["id"]
@@ -1641,6 +1658,10 @@ def register_ad_budget_routes(get_conn):
             # Params globaux du tableau budget
             "mobilisation", "surface_plancher",
             "hauteur_cloisons", "longueur_cloisons",
+            # Sprint DT-56 D1 — lien vers app_central.clients.id
+            # (cross-base, BIGINT nullable). Le client peut être relié
+            # ou délié après la création initiale.
+            "client_id",
         ]:
             if field in data:
                 v = data[field]
