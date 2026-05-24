@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
-from modules import hub_service
+from modules import con_service, hub_service
 from modules.ad_budget_constants import AD_VIU_BLINDSPOT_DIVISIONS
 from modules.aggregates import adapt_budget_lines, compute_aggregates
 from modules.auth_jwt import _extract_bearer, make_jwt_deps
@@ -1916,6 +1916,42 @@ def register_ad_budget_routes(get_conn):
             "lines": lines_out,
             "raw_snapshot": raw_snapshot,
         }
+
+    @router.get("/projets/{projet_id}/has-con")
+    def projet_has_con(
+        projet_id: int,
+        user=Depends(jwt_user),
+        authorization: Optional[str] = Header(None),
+    ):
+        """Sprint 1.A Ad CON — Détection d'existence d'un projet Ad CON
+        pour adapter le label du bouton header projet Ad BUD.
+
+        - Si conStatus.exists == false → bouton "🏗️ Démarrer suivi chantier"
+        - Si conStatus.exists == true  → bouton "🏗️ Voir suivi chantier"
+
+        Architecture : 1 appel cross-service depuis Ad BUD vers Ad CON
+        (GET /api/projects/by-bud/{bud_project_id}). Cf. con_service.py
+        pour le contrat HTTP attendu côté Ad CON Sprint 1.B.
+
+        Fallback gracieux total (cf. con_service docstring) : Ad CON
+        404/timeout/réseau/5xx → {exists:false}. Garantit qu'Ad BUD reste
+        opérationnel même si Ad CON est down ou pas encore Sprint 1.B livré.
+
+        Cache 5 min in-memory côté Ad BUD (con_service._HAS_CON_CACHE) sur
+        les réponses 200/404 (pas sur les fallbacks transitoires).
+
+        Auth : JWT user requis + autorisation projet (read mode, supervisor
+        org_role='admin' OK). Le JWT user est forwardé vers Ad CON.
+        """
+        # 1) Auth + 404 si projet hors périmètre (avant tout appel cross-service).
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+
+        # 2) Récupère le JWT brut depuis le header pour le forwarder vers Ad CON
+        # (même module HS256 partagé, Ad CON vérifie signature + ad_con dans modules).
+        jwt_token = _extract_bearer(authorization, None)
+
+        # 3) Délégation au client cross-service (cache + fallback gracieux).
+        return con_service.check_has_con(jwt_token, projet_id)
 
     @router.patch("/projets/{projet_id}/notes")
     def update_projet_notes(projet_id: int, data: dict, user=Depends(jwt_user)):
