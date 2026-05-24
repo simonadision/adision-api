@@ -4,7 +4,7 @@ import json
 import os
 import re
 from collections import OrderedDict
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Optional
 
 import openpyxl
@@ -1716,6 +1716,206 @@ def register_ad_budget_routes(get_conn):
         cur.close()
         conn.close()
         return {"status": "deleted"}
+
+    @router.get("/projets/{projet_id}/export-for-con")
+    def export_projet_for_con(projet_id: int, user=Depends(jwt_user)):
+        """Sprint 1.A Ad CON — Export du projet+lignes pour Ad CON.
+
+        Architecture PULL : Ad CON viendra appeler cet endpoint au Sprint 1.B
+        quand un user clique sur "🏗️ Démarrer suivi chantier" depuis Ad BUD,
+        pour créer le con_projects + figer les con_lines.
+
+        Mapping BUD → con_lines (17 champs cibles, cadré au STOP 1.A.1) :
+          bud_line_id                ← budget_lignes.id          (INTEGER stringifié ;
+                                                                  Ad CON Sprint 1.B migrera
+                                                                  bud_line_id en BIGINT)
+          csi_code                   ← budget_lignes.section      (varchar 100, ex "01 50 01")
+          csi_division               ← LEFT(TRIM(section), 2)     (dérivé)
+          description                ← budget_lignes.description
+          discipline                 ← NULL                       (TODO derive in future sprint
+                                                                  via csi_division_default_metier
+                                                                  → taux_horaires.metier)
+          qty_origin                 ← _effective_qte(...)        (calculé live, BUD.qte=0 partout)
+          unit                       ← budget_lignes.unite
+          mat_cost_unit_origin       ← prix_unitaire
+          mat_adjustment_pct_origin  ← ajust_materiaux
+          mat_subtotal_origin        ← qty_eff × prix_u × (1+ajust_mat/100)   (calc backend)
+          mo_hours_origin            ← heures
+          mo_rate_origin             ← taux_horaire
+          mo_adjustment_pct_origin   ← ajust_main_oeuvre
+          mo_subtotal_origin         ← qty_eff × heures × taux × (1+ajust_mo/100) (calc backend)
+          st_type                    ← sous_traitant_type         (NULL en prod actuellement)
+          st_supplier_origin         ← sous_traitant_nom
+          st_amount_origin           ← sous_traitant_montant
+          st_adjustment_pct_origin   ← ajust_sous_traitant
+          st_subtotal_origin         ← st_amount × (1+ajust_st/100)           (calc backend)
+
+        Sécurité :
+          - JWT user requis (jwt_user dep)
+          - Auth via _load_and_authorize_projet (mode='read', supervisor OK)
+          - Refuse 403 si statut != 'adjuge' (defense in depth ; UI ne montre
+            le bouton "Démarrer suivi chantier" que sur projets adjugés, mais
+            on bloque aussi côté backend)
+          - Lignes inactives (actif=FALSE) EXCLUSES de l'export
+
+        organization_id fallback (décision STOP 1.A.1, critique #2) :
+          Si projet.organization_id IS NULL (projets legacy pre-multi-tenant
+          comme le projet 97 VQ-CED Contracta), on fallback sur user.organization_id
+          du JWT et on marque "organization_id_source": "jwt_fallback".
+          Sinon "organization_id_source": "project".
+
+        raw_snapshot : copie INTÉGRALE projet + 30 colonnes budget_lignes,
+        JSON-safe via _json_dumps_with_default (Decimal/date → str). Sprint 1.B
+        stockera dans con_budget_snapshots.snapshot_data JSONB pour audit total.
+        """
+        # 1) Auth (lecture) + 404 si hors périmètre.
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+
+        # 2) Charge le projet COMPLET puis ses lignes actives.
+        conn = get_conn()
+        try:
+            cur = conn.cursor(row_factory=dict_row)
+            cur.execute("SELECT * FROM ad_budget.projets WHERE id = %s", (projet_id,))
+            projet = cur.fetchone()
+            if projet is None:
+                raise HTTPException(status_code=404, detail="Projet introuvable")
+
+            # Defense in depth — UI n'affiche pas le bouton hors 'adjuge' mais
+            # un user qui tape l'URL directement doit être bloqué aussi.
+            if projet["statut"] != "adjuge":
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "Le projet doit être au statut Adjugé pour être exporté "
+                        f"vers Ad CON (statut actuel: {projet['statut']})"
+                    ),
+                )
+
+            cur.execute(
+                """SELECT * FROM ad_budget.budget_lignes
+                   WHERE projet_id = %s AND actif = TRUE
+                   ORDER BY section, description, id""",
+                (projet_id,),
+            )
+            budget_rows = cur.fetchall()
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
+            conn.close()
+
+        # 3) Params globaux du projet (miroir _create_snapshot Sprint B).
+        mob = float(projet.get("mobilisation") or 0)
+        sp = float(projet.get("surface_plancher") or 0)
+        hc = float(projet.get("hauteur_cloisons") or 0)
+        lc = float(projet.get("longueur_cloisons") or 0)
+        surface_mur = hc * lc
+        surface_gypse = surface_mur * 2
+
+        # 4) Ventilation ligne par ligne + raw passthrough.
+        lines_out = []
+        contract_total = 0.0
+        for idx, row in enumerate(budget_rows, start=1):
+            section = (row.get("section") or "").strip()
+            csi_division = section[:2] if section else None
+
+            qty_eff = _effective_qte(row, mob, sp, surface_mur, surface_gypse)
+
+            # Cast safe Decimal -> float (psycopg renvoie Decimal pour NUMERIC).
+            prix_u = float(row.get("prix_unitaire") or 0)
+            ajust_mat = float(row.get("ajust_materiaux") or 0)
+            heures = float(row.get("heures") or 0)
+            taux = float(row.get("taux_horaire") or 0)
+            ajust_mo = float(row.get("ajust_main_oeuvre") or 0)
+            st_amount = float(row.get("sous_traitant_montant") or 0)
+            ajust_st = float(row.get("ajust_sous_traitant") or 0)
+
+            mat_subtotal = qty_eff * prix_u * (1.0 + ajust_mat / 100.0)
+            mo_subtotal = qty_eff * heures * taux * (1.0 + ajust_mo / 100.0)
+            st_subtotal = st_amount * (1.0 + ajust_st / 100.0)
+            contract_total += mat_subtotal + mo_subtotal + st_subtotal
+
+            lines_out.append({
+                # INTEGER stringifié : décision STOP 1.A.1 critique #1 (Sprint 1.B
+                # migrera bud_line_id en BIGINT côté Ad CON).
+                "bud_line_id": str(row["id"]),
+                "line_order": idx,
+                "csi_code": section or None,
+                "csi_division": csi_division,
+                "description": row.get("description"),
+                # TODO derive in future sprint when needed (cf. STOP 1.A.1 #3).
+                "discipline": None,
+                "qty_origin": round(qty_eff, 4),
+                "unit": row.get("unite"),
+                "mat_cost_unit_origin": prix_u,
+                "mat_adjustment_pct_origin": ajust_mat,
+                "mat_subtotal_origin": round(mat_subtotal, 2),
+                "mo_hours_origin": heures,
+                "mo_rate_origin": taux,
+                "mo_adjustment_pct_origin": ajust_mo,
+                "mo_subtotal_origin": round(mo_subtotal, 2),
+                "st_type": row.get("sous_traitant_type"),
+                "st_supplier_origin": row.get("sous_traitant_nom"),
+                "st_amount_origin": st_amount,
+                "st_adjustment_pct_origin": ajust_st,
+                "st_subtotal_origin": round(st_subtotal, 2),
+            })
+
+        # 5) Fallback organization_id (décision STOP 1.A.1 critique #2).
+        proj_org = projet.get("organization_id")
+        if proj_org is None:
+            organization_id_out = user.get("organization_id")
+            org_source = "jwt_fallback"
+        else:
+            organization_id_out = str(proj_org)
+            org_source = "project"
+
+        # 6) Sérialiser raw_snapshot via le helper Adision déjà éprouvé
+        # (_json_dumps_with_default convertit Decimal/date/datetime → str).
+        # Tour-trip pour normaliser en pur JSON-natif.
+        raw_snapshot = json.loads(_json_dumps_with_default({
+            "projet": dict(projet),
+            "budget_lignes": [dict(r) for r in budget_rows],
+        }))
+
+        return {
+            "bud_project_id": str(projet["id"]),
+            "organization_id": (
+                str(organization_id_out) if organization_id_out else None
+            ),
+            "snapshot_metadata": {
+                "exported_at": datetime.now(timezone.utc).isoformat(),
+                "exported_by_user_id": user["id"],
+                "bud_schema_version": "v1.0",
+                "lines_count": len(lines_out),
+            },
+            "project": {
+                "name": projet.get("nom"),
+                "project_number": projet.get("numero_projet") or None,
+                "client_name": (
+                    projet.get("nom_client") or projet.get("client") or None
+                ),
+                "address": projet.get("adresse"),
+                # TODO derive in future sprint when needed (cf. STOP 1.A.1 #4).
+                "city": None,
+                "status": projet.get("statut"),
+                "type_batiment": projet.get("type_batiment"),
+                "region": projet.get("region"),
+                "date_adjudication": (
+                    projet["date_adjudication"].isoformat()
+                    if projet.get("date_adjudication") else None
+                ),
+                "superficie_m2": (
+                    float(projet["superficie_m2"])
+                    if projet.get("superficie_m2") is not None else None
+                ),
+                "contract_initial_amount": round(contract_total, 2),
+                "organization_id_source": org_source,
+            },
+            "lines": lines_out,
+            "raw_snapshot": raw_snapshot,
+        }
 
     @router.patch("/projets/{projet_id}/notes")
     def update_projet_notes(projet_id: int, data: dict, user=Depends(jwt_user)):
