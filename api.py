@@ -379,21 +379,29 @@ app = FastAPI(title="Adision API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    # Whitelist explicite : Ad ADM (panneau super_admin), Ad BUD et Ad ANA
-    # (les 2 frontends servis par ce backend), + dev local. allow_credentials
-    # impose une whitelist nommée (le wildcard "*" est refusé par le navigateur
-    # quand credentials=true).
+    # Whitelist explicite : Ad ADM (super_admin), Ad HUB, et tous les
+    # satellites Ad FLO qui consomment des endpoints servis par ce backend.
+    # Sprint 6 (28 mai 2026) — Ad EST ajouté : nouveau consommateur de
+    # /budget/taux-horaires via @adision/ui TauxHorairePicker mode
+    # four_levels. Tant qu'à faire, mat/con/est listés pour éviter de
+    # rejouer ce ticket à chaque module nouveau qui consommera la grille
+    # ACQ (single source of truth ad_budget.taux_horaires).
+    # allow_credentials=True impose une whitelist nommée (wildcard refusé
+    # par le navigateur quand credentials=true).
     allow_origins=[
         "https://app.adision.ca",     # Ad HUB (adision-app)
         "https://admin.adision.ca",   # Ad ADM
         "https://bud.adision.ca",     # Ad BUD
         "https://viu.adision.ca",     # Ad VIU (push budget ← v2)
         "https://ana.adision.ca",     # Ad ANA
+        "https://est.adision.ca",     # Ad EST (Sprint 6 — picker ACQ 4 niveaux)
+        "https://mat.adision.ca",     # Ad MAT (futur consommateur potentiel)
+        "https://con.adision.ca",     # Ad CON (futur consommateur potentiel)
         "http://localhost:5173",
         "http://localhost:5174",
         "http://localhost:5175",
     ],
-    # Couvre les preview deploys Vercel des frontends ad-bud / ad-ana.
+    # Couvre les preview deploys Vercel de tous les frontends Ad FLO.
     allow_origin_regex=r"^https://[a-z0-9-]+\.vercel\.app$",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
