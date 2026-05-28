@@ -1,0 +1,176 @@
+metier|qualification|taux_salaire|salaire_brut|cout_horaire_mo|total_avant_admin
+Briqueteur-maçon|Compagnon|49.57|56.01|84.60|100.83
+Briqueteur-maçon|Apprenti période 1|29.74|33.61|53.87|70.10
+Briqueteur-maçon|Apprenti période 2|34.70|39.21|61.32|77.55
+Briqueteur-maçon|Apprenti période 3|42.13|47.61|72.51|88.74
+Calorifugeur|Compagnon|50.79|57.39|83.76|99.99
+Calorifugeur|Apprenti période 1|30.47|34.43|53.34|69.57
+Calorifugeur|Apprenti période 2|35.55|40.17|60.70|76.93
+Calorifugeur|Apprenti période 3|43.17|48.78|71.78|88.01
+Carreleur|Compagnon|50.12|56.64|84.58|100.81
+Carreleur|Apprenti période 1|30.07|33.98|53.83|70.06
+Carreleur|Apprenti période 2|35.08|39.64|61.30|77.53
+Carreleur|Apprenti période 3|42.60|48.14|72.47|88.70
+Charpentier-menuisier|Compagnon|50.16|56.68|84.64|100.87
+Charpentier-menuisier|Apprenti période 1|30.10|34.01|53.87|70.10
+Charpentier-menuisier|Apprenti période 2|35.11|39.67|61.33|77.56
+Charpentier-menuisier|Apprenti période 3|42.64|48.18|72.54|88.77
+Chaudronnier|Compagnon|50.79|57.39|83.97|100.20
+Chaudronnier|Apprenti période 1|30.47|34.43|53.54|69.77
+Chaudronnier|Apprenti période 2|35.55|40.17|60.91|77.14
+Chaudronnier|Apprenti période 3|43.17|48.78|71.97|88.20
+Cimentier-applicateur|Compagnon|48.55|54.86|82.91|99.14
+Cimentier-applicateur|Apprenti période 1|33.99|38.41|60.16|76.39
+Cimentier-applicateur|Apprenti période 2|41.27|46.64|71.08|87.31
+Couvreur|Compagnon|51.20|57.86|87.82|104.05
+Couvreur|Apprenti période 1|35.84|40.50|63.73|79.96
+Couvreur|Apprenti période 2|43.52|49.18|75.34|91.57
+Électricien|Compagnon|50.79|57.39|86.02|102.25
+Électricien|Apprenti période 1|25.40|28.70|47.46|63.69
+Électricien|Apprenti période 2|30.47|34.43|54.98|71.21
+Électricien|Apprenti période 3|35.55|40.17|62.50|78.73
+Électricien|Apprenti période 4|43.17|48.78|73.79|90.02
+Ferblantier|Compagnon|50.79|57.39|85.12|101.35
+Ferblantier|Apprenti période 1|30.47|34.43|54.14|70.37
+Ferblantier|Apprenti période 2|35.55|40.17|61.66|77.89
+Ferblantier|Apprenti période 3|43.17|48.78|72.93|89.16
+Poseur d'armature du béton|Compagnon|51.31|57.98|87.29|103.52
+Poseur d'armature du béton|Apprenti|43.61|49.28|74.83|91.06
+Frigoriste (halocarbure)|Compagnon|53.33|60.26|87.66|103.89
+Frigoriste|Compagnon|50.79|57.39|83.97|100.20
+Frigoriste|Apprenti période 1|25.40|28.70|46.23|62.46
+Frigoriste|Apprenti période 2|30.47|34.43|53.60|69.83
+Frigoriste|Apprenti période 3|35.55|40.17|60.95|77.18
+Frigoriste|Apprenti période 4|43.17|48.78|72.01|88.24
+Grutier - classe A|Compagnon|50.79|57.39|83.77|100.00
+Grutier - classe A|Apprenti période 1|35.55|40.17|60.58|76.81
+Grutier - classe A|Apprenti période 2|43.17|48.78|71.72|87.95
+Grutier - classe B|Compagnon|48.58|54.90|80.55|96.78
+Grutier - classe B|Apprenti période 1|34.01|38.43|58.34|74.57
+Grutier - classe B|Apprenti période 2|41.29|46.66|68.98|85.21
+Installateur de sys. de sécurité|Compagnon|41.66|47.08|70.45|86.68
+Installateur de sys. de sécurité|Apprenti période 1|24.99|28.24|45.51|61.74
+Installateur de sys. de sécurité|Apprenti période 2|29.16|32.95|51.52|67.75
+Installateur de sys. de sécurité|Apprenti période 3|35.41|40.01|60.53|76.76
+Mécanicien d'ascenseurs|Compagnon|56.70|64.07|91.93|108.16
+Mécanicien d'ascenseurs|Apprenti période 1|28.35|32.04|49.81|66.04
+Mécanicien d'ascenseurs|Apprenti période 2|34.02|38.44|58.05|74.28
+Mécanicien d'ascenseurs|Apprenti période 3|39.69|44.85|66.30|82.53
+Mécanicien d'ascenseurs|Apprenti période 4|48.20|54.47|78.65|94.88
+Mécanicien d'ascenseurs|Apprenti période 5|48.20|54.47|78.65|94.88
+Mécanicien de chantier|Compagnon|50.79|57.39|84.03|100.26
+Mécanicien de chantier|Apprenti période 1|30.47|34.43|53.60|69.83
+Mécanicien de chantier|Apprenti période 2|35.55|40.17|60.98|77.21
+Mécanicien de chantier|Apprenti période 3|43.17|48.78|72.05|88.28
+Mécanicien de machines lourdes|Compagnon|48.94|55.30|81.93|98.16
+Mécanicien de machines lourdes|Apprenti période 1|29.36|33.18|52.40|68.63
+Mécanicien de machines lourdes|Apprenti période 2|34.26|38.71|59.56|75.79
+Mécanicien de machines lourdes|Apprenti période 3|41.60|47.01|70.29|86.52
+Mécanicien protection-incendie|Compagnon|50.79|57.39|84.15|100.38
+Mécanicien protection-incendie|Apprenti période 1|25.40|28.70|46.33|62.56
+Mécanicien protection-incendie|Apprenti période 2|30.47|34.43|53.71|69.94
+Mécanicien protection-incendie|Apprenti période 3|35.55|40.17|61.08|77.31
+Mécanicien protection-incendie|Apprenti période 4|43.17|48.78|72.16|88.39
+Monteur-assembleur|Compagnon|51.31|57.98|87.41|103.64
+Monteur-assembleur|Apprenti période 1|30.79|34.79|55.69|71.92
+Monteur-assembleur|Apprenti période 2|35.92|40.59|63.39|79.62
+Monteur-assembleur|Apprenti période 3|43.61|49.28|74.95|91.18
+Monteur mécanicien (vitrier)|Compagnon|49.60|56.05|84.27|100.50
+Monteur mécanicien (vitrier)|Apprenti période 1|29.76|33.63|53.60|69.83
+Monteur mécanicien (vitrier)|Apprenti période 2|34.72|39.23|61.04|77.27
+Monteur mécanicien (vitrier)|Apprenti période 3|42.16|47.64|72.20|88.43
+Opér.d'équipement lourd-cl. AA|Compagnon|48.23|54.50|80.89|97.12
+Opér.d'équipement lourd-cl. AA|Apprenti|41.00|46.33|69.42|85.65
+Opér.d'équipement lourd-cl. A|Compagnon|46.69|52.76|78.66|94.89
+Opér.d'équipement lourd-cl. A|Apprenti|39.69|44.85|67.51|83.74
+Opér.d'équipement lourd-cl. B|Compagnon|45.49|51.40|76.90|93.13
+Opér.d'équipement lourd-cl. B|Apprenti|38.67|43.70|66.02|82.25
+Opér.de pelles mécaniques - AA|Compagnon|51.51|58.21|85.70|101.93
+Opér.de pelles mécaniques - AA|Apprenti|43.78|49.47|73.48|89.71
+Opér.de pelles mécaniques - A|Compagnon|49.92|56.41|83.37|99.60
+Opér.de pelles mécaniques - A|Apprenti|42.43|47.95|71.51|87.74
+Opér.de pelles mécaniques - B|Compagnon|48.32|54.60|81.03|97.26
+Opér.de pelles mécaniques - B|Apprenti|41.07|46.41|69.52|85.75
+Opér. p à béton (mât de distr) -42 M.|Compagnon|45.89|51.86|78.51|94.74
+Opér. p à béton (mât de distr) -42 M.|Apprenti|39.01|44.08|67.27|83.50
+Oper. p. à béton (mât de distr)+42 M.|Compagnon|47.89|54.12|81.51|97.74
+Oper. p. à béton (mât de distr)+42 M.|Apprenti|40.71|46.00|69.82|86.05
+Oper. p. à béton (mât de distr)+50 M.|Compagnon|48.89|55.25|83.00|99.23
+Oper. p. à béton (mât de distr)+50 M.|Apprenti|41.56|46.96|71.07|87.30
+Oper. p. à béton (mât de distr)+58 M.|Compagnon|50.89|57.51|86.01|102.24
+Oper. p. à béton (mât de distr)+58 M.|Apprenti|43.26|48.88|73.63|89.86
+Oper. p. à béton (mât de distr)+63 M.|Compagnon|54.28|61.34|91.10|107.33
+Oper. p. à béton (mât de distr)+63 M.|Apprenti|46.14|52.14|77.97|94.20
+Parqueteur-sableur|Compagnon|50.16|56.68|84.64|100.87
+Parqueteur-sableur|Apprenti période 1|30.10|34.01|53.87|70.10
+Parqueteur-sableur|Apprenti période 2|35.11|39.67|61.33|77.56
+Parqueteur-sableur|Apprenti période 3|42.64|48.18|72.54|88.77
+Peintre|Compagnon|47.39|53.55|80.26|96.49
+Peintre|Apprenti période 1|28.43|32.13|51.14|67.37
+Peintre|Apprenti période 2|33.17|37.48|58.18|74.41
+Peintre|Apprenti période 3|40.28|45.52|68.77|85.00
+Plâtrier|Compagnon|48.26|54.53|81.80|98.03
+Plâtrier|Apprenti période 1|28.96|32.72|52.20|68.43
+Plâtrier|Apprenti période 2|33.78|38.17|59.36|75.59
+Plâtrier|Apprenti période 3|41.02|46.35|70.13|86.36
+Poseur de revêtements souples|Compagnon|49.07|55.45|82.91|99.14
+Poseur de revêtements souples|Apprenti période 1|29.44|33.27|52.80|69.03
+Poseur de revêtements souples|Apprenti période 2|34.35|38.82|60.10|76.33
+Poseur de revêtements souples|Apprenti période 3|41.71|47.13|71.04|87.27
+Poseur de systèmes intérieurs|Compagnon|50.16|56.68|85.14|101.37
+Poseur de systèmes intérieurs|Apprenti période 1|30.10|34.01|54.37|70.60
+Poseur de systèmes intérieurs|Apprenti période 2|35.11|39.67|61.83|78.06
+Poseur de systèmes intérieurs|Apprenti période 3|42.64|48.18|73.03|89.26
+Tireur de joints (plâtrier)|Compagnon|47.39|53.55|80.50|96.73
+Tireur de joints (plâtrier)|Apprenti période 1|28.43|32.13|51.39|67.62
+Tireur de joints (plâtrier)|Apprenti période 2|33.17|37.48|58.46|74.69
+Tireur de joints (plâtrier)|Apprenti période 3|40.28|45.52|69.03|85.26
+Tireur de joints (peintre)|Compagnon|47.51|53.69|80.45|96.68
+Tireur de joints (peintre)|Apprenti période 1|28.51|32.22|51.26|67.49
+Tireur de joints (peintre)|Apprenti période 2|33.26|37.58|58.32|74.55
+Tireur de joints (peintre)|Apprenti période 3|40.38|45.63|68.92|85.15
+Tuyauteur|Compagnon|50.79|57.39|84.40|100.63
+Tuyauteur|Apprenti période 1|25.40|28.70|46.60|62.83
+Tuyauteur|Apprenti période 2|30.47|34.43|53.98|70.21
+Tuyauteur|Apprenti période 3|35.55|40.17|61.34|77.57
+Tuyauteur|Apprenti période 4|43.17|48.78|72.41|88.64
+Chef d'équipe (charpentier-menuisier)||54.17|61.21|90.60|106.83
+Chef de groupe (charpentier-menuisier)||55.18|62.35|92.09|108.32
+Chauffeur de chaudière à vapeur||40.78|46.08|69.45|85.68
+Chauffeur, classe IV||36.21|40.92|62.81|79.04
+Commis||27.78|31.39|51.62|67.85
+Conducteur de camion classe AA||43.23|48.85|73.60|89.83
+Conducteur de camion classe A||41.67|47.09|71.33|87.56
+Conducteur de camion classe B||40.94|46.26|70.26|86.49
+Conducteur de camion classe C||40.41|45.66|69.47|85.70
+Gardien||20.75|23.45|41.16|57.39
+Homme de service sur machines lourdes||39.44|44.57|67.85|84.08
+Magasinier||33.09|37.39|59.51|75.74
+Manoeuvre (journalier)||40.19|45.41|70.05|86.28
+Manoeuvre (pipeline)||40.83|46.14|69.89|86.12
+Manoeuvre (travaux de couverture)||40.45|45.71|71.35|87.58
+Manœuvre (maçonnerie)||41.91|47.36|73.34|89.57
+Manoeuvre en décontamination||45.22|51.10|77.55|93.78
+Manoeuvre spécialisé||40.83|46.14|71.02|87.25
+Manoeuvre spécialisé (carreleur)||42.04|47.51|72.38|88.61
+Manoeuvre spécialisé (couverture)||41.09|46.43|72.32|88.55
+Opér. d'appareils de levage cl.A||44.38|50.15|75.29|91.52
+Opér. d'appareils de levage cl.B||42.54|48.07|72.59|88.82
+Opérateur de génératrice||41.70|47.12|71.36|87.59
+Opér. de pompes et compres.||42.86|48.43|72.83|89.06
+Opér. de pompes et compr. (p. à ligne)||42.86|48.43|72.83|89.06
+Op. d'usines fixes ou mobiles||43.28|48.91|74.15|90.38
+Préposé aux pneus et au déboss. de machines lourdes||44.47|50.25|75.19|91.42
+Soudeur||47.40|53.56|79.05|95.28
+Soudeur de pipeline et soudeur de distribution||50.79|57.39|84.25|100.48
+Soudeur en tuyauterie||50.79|57.39|84.40|100.63
+Spécialiste en branchement d'immeubles (gas fitter)||50.33|56.87|83.31|99.54
+Agent de prévention SST||53.64|53.64||107.28
+Estimateur||65.02|65.02||149.55
+Gérant de projet||69.66|69.66||139.32
+Ingénieur||65.30|65.30||150.19
+Personnel auxiliaire||24.39|24.39||56.10
+Surintendant de chantier||70.34|70.34||140.68
+Technicien en immotique (junior)||39.89|39.89||91.75
+Technicien en immotique||47.41|47.41||109.04
+Technicien en administration||43.67|43.67||100.44

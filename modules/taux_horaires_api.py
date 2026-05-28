@@ -27,9 +27,14 @@ from modules.auth_jwt import make_jwt_deps
 VALID_GROUPES = {"metier", "occupation", "non_syndique"}
 
 # Colonnes retournées pour une ligne de taux_horaires (ordre stable).
+# Sprint 6 PIVOT — ajout taux_salaire / salaire_brut / total_avant_admin
+# (3 niveaux ACQ supplémentaires en plus de taux_col17 pour le picker
+# 4 niveaux d'Ad EST). Rétrocompat Ad BUD totale : taux_col17 inchangé,
+# Ad BUD ignore les nouveaux champs.
 _TAUX_COLS = (
-    "id, code, metier, qualification, taux_col17, groupe, ordre, "
-    "notes, actif, updated_at, updated_by"
+    "id, code, metier, qualification, "
+    "taux_salaire, salaire_brut, taux_col17, total_avant_admin, "
+    "groupe, ordre, notes, actif, updated_at, updated_by"
 )
 
 
@@ -508,11 +513,19 @@ def register_taux_horaires_routes(get_conn):
             params.extend([like, like])
         where_sql = " AND ".join(where)
 
+        # Sprint 6 PIVOT — sortie enrichie 4 niveaux ACQ pour le picker
+        # Ad EST `four_levels`. Ad BUD continue à consommer taux_col17
+        # uniquement (ignore les 3 nouveaux champs). Pour les non-syndiqués,
+        # taux_salaire == salaire_brut et taux_col17 stocke col 20 (cf.
+        # convention mig 014) — le picker peut afficher "indisponible" sur
+        # cout_horaire_mo si besoin (col 17 non publiée dans le PDF ACQ).
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         try:
             cur.execute(
-                f"SELECT id, code, metier, qualification, taux_col17, groupe "
+                f"SELECT id, code, metier, qualification, "
+                f"       taux_salaire, salaire_brut, taux_col17, total_avant_admin, "
+                f"       groupe "
                 f"FROM ad_budget.taux_horaires WHERE {where_sql} "
                 f"ORDER BY groupe, ordre, metier",
                 params,
