@@ -536,6 +536,51 @@ def register_taux_horaires_routes(get_conn):
             conn.close()
         return {"items": items}
 
+    # ── GET /budget/csi-division-defaults — mapping division → taux ─────
+    # Sprint 6.2 (28 mai 2026) — alimente l'auto-fill MO Taux $ d'Ad EST
+    # quand l'utilisateur sélectionne/change la section CSI d'une ligne.
+    # Pendant du /budget/taux-horaires : user public (jwt_user), 4 niveaux
+    # ACQ exposés (taux_salaire / salaire_brut / taux_col17 / total_avant_admin)
+    # pour que le frontend choisisse le niveau qu'il veut. Ad EST utilise
+    # total_avant_admin par défaut, Ad BUD garde taux_col17.
+    @user.get("/csi-division-defaults")
+    def list_csi_division_defaults():
+        """Liste les mappings division CSI (2 chars) → métier compagnon
+        par défaut, avec les 4 niveaux ACQ enrichis.
+
+        Réponse : { items: [{ csi_division, taux_id, code, metier,
+                              qualification, groupe,
+                              taux_salaire, salaire_brut, taux_col17,
+                              total_avant_admin }] }
+        Filtre actif=TRUE sur le métier. Tri par csi_division.
+        """
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute(
+                """
+                SELECT m.csi_division,
+                       t.id          AS taux_id,
+                       t.code,
+                       t.metier,
+                       t.qualification,
+                       t.groupe,
+                       t.taux_salaire,
+                       t.salaire_brut,
+                       t.taux_col17,
+                       t.total_avant_admin
+                  FROM ad_budget.csi_division_default_metier m
+                  JOIN ad_budget.taux_horaires t ON t.id = m.taux_id
+                 WHERE t.actif = TRUE
+                 ORDER BY m.csi_division
+                """
+            )
+            items = cur.fetchall()
+        finally:
+            cur.close()
+            conn.close()
+        return {"items": items}
+
     parent.include_router(admin)
     parent.include_router(user)
     return parent
