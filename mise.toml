@@ -1,0 +1,14 @@
+# Railway build fix (2026-06-02) — même correctif que adision-app-api (Sprint 18).
+#
+# Le build mise échoue sur python@3.11.9 (pinné via runtime.txt) :
+#   mise ERROR No GitHub artifact attestations found for python@3.11.9
+# → les builds d'adision-api échouaient SILENCIEUSEMENT depuis ~2 jours, laissant
+#   l'ancien déploiement actif (sprint6_4/6_5/6_6/6_7 jamais montés). Ce mise.toml
+#   désactive la vérification d'attestations et fige python 3.11.9, alignant
+#   adision-api sur le correctif déjà appliqué à adision-app-api.
+
+[settings]
+python.github_attestations = false
+
+[tools]
+python = "3.11.9"
