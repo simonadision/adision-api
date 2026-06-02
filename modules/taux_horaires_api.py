@@ -581,6 +581,37 @@ def register_taux_horaires_routes(get_conn):
             conn.close()
         return {"items": items}
 
+    # ── GET /budget/csi-section-defaults — mapping SECTION (4 ch) → taux ──
+    # Sprint 6.6 — niveau SECTION prioritaire (cascade Ad EST : section →
+    # division → manuel). Même contrat que /csi-division-defaults (4 niveaux
+    # ACQ enrichis). Clé csi_section = "NN NN".
+    @user.get("/csi-section-defaults")
+    def list_csi_section_defaults():
+        """Liste les mappings section CSI (4 chiffres "NN NN") → métier par
+        défaut, avec les 4 niveaux ACQ enrichis.
+        Réponse : { items: [{ csi_section, taux_id, code, metier, qualification,
+                              groupe, taux_salaire, salaire_brut, taux_col17,
+                              total_avant_admin }] }"""
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute(
+                """
+                SELECT m.csi_section,
+                       t.id AS taux_id, t.code, t.metier, t.qualification, t.groupe,
+                       t.taux_salaire, t.salaire_brut, t.taux_col17, t.total_avant_admin
+                  FROM ad_budget.csi_section_default_metier m
+                  JOIN ad_budget.taux_horaires t ON t.id = m.taux_id
+                 WHERE t.actif = TRUE
+                 ORDER BY m.csi_section
+                """
+            )
+            items = cur.fetchall()
+        finally:
+            cur.close()
+            conn.close()
+        return {"items": items}
+
     parent.include_router(admin)
     parent.include_router(user)
     return parent
