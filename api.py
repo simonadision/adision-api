@@ -84,6 +84,15 @@ def _ensure_schema():
             "ADD COLUMN IF NOT EXISTS sous_traitant_type TEXT DEFAULT NULL, "
             "ADD COLUMN IF NOT EXISTS sous_traitant_montant NUMERIC(12,2) DEFAULT 0"
         )
+        # Passerelle Ad RES → Ad BUD : lien LOGIQUE (cross-DB, pas de FK
+        # physique) vers app_central.contacts.id (UUID, base adision-app-api).
+        # NULL = saisie libre ou ligne ancienne (rétrocompat). Le nom texte
+        # reste dans sous_traitant_nom pour l'historique même si le contact
+        # change/disparaît.
+        cur.execute(
+            "ALTER TABLE ad_budget.budget_lignes "
+            "ADD COLUMN IF NOT EXISTS sous_traitant_contact_id UUID DEFAULT NULL"
+        )
         # One-shot : copier les valeurs existantes de cout_sous_traitant vers
         # sous_traitant_montant pour ne pas perdre la donnée si le déploiement
         # précédent en a saisi. WHERE évite d'écraser des valeurs déjà

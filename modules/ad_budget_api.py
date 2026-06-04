@@ -2974,10 +2974,18 @@ def register_ad_budget_routes(get_conn):
             "sous_traitant_type", "sous_traitant_montant",
             # Sprint 1.5 : liens logiques vers Ad MAT (cross-DB, pas de FK physique).
             "item_id_ad_mat", "ad_hub_pending_id",
+            # Passerelle Ad RES → Ad BUD : lien logique vers app_central.contacts
+            # (UUID, cross-DB). NULL = saisie libre / ligne déliée.
+            "sous_traitant_contact_id",
         ]:
             if field in data:
+                val = data[field]
+                # contact_id : "" / 0 / null → NULL (UUID nullable ; évite un
+                # cast "" → uuid qui planterait). Délier = renvoyer null.
+                if field == "sous_traitant_contact_id":
+                    val = val or None
                 fields.append(f"{field} = %s")
-                values.append(data[field])
+                values.append(val)
         fields.append("updated_at = NOW()")
         if not fields:
             return {"error": "No fields to update"}
