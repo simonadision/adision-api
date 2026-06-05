@@ -9,6 +9,7 @@ import psycopg
 from psycopg.rows import dict_row
 from modules.ad_ana_api import register_ad_ana_routes
 from modules.ad_budget_api import register_ad_budget_routes
+from modules.ad_gabarits_api import register_ad_gabarits_routes
 from modules.taux_horaires_api import register_taux_horaires_routes
 from modules.auth_jwt import make_jwt_deps
 import os
@@ -427,6 +428,7 @@ app.add_middleware(
 )
 
 app.include_router(register_ad_budget_routes(get_conn))
+app.include_router(register_ad_gabarits_routes(get_conn))
 app.include_router(register_ad_ana_routes(get_conn))
 app.include_router(register_taux_horaires_routes(get_conn))
 
