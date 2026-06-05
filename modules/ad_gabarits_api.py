@@ -129,6 +129,27 @@ def register_ad_gabarits_routes(get_conn):
             (projet_id, section, description),
         )
 
+    # ─── Taxonomie CSI (sections) pour le sélecteur de l'éditeur ──────────
+    # Réutilise la taxonomie de sections EXISTANTE d'Ad BUD
+    # (ad_budget.ad_budget_prix_moyens : 84 sections code + libellé) — la MÊME
+    # que celle par laquelle les budgets sont groupés → une section CSI choisie
+    # dans le gabarit groupe proprement à l'insertion. Pas de liste parallèle.
+    @router.get("/csi-sections")
+    def list_csi_sections(user=Depends(jwt_user)):
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute(
+                "SELECT DISTINCT section AS code, description AS libelle "
+                "FROM ad_budget.ad_budget_prix_moyens "
+                "WHERE section IS NOT NULL AND section <> '' "
+                "ORDER BY section"
+            )
+            return {"sections": cur.fetchall()}
+        finally:
+            cur.close()
+            conn.close()
+
     # ─── CRUD ─────────────────────────────────────────────────────────────
     @router.get("/gabarits")
     def list_gabarits(user=Depends(jwt_user)):
@@ -294,8 +315,20 @@ def register_ad_gabarits_routes(get_conn):
                     "description": r.get("description") or "",
                     "code_typ": code,
                 })
+            # Résout le LIBELLÉ CSI officiel de chaque code section depuis la
+            # taxonomie Ad BUD (ad_budget_prix_moyens). Le budget est déjà groupé
+            # par code CSI → le save-as capture de vraies sections CSI (code +
+            # libellé). Code custom non catalogué → libellé vide (fallback).
+            labels = {}
+            if order:
+                cur.execute(
+                    "SELECT DISTINCT section, description FROM ad_budget.ad_budget_prix_moyens "
+                    "WHERE section = ANY(%s)",
+                    (order,),
+                )
+                labels = {r["section"]: r["description"] for r in cur.fetchall()}
             structure = [
-                {"nom_section": "", "numero": sec, "ordre": i,
+                {"nom_section": labels.get(sec, ""), "numero": sec, "ordre": i,
                  "lignes": [{**ln, "ordre": j} for j, ln in enumerate(by_section[sec])]}
                 for i, sec in enumerate(order)
             ]
