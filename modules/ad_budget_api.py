@@ -1751,16 +1751,41 @@ def register_ad_budget_routes(get_conn):
         return updated
 
     @router.delete("/projets/{projet_id}")
-    def delete_projet(projet_id: int, user=Depends(jwt_user)):
+    def delete_projet(
+        projet_id: int,
+        user=Depends(jwt_user),
+        authorization: Optional[str] = Header(None),
+    ):
         # PHASE 3A — authentification + autorisation (écriture).
         _load_and_authorize_projet(get_conn, projet_id, user, "write")
         conn = get_conn()
         cur = conn.cursor()
-        # Les budget_lignes sont supprimées automatiquement (CASCADE)
-        cur.execute("DELETE FROM ad_budget.projets WHERE id = %s", (projet_id,))
+        # Les budget_lignes sont supprimées automatiquement (CASCADE).
+        # RETURNING ad_hub_project_id : on récupère le lien Ad HUB AVANT de
+        # perdre la row, pour soft-delete le master en aval (symétrie du fix
+        # create, Sprint C1). Sans ça, supprimer un projet hub-first laissait
+        # le master app_hub.projects vivant = orphelin (cf. fix create).
+        cur.execute(
+            "DELETE FROM ad_budget.projets WHERE id = %s "
+            "RETURNING ad_hub_project_id",
+            (projet_id,),
+        )
+        deleted = cur.fetchone()
         conn.commit()
         cur.close()
         conn.close()
+
+        # Best-effort, APRÈS le commit local : si le projet était lié à un
+        # master Ad HUB (mode A ou B), on le soft-delete aussi pour ne pas
+        # laisser d'orphelin. On log mais on ne re-raise pas — le DELETE BUD
+        # a réussi, c'est ce qui compte pour l'utilisateur ; un master Ad HUB
+        # résiduel reste auditable et nettoyable. Ordre (local puis hub) :
+        # évite un lien cassé (hub soft-deleted mais local encore présent) si
+        # le second échouait.
+        ad_hub_project_id = deleted[0] if deleted else None
+        if ad_hub_project_id is not None:
+            jwt_token = _extract_bearer(authorization, None)
+            hub_service.soft_delete_project(jwt_token, ad_hub_project_id)
         return {"status": "deleted"}
 
     @router.get("/projets/{projet_id}/export-for-con")
