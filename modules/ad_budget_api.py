@@ -3086,16 +3086,17 @@ def register_ad_budget_routes(get_conn):
             ligne = cur.fetchone()
             if not ligne:
                 raise HTTPException(status_code=404, detail="Ligne introuvable")
-            # Priorité à la qté du body : le front re-snapshot à chaque
-            # changement de qté (scaling live MO/ST). À défaut, préserve une qté
-            # déjà saisie (> 0) ; sinon 1.
-            body_qte = data.get("qte")
-            try:
-                body_qte = float(body_qte) if body_qte not in (None, "") else None
-            except (TypeError, ValueError):
-                body_qte = None
-            if body_qte and body_qte > 0:
-                qte = body_qte
+            # Qté du body : si FOURNIE (0 inclus), elle fait FOI — le front
+            # re-snapshot à la qté SAISIE par l'utilisateur (y compris 0 →
+            # MO/ST = 0). Le 0 ne doit JAMAIS être ignoré, sinon la saisie « 0 »
+            # rebondit à l'ancienne qté du snapshot. Si NON fournie (import sans
+            # qté pré-saisie), on préserve une qté existante (> 0) sinon 1.
+            raw_qte = data.get("qte")
+            if raw_qte not in (None, ""):
+                try:
+                    qte = max(0.0, float(raw_qte))
+                except (TypeError, ValueError):
+                    qte = ligne["qte"] if (ligne["qte"] or 0) > 0 else 1
             elif (ligne["qte"] or 0) > 0:
                 qte = ligne["qte"]
             else:
