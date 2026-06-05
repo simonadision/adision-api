@@ -459,8 +459,11 @@ def _load_and_authorize_projet(get_conn, projet_id, user, mode):
 def _map_typ_to_budget_cols(typ: dict, qte) -> dict:
     """Aplatissement d'une ligne Ad TYP (catalogue cross-service) → colonnes
     budget_lignes (3 sections). PRÉSERVE les montants Ad TYP exacts :
-      - MAT : prix_unitaire ← prix_mat (roulé Ad TYP) ; multiplié par qte côté Ad BUD.
-      - ST  : sous_traitant_montant ← prix_st (roulé).
+      - MAT : prix_unitaire ← prix_mat (roulé Ad TYP, PAR UNITÉ) ; getRow le
+              multiplie par qte côté front (scaling live).
+      - ST  : sous_traitant_montant ← prix_st × qte (TOTAL à la qte du snapshot,
+              cohérent avec MO ci-dessous). prix_st seul (par unité) sous-estimait
+              le S/T ST d'un facteur qte (bug : ne scalait pas avec la qte).
       - MO  : Ad BUD = heures × taux (PAS × qte). On pose
               heures = Σ(composant.mo_rendement × composant.qte) × qte_budget,
               taux  = prix_mo / Σ(rendement×qte)   (taux PONDÉRÉ → heures×taux = prix_mo×qte).
@@ -496,7 +499,7 @@ def _map_typ_to_budget_cols(typ: dict, qte) -> dict:
         "prix_unitaire": prix_mat,
         "heures": heures,
         "taux_horaire": taux,
-        "sous_traitant_montant": prix_st,
+        "sous_traitant_montant": round(prix_st * qte, 4),
         "mo_flat": mo_flat,
         "taux_pondere": taux,
     }
@@ -3083,8 +3086,20 @@ def register_ad_budget_routes(get_conn):
             ligne = cur.fetchone()
             if not ligne:
                 raise HTTPException(status_code=404, detail="Ligne introuvable")
-            # Préserve une qté déjà saisie ; sinon body ; sinon 1.
-            qte = ligne["qte"] if (ligne["qte"] or 0) > 0 else data.get("qte", 1)
+            # Priorité à la qté du body : le front re-snapshot à chaque
+            # changement de qté (scaling live MO/ST). À défaut, préserve une qté
+            # déjà saisie (> 0) ; sinon 1.
+            body_qte = data.get("qte")
+            try:
+                body_qte = float(body_qte) if body_qte not in (None, "") else None
+            except (TypeError, ValueError):
+                body_qte = None
+            if body_qte and body_qte > 0:
+                qte = body_qte
+            elif (ligne["qte"] or 0) > 0:
+                qte = ligne["qte"]
+            else:
+                qte = 1
             try:
                 typ = typ_service.get_ligne(jwt_token, code)
             except typ_service.TypServiceError as e:
