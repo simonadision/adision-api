@@ -93,6 +93,15 @@ def _ensure_schema():
             "ALTER TABLE ad_budget.budget_lignes "
             "ADD COLUMN IF NOT EXISTS sous_traitant_contact_id UUID DEFAULT NULL"
         )
+        # Pont Ad TYP → Ad BUD : lien LOGIQUE (cross-DB, pas de FK) vers la ligne
+        # Ad TYP d'origine + horodatage du snapshot. NULL = ligne manuelle
+        # classique. La re-tarif depuis Ad TYP n'est permise que si le projet est
+        # au statut 'brouillon' (« En cours ») — gelée sinon.
+        cur.execute(
+            "ALTER TABLE ad_budget.budget_lignes "
+            "ADD COLUMN IF NOT EXISTS source_typ_code TEXT DEFAULT NULL, "
+            "ADD COLUMN IF NOT EXISTS source_typ_snapshot_at TIMESTAMPTZ DEFAULT NULL"
+        )
         # One-shot : copier les valeurs existantes de cout_sous_traitant vers
         # sous_traitant_montant pour ne pas perdre la donnée si le déploiement
         # précédent en a saisi. WHERE évite d'écraser des valeurs déjà

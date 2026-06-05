@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
-from modules import con_service, hub_service
+from modules import con_service, hub_service, typ_service
 from modules.ad_budget_constants import AD_VIU_BLINDSPOT_DIVISIONS
 from modules.aggregates import adapt_budget_lines, compute_aggregates
 from modules.auth_jwt import _extract_bearer, make_jwt_deps
@@ -454,6 +454,52 @@ def _load_and_authorize_projet(get_conn, projet_id, user, mode):
     finally:
         conn.close()
     _authorize_projet(projet, user, mode)
+
+
+def _map_typ_to_budget_cols(typ: dict, qte) -> dict:
+    """Aplatissement d'une ligne Ad TYP (catalogue cross-service) → colonnes
+    budget_lignes (3 sections). PRÉSERVE les montants Ad TYP exacts :
+      - MAT : prix_unitaire ← prix_mat (roulé Ad TYP) ; multiplié par qte côté Ad BUD.
+      - ST  : sous_traitant_montant ← prix_st (roulé).
+      - MO  : Ad BUD = heures × taux (PAS × qte). On pose
+              heures = Σ(composant.mo_rendement × composant.qte) × qte_budget,
+              taux  = prix_mo / Σ(rendement×qte)   (taux PONDÉRÉ → heures×taux = prix_mo×qte).
+              Sans rendement mais prix_mo>0 : heures=qte, taux=prix_mo (pseudo-taux
+              = montant unitaire) → MO = prix_mo × qte. `mo_flat=True` le signale.
+    Renvoie aussi `mo_flat` et `taux_pondere` (debug/observabilité)."""
+    qte = float(qte or 0)
+    prix_mat = float(typ.get("prix_mat") or 0)
+    prix_mo = float(typ.get("prix_mo") or 0)
+    prix_st = float(typ.get("prix_st") or 0)
+    heures_unit = 0.0
+    for c in (typ.get("composants") or []):
+        rend = c.get("mo_rendement")
+        if rend not in (None, ""):
+            heures_unit += float(rend) * float(c.get("qte") or 1)
+    mo_flat = False
+    if heures_unit > 0:
+        heures = round(heures_unit * qte, 4)
+        taux = round(prix_mo / heures_unit, 4)
+    elif prix_mo > 0:
+        # Pas de rendement (MO brute Ad TYP) : pseudo-taux = montant unitaire.
+        heures = round(qte, 4)
+        taux = round(prix_mo, 4)
+        mo_flat = True
+    else:
+        heures = 0.0
+        taux = 0.0
+    section = typ.get("csi_section_code") or typ.get("csi_division_code") or ""
+    return {
+        "section": section,
+        "description": typ.get("description") or "",
+        "unite": typ.get("unite") or "global",
+        "prix_unitaire": prix_mat,
+        "heures": heures,
+        "taux_horaire": taux,
+        "sous_traitant_montant": prix_st,
+        "mo_flat": mo_flat,
+        "taux_pondere": taux,
+    }
 
 
 def register_ad_budget_routes(get_conn):
@@ -2881,6 +2927,106 @@ def register_ad_budget_routes(get_conn):
         cur.close()
         conn.close()
         return {"status": "created", "ligne": row}
+
+    # ─── Pont Ad TYP → Ad BUD (étape 1) — lecture cross-service + snapshot ───
+    def _typ_err(e):
+        code = e.status_code if e.status_code in (401, 403, 404) else 502
+        return HTTPException(status_code=code, detail=f"Ad TYP : {e.detail}")
+
+    @router.get("/typ/catalogue")
+    def proxy_typ_catalogue(q: Optional[str] = None, division: Optional[str] = None,
+                            section: Optional[str] = None, limit: int = 50,
+                            authorization: Optional[str] = Header(None),
+                            user=Depends(jwt_user)):
+        """Proxy lecture seule du catalogue Ad TYP (cross-service) pour
+        l'autocomplete « + depuis Ad TYP ». Ad BUD LIT Ad TYP ; n'écrit jamais."""
+        jwt_token = _extract_bearer(authorization, None)
+        try:
+            return typ_service.search_catalogue(jwt_token, q=q, division=division, section=section, limit=limit)
+        except typ_service.TypServiceError as e:
+            raise _typ_err(e)
+
+    @router.post("/projets/{projet_id}/lignes/from-typ")
+    def create_budget_ligne_from_typ(projet_id: int, data: dict,
+                                     authorization: Optional[str] = Header(None),
+                                     user=Depends(jwt_user)):
+        """Pioche une ligne Ad TYP (par code) → crée une budget_ligne SNAPSHOT
+        (aplatie MAT/MO/ST) + lien source_typ_code pour re-tarif ultérieure."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        code = (data.get("code") or "").strip()
+        if not code:
+            raise HTTPException(status_code=400, detail="code Ad TYP requis")
+        qte = data.get("qte", 1)
+        jwt_token = _extract_bearer(authorization, None)
+        try:
+            typ = typ_service.get_ligne(jwt_token, code)
+        except typ_service.TypServiceError as e:
+            raise _typ_err(e)
+        m = _map_typ_to_budget_cols(typ, qte)
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute("""
+                INSERT INTO ad_budget.budget_lignes
+                (projet_id, section, description, unite, prix_unitaire, qte,
+                 heures, taux_horaire, sous_traitant_montant,
+                 ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant, actif,
+                 source_typ_code, source_typ_snapshot_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,0,0,0,TRUE,%s,NOW())
+                RETURNING *
+            """, (projet_id, m["section"], m["description"], m["unite"], m["prix_unitaire"], qte,
+                  m["heures"], m["taux_horaire"], m["sous_traitant_montant"], code))
+            row = cur.fetchone()
+            conn.commit()
+        finally:
+            cur.close(); conn.close()
+        return {"status": "created", "ligne": row, "mo_flat": m["mo_flat"]}
+
+    @router.post("/projets/{projet_id}/lignes/{ligne_id}/refresh-typ")
+    def refresh_budget_ligne_from_typ(projet_id: int, ligne_id: int,
+                                      authorization: Optional[str] = Header(None),
+                                      user=Depends(jwt_user)):
+        """Re-tarif d'une ligne liée Ad TYP : re-lit Ad TYP + re-mappe (snapshot
+        rafraîchi). AUTORISÉ UNIQUEMENT si le projet est au statut 'brouillon'
+        (« En cours ») — gelé sinon."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        jwt_token = _extract_bearer(authorization, None)
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute("SELECT statut FROM ad_budget.projets WHERE id = %s", (projet_id,))
+            prow = cur.fetchone()
+            statut = prow["statut"] if prow else None
+            if statut != "brouillon":
+                raise HTTPException(status_code=409,
+                                    detail="Re-tarif Ad TYP bloquée : le budget n'est pas « En cours » (gelé).")
+            cur.execute("SELECT id, source_typ_code, qte FROM ad_budget.budget_lignes "
+                        "WHERE id = %s AND projet_id = %s", (ligne_id, projet_id))
+            ligne = cur.fetchone()
+            if not ligne:
+                raise HTTPException(status_code=404, detail="Ligne introuvable")
+            if not ligne["source_typ_code"]:
+                raise HTTPException(status_code=400, detail="Ligne non liée à Ad TYP (pas de re-tarif)")
+            try:
+                typ = typ_service.get_ligne(jwt_token, ligne["source_typ_code"])
+            except typ_service.TypServiceError as e:
+                raise _typ_err(e)
+            m = _map_typ_to_budget_cols(typ, ligne["qte"])   # re-mappe à la qté courante
+            cur.execute("""
+                UPDATE ad_budget.budget_lignes SET
+                  section=%s, description=%s, unite=%s, prix_unitaire=%s,
+                  heures=%s, taux_horaire=%s, sous_traitant_montant=%s,
+                  source_typ_snapshot_at=NOW(), updated_at=NOW()
+                WHERE id=%s AND projet_id=%s RETURNING *
+            """, (m["section"], m["description"], m["unite"], m["prix_unitaire"],
+                  m["heures"], m["taux_horaire"], m["sous_traitant_montant"], ligne_id, projet_id))
+            row = cur.fetchone()
+            conn.commit()
+        except HTTPException:
+            conn.rollback(); raise
+        finally:
+            cur.close(); conn.close()
+        return {"status": "refreshed", "ligne": row, "mo_flat": m["mo_flat"]}
 
     @router.post("/projets/{projet_id}/lignes/import")
     def import_items_to_projet(projet_id: int, data: dict, user=Depends(jwt_user)):
