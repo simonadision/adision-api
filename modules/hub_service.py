@@ -115,11 +115,14 @@ def create_project(jwt_token: str, payload: dict) -> dict:
     indispo). Le caller est responsable du rollback applicatif côté
     Ad BUD si une erreur survient APRÈS cet appel — cf. soft_delete_project.
     """
-    data = _hub_request("POST", "/api/projects", jwt_token, json_body=payload)
+    raw = _hub_request("POST", "/api/projects", jwt_token, json_body=payload)
+    # Ad HUB enveloppe la row : POST /api/projects -> {"project": {...}}.
+    # On déballe (et on tolère un éventuel format plat {id,...} par robustesse).
+    data = raw.get("project") if isinstance(raw, dict) and isinstance(raw.get("project"), dict) else raw
     if not data or "id" not in data:
         raise HubServiceError(
             500,
-            f"Ad HUB n'a pas retourné de row projet valide : {str(data)[:200]}",
+            f"Ad HUB n'a pas retourné de row projet valide : {str(raw)[:200]}",
         )
     logger.info(
         "hub_service create_project ok: hub_id=%s name=%r",
