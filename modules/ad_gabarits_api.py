@@ -19,8 +19,10 @@ l'autorisation projet (_load_and_authorize_projet) d'ad_budget_api — pas de
 duplication.
 """
 import logging
+import os
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException
 from psycopg.rows import dict_row
 
@@ -32,6 +34,11 @@ from modules.ad_budget_api import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Taxonomie CSI MasterFormat servie par Ad EST (publique, /reference/csi-sections).
+EST_API_URL = os.environ.get(
+    "EST_API_URL", "https://adision-est-api-production.up.railway.app"
+).rstrip("/")
 
 
 def _org(user) -> str:
@@ -130,25 +137,29 @@ def register_ad_gabarits_routes(get_conn):
         )
 
     # ─── Taxonomie CSI (sections) pour le sélecteur de l'éditeur ──────────
-    # Réutilise la taxonomie de sections EXISTANTE d'Ad BUD
-    # (ad_budget.ad_budget_prix_moyens : 84 sections code + libellé) — la MÊME
-    # que celle par laquelle les budgets sont groupés → une section CSI choisie
-    # dans le gabarit groupe proprement à l'insertion. Pas de liste parallèle.
+    # Réutilise la taxonomie CSI MasterFormat EXISTANTE d'Ad EST/Ad MAT
+    # (Ad EST /reference/csi-sections, publique — PAS de liste CSI parallèle),
+    # filtrée au NIVEAU SECTION : on ne garde que les codes finissant en " 00"
+    # (sections MasterFormat type 06 00 00, 06 40 00, 07 20 00…), pas les items
+    # fins (01 90 10…) ni les divisions à 2 chiffres. Proxy serveur (pas de
+    # CORS). Best-effort : si Ad EST est indispo, on renvoie une liste vide
+    # (le sélecteur reste vide, l'éditeur ne plante pas).
     @router.get("/csi-sections")
     def list_csi_sections(user=Depends(jwt_user)):
-        conn = get_conn()
-        cur = conn.cursor(row_factory=dict_row)
         try:
-            cur.execute(
-                "SELECT DISTINCT section AS code, description AS libelle "
-                "FROM ad_budget.ad_budget_prix_moyens "
-                "WHERE section IS NOT NULL AND section <> '' "
-                "ORDER BY section"
-            )
-            return {"sections": cur.fetchall()}
-        finally:
-            cur.close()
-            conn.close()
+            with httpx.Client(timeout=10.0) as client:
+                r = client.get(f"{EST_API_URL}/reference/csi-sections")
+            r.raise_for_status()
+            raw = r.json().get("csi_sections", [])
+        except Exception as e:  # noqa: BLE001 — dégradation gracieuse
+            logger.warning("csi-sections : taxonomie Ad EST injoignable : %s", e)
+            return {"sections": []}
+        out = []
+        for s in raw:
+            code = (s.get("code") or "").strip()
+            if code.endswith(" 00"):  # niveau SECTION MasterFormat
+                out.append({"code": code, "libelle": s.get("label_fr") or ""})
+        return {"sections": out}
 
     # ─── CRUD ─────────────────────────────────────────────────────────────
     @router.get("/gabarits")
