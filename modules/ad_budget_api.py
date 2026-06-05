@@ -3053,6 +3053,61 @@ def register_ad_budget_routes(get_conn):
             cur.close(); conn.close()
         return {"status": "refreshed", "ligne": row, "mo_flat": m["mo_flat"]}
 
+    @router.post("/projets/{projet_id}/lignes/{ligne_id}/apply-typ")
+    def apply_typ_to_ligne(projet_id: int, ligne_id: int, data: dict,
+                           authorization: Optional[str] = Header(None),
+                           user=Depends(jwt_user)):
+        """Pioche Ad TYP DANS une ligne EXISTANTE (autocomplete de la cellule
+        description) → SNAPSHOT aplati MAT/MO/ST sur cette ligne (UPDATE, pas
+        INSERT comme from-typ). Pose source_typ_code (re-tarif ⟳ ultérieur) et
+        EFFACE item_id_ad_mat (la ligne devient sourcée Ad TYP, plus Ad MAT).
+
+        qte : on PRÉSERVE la qté déjà saisie sur la ligne (> 0) ; sinon on prend
+        celle du body, sinon 1 (parité avec from-typ). Le mapping MO dépend de
+        la qté (cf. _map_typ_to_budget_cols), donc heures est calculée à cette
+        qté et stockée avec elle pour rester cohérent.
+        """
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        code = (data.get("code") or "").strip()
+        if not code:
+            raise HTTPException(status_code=400, detail="code Ad TYP requis")
+        jwt_token = _extract_bearer(authorization, None)
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute(
+                "SELECT id, qte FROM ad_budget.budget_lignes "
+                "WHERE id = %s AND projet_id = %s",
+                (ligne_id, projet_id),
+            )
+            ligne = cur.fetchone()
+            if not ligne:
+                raise HTTPException(status_code=404, detail="Ligne introuvable")
+            # Préserve une qté déjà saisie ; sinon body ; sinon 1.
+            qte = ligne["qte"] if (ligne["qte"] or 0) > 0 else data.get("qte", 1)
+            try:
+                typ = typ_service.get_ligne(jwt_token, code)
+            except typ_service.TypServiceError as e:
+                raise _typ_err(e)
+            m = _map_typ_to_budget_cols(typ, qte)
+            cur.execute("""
+                UPDATE ad_budget.budget_lignes SET
+                  section=%s, description=%s, unite=%s, prix_unitaire=%s,
+                  qte=%s, heures=%s, taux_horaire=%s, sous_traitant_montant=%s,
+                  source_typ_code=%s, source_typ_snapshot_at=NOW(),
+                  item_id_ad_mat=NULL, updated_at=NOW()
+                WHERE id=%s AND projet_id=%s RETURNING *
+            """, (m["section"], m["description"], m["unite"], m["prix_unitaire"],
+                  qte, m["heures"], m["taux_horaire"], m["sous_traitant_montant"],
+                  code, ligne_id, projet_id))
+            row = cur.fetchone()
+            conn.commit()
+        except HTTPException:
+            conn.rollback(); raise
+        finally:
+            cur.close(); conn.close()
+        return {"status": "applied", "ligne": row, "mo_flat": m["mo_flat"]}
+
     @router.post("/projets/{projet_id}/lignes/import")
     def import_items_to_projet(projet_id: int, data: dict, user=Depends(jwt_user)):
         """
