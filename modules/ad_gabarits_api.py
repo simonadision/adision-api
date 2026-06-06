@@ -20,6 +20,7 @@ duplication.
 """
 import logging
 import os
+import re
 from typing import Optional
 
 import httpx
@@ -71,30 +72,54 @@ def register_ad_gabarits_routes(get_conn):
         return g
 
     def _full_gabarit(cur, gabarit_id):
-        """Sections + lignes ordonnées (gabarit déjà autorisé)."""
+        """Hiérarchie 3 niveaux ordonnée (gabarit déjà autorisé) :
+        divisions (gabarit_sections) → sous_sections → lignes."""
+        # Niveau 1 — divisions.
         cur.execute(
             "SELECT id, nom_section, numero, ordre FROM ad_budget.gabarit_sections "
             "WHERE gabarit_id = %s ORDER BY ordre, id",
             (gabarit_id,),
         )
-        sections = cur.fetchall()
-        sec_ids = [s["id"] for s in sections]
-        lignes_by_sec = {sid: [] for sid in sec_ids}
-        if sec_ids:
+        divisions = cur.fetchall()
+        div_ids = [d["id"] for d in divisions]
+
+        # Niveau 2 — sous-sections (par division).
+        ss_all = []
+        ss_by_div = {did: [] for did in div_ids}
+        if div_ids:
             cur.execute(
-                "SELECT id, gabarit_section_id, ordre, type, description, code_typ "
-                "FROM ad_budget.gabarit_lignes WHERE gabarit_section_id = ANY(%s) "
+                "SELECT id, gabarit_section_id, code_csi, libelle, ordre "
+                "FROM ad_budget.gabarit_sous_sections "
+                "WHERE gabarit_section_id = ANY(%s) ORDER BY ordre, id",
+                (div_ids,),
+            )
+            ss_all = cur.fetchall()
+            for ss in ss_all:
+                ss_by_div[ss["gabarit_section_id"]].append(ss)
+
+        # Niveau 3 — lignes (par sous-section).
+        ss_ids = [ss["id"] for ss in ss_all]
+        lignes_by_ss = {sid: [] for sid in ss_ids}
+        if ss_ids:
+            cur.execute(
+                "SELECT id, gabarit_sous_section_id, ordre, type, description, code_typ "
+                "FROM ad_budget.gabarit_lignes WHERE gabarit_sous_section_id = ANY(%s) "
                 "ORDER BY ordre, id",
-                (sec_ids,),
+                (ss_ids,),
             )
             for ln in cur.fetchall():
-                lignes_by_sec[ln["gabarit_section_id"]].append(ln)
-        for s in sections:
-            s["lignes"] = lignes_by_sec.get(s["id"], [])
-        return sections
+                lignes_by_ss[ln["gabarit_sous_section_id"]].append(ln)
+
+        for ss in ss_all:
+            ss["lignes"] = lignes_by_ss.get(ss["id"], [])
+        for d in divisions:
+            d["sous_sections"] = ss_by_div.get(d["id"], [])
+        return divisions
 
     def _replace_structure(cur, gabarit_id, sections):
-        """Remplace TOUTES les sections/lignes (CASCADE delete puis recrée)."""
+        """Remplace TOUTE la structure 3 niveaux (CASCADE delete puis recrée).
+        `sections` = divisions : chacune {numero, nom_section, ordre, sous_sections};
+        chaque sous-section {code_csi, libelle, ordre, lignes}."""
         cur.execute(
             "DELETE FROM ad_budget.gabarit_sections WHERE gabarit_id = %s",
             (gabarit_id,),
@@ -111,21 +136,34 @@ def register_ad_gabarits_routes(get_conn):
                     sec.get("ordre", si),
                 ),
             )
-            sec_id = cur.fetchone()["id"]
-            for li, lg in enumerate(sec.get("lignes") or []):
-                typ = lg.get("type")
-                if typ not in ("manuelle", "ad_typ"):
-                    typ = "ad_typ" if lg.get("code_typ") else "manuelle"
-                code = (lg.get("code_typ") or "").strip() or None
-                if typ != "ad_typ":
-                    code = None
+            div_id = cur.fetchone()["id"]
+            for ssi, ss in enumerate(sec.get("sous_sections") or []):
                 cur.execute(
-                    "INSERT INTO ad_budget.gabarit_lignes "
-                    "(gabarit_section_id, ordre, type, description, code_typ) "
-                    "VALUES (%s, %s, %s, %s, %s)",
-                    (sec_id, lg.get("ordre", li), typ,
-                     (lg.get("description") or "").strip(), code),
+                    "INSERT INTO ad_budget.gabarit_sous_sections "
+                    "(gabarit_section_id, code_csi, libelle, ordre) "
+                    "VALUES (%s, %s, %s, %s) RETURNING id",
+                    (
+                        div_id,
+                        (ss.get("code_csi") or "").strip() or None,
+                        (ss.get("libelle") or "").strip(),
+                        ss.get("ordre", ssi),
+                    ),
                 )
+                ss_id = cur.fetchone()["id"]
+                for li, lg in enumerate(ss.get("lignes") or []):
+                    typ = lg.get("type")
+                    if typ not in ("manuelle", "ad_typ"):
+                        typ = "ad_typ" if lg.get("code_typ") else "manuelle"
+                    code = (lg.get("code_typ") or "").strip() or None
+                    if typ != "ad_typ":
+                        code = None
+                    cur.execute(
+                        "INSERT INTO ad_budget.gabarit_lignes "
+                        "(gabarit_sous_section_id, ordre, type, description, code_typ) "
+                        "VALUES (%s, %s, %s, %s, %s)",
+                        (ss_id, lg.get("ordre", li), typ,
+                         (lg.get("description") or "").strip(), code),
+                    )
 
     def _insert_manual(cur, projet_id, section, description):
         """Ligne manuelle dans un budget : valeurs vides (à remplir)."""
@@ -136,30 +174,41 @@ def register_ad_gabarits_routes(get_conn):
             (projet_id, section, description),
         )
 
-    # ─── Taxonomie CSI (sections) pour le sélecteur de l'éditeur ──────────
+    # ─── Taxonomie CSI pour les sélecteurs de l'éditeur (2 niveaux) ───────
     # Réutilise la taxonomie CSI MasterFormat EXISTANTE d'Ad EST/Ad MAT
-    # (Ad EST /reference/csi-sections, publique — PAS de liste CSI parallèle),
-    # filtrée au NIVEAU SECTION : on ne garde que les codes finissant en " 00"
-    # (sections MasterFormat type 06 00 00, 06 40 00, 07 20 00…), pas les items
-    # fins (01 90 10…) ni les divisions à 2 chiffres. Proxy serveur (pas de
-    # CORS). Best-effort : si Ad EST est indispo, on renvoie une liste vide
+    # (Ad EST /reference/csi-sections, publique — PAS de liste CSI parallèle).
+    # Proxy serveur (pas de CORS). Best-effort : Ad EST indispo → liste vide
     # (le sélecteur reste vide, l'éditeur ne plante pas).
-    @router.get("/csi-sections")
-    def list_csi_sections(user=Depends(jwt_user)):
+    def _fetch_csi_filtered(suffix):
+        """Codes de la taxonomie Ad EST finissant par `suffix`, en {code, libelle}.
+        suffix=' 00'    → NIVEAU SECTION fine (06 40 00, 09 91 00…) — sous-sections.
+        suffix=' 00 00' → NIVEAU DIVISION    (06 00 00, 09 00 00…) — divisions (34)."""
         try:
             with httpx.Client(timeout=10.0) as client:
                 r = client.get(f"{EST_API_URL}/reference/csi-sections")
             r.raise_for_status()
             raw = r.json().get("csi_sections", [])
         except Exception as e:  # noqa: BLE001 — dégradation gracieuse
-            logger.warning("csi-sections : taxonomie Ad EST injoignable : %s", e)
-            return {"sections": []}
+            logger.warning("csi : taxonomie Ad EST injoignable : %s", e)
+            return None
         out = []
         for s in raw:
             code = (s.get("code") or "").strip()
-            if code.endswith(" 00"):  # niveau SECTION MasterFormat
+            if code.endswith(suffix):
                 out.append({"code": code, "libelle": s.get("label_fr") or ""})
-        return {"sections": out}
+        return out
+
+    # Sous-sections = sections fines MasterFormat (codes "XX YY 00", ~1732).
+    @router.get("/csi-sections")
+    def list_csi_sections(user=Depends(jwt_user)):
+        out = _fetch_csi_filtered(" 00")
+        return {"sections": out if out is not None else []}
+
+    # Divisions = niveau division MasterFormat (codes "XX 00 00", 34) — niveau 1.
+    @router.get("/csi-divisions")
+    def list_csi_divisions(user=Depends(jwt_user)):
+        out = _fetch_csi_filtered(" 00 00")
+        return {"divisions": out if out is not None else []}
 
     # ─── CRUD ─────────────────────────────────────────────────────────────
     @router.get("/gabarits")
@@ -172,12 +221,14 @@ def register_ad_gabarits_routes(get_conn):
             cur.execute(
                 """
                 SELECT g.id, g.nom, g.description, g.created_at, g.updated_at,
-                       COUNT(DISTINCT s.id) AS nb_sections,
-                       COUNT(l.id)          AS nb_lignes,
+                       COUNT(DISTINCT s.id)  AS nb_sections,
+                       COUNT(DISTINCT ss.id) AS nb_sous_sections,
+                       COUNT(l.id)           AS nb_lignes,
                        (d.user_id IS NOT NULL) AS is_default
                 FROM ad_budget.gabarits g
-                LEFT JOIN ad_budget.gabarit_sections s ON s.gabarit_id = g.id
-                LEFT JOIN ad_budget.gabarit_lignes  l ON l.gabarit_section_id = s.id
+                LEFT JOIN ad_budget.gabarit_sections s       ON s.gabarit_id = g.id
+                LEFT JOIN ad_budget.gabarit_sous_sections ss ON ss.gabarit_section_id = s.id
+                LEFT JOIN ad_budget.gabarit_lignes  l        ON l.gabarit_sous_section_id = ss.id
                 LEFT JOIN ad_budget.user_gabarit_defaut d
                        ON d.gabarit_id = g.id AND d.user_id = %s
                 WHERE g.organization_id = %s
@@ -383,6 +434,10 @@ def register_ad_gabarits_routes(get_conn):
                 "FROM ad_budget.budget_lignes WHERE projet_id=%s ORDER BY id",
                 (projet_id,),
             )
+            # Le budget est PLAT (lignes portant un code CSI fin). On reconstruit la
+            # hiérarchie 3 niveaux : chaque code de ligne devient une SOUS-SECTION
+            # (section fine), regroupée sous la DIVISION dérivée de ses 2 premiers
+            # chiffres ("09 91 00" → division "09 00 00"). Ordre d'apparition préservé.
             order, by_section = [], {}
             for r in cur.fetchall():
                 if not r.get("actif", True):
@@ -397,22 +452,48 @@ def register_ad_gabarits_routes(get_conn):
                     "description": r.get("description") or "",
                     "code_typ": code,
                 })
-            # Résout le LIBELLÉ CSI officiel de chaque code section depuis la
-            # taxonomie Ad BUD (ad_budget_prix_moyens). Le budget est déjà groupé
-            # par code CSI → le save-as capture de vraies sections CSI (code +
-            # libellé). Code custom non catalogué → libellé vide (fallback).
+
+            def _division_of(code_csi):
+                """'09 91 00' → '09 00 00' ; code non-CSI → None (→ division 'Divers')."""
+                m = re.match(r"^\s*(\d{2})\b", code_csi or "")
+                return f"{m.group(1)} 00 00" if m else None
+
+            # Groupe les sous-sections par division (ordre d'apparition préservé).
+            div_order, div_sous = [], {}
+            for sec in order:
+                dc = _division_of(sec) or "Divers"
+                if dc not in div_sous:
+                    div_sous[dc] = []
+                    div_order.append(dc)
+                div_sous[dc].append(sec)
+
+            # Libellés CSI officiels (ad_budget_prix_moyens) pour sous-sections ET
+            # divisions ; code custom non catalogué → libellé vide (fallback).
+            wanted = [c for c in (order + [d for d in div_order if d != "Divers"]) if c]
             labels = {}
-            if order:
+            if wanted:
                 cur.execute(
                     "SELECT DISTINCT section, description FROM ad_budget.ad_budget_prix_moyens "
                     "WHERE section = ANY(%s)",
-                    (order,),
+                    (wanted,),
                 )
                 labels = {r["section"]: r["description"] for r in cur.fetchall()}
+
             structure = [
-                {"nom_section": labels.get(sec, ""), "numero": sec, "ordre": i,
-                 "lignes": [{**ln, "ordre": j} for j, ln in enumerate(by_section[sec])]}
-                for i, sec in enumerate(order)
+                {
+                    "numero": None if dc == "Divers" else dc,
+                    "nom_section": labels.get(dc, ""),
+                    "ordre": i,
+                    "sous_sections": [
+                        {"code_csi": None if sec == "Divers" else sec,
+                         "libelle": labels.get(sec, ""),
+                         "ordre": j,
+                         "lignes": [{**ln, "ordre": k}
+                                    for k, ln in enumerate(by_section[sec])]}
+                        for j, sec in enumerate(div_sous[dc])
+                    ],
+                }
+                for i, dc in enumerate(div_order)
             ]
             cur.execute(
                 "INSERT INTO ad_budget.gabarits (organization_id, nom, description) "
@@ -447,51 +528,55 @@ def register_ad_gabarits_routes(get_conn):
             _load_gabarit_scoped(cur, gabarit_id, org)  # scope strict
             sections = _full_gabarit(cur, gabarit_id)
             inserted, warnings = 0, []
-            for sec in sections:
-                # Section du budget = numero du gabarit (sinon nom), TELLE QUELLE
-                # (on n'écrase pas avec la section catalogue des lignes ad_typ →
-                # l'organisation en sections du gabarit est respectée).
-                sec_code = ((sec.get("numero") or sec.get("nom_section") or "Divers").strip()
-                            or "Divers")
-                for lg in sec["lignes"]:
-                    desc = lg.get("description") or ""
-                    code = (lg.get("code_typ") or "").strip() or None
-                    if lg.get("type") == "ad_typ" and code:
-                        try:
-                            typ = typ_service.get_ligne(jwt_token, code)
-                        except typ_service.TypServiceError as e:
-                            if e.status_code == 404:
-                                # Introuvable → ligne manuelle + signalement.
-                                warnings.append({
-                                    "code": code, "description": desc,
-                                    "message": "item catalogue introuvable, inséré en ligne manuelle",
-                                })
-                                _insert_manual(cur, projet_id, sec_code, desc)
-                                inserted += 1
-                                continue
-                            # Indispo (502, etc.) : on abandonne proprement.
-                            raise HTTPException(
-                                status_code=502,
-                                detail=f"Ad TYP indisponible : {e.detail}",
+            for div in sections:
+                # Code de division (fallback pour les sous-sections sans code CSI).
+                div_code = ((div.get("numero") or div.get("nom_section") or "").strip())
+                for ss in div.get("sous_sections", []):
+                    # Section du budget = code CSI de la SOUS-SECTION (section fine,
+                    # ex. "09 91 00") → se regroupe correctement par 2 paires avec
+                    # le regroupement budget ACTUEL (Temps 1). Fallback : code de la
+                    # division, sinon "Divers". On respecte l'organisation du gabarit.
+                    sec_code = ((ss.get("code_csi") or "").strip()
+                                or div_code or "Divers")
+                    for lg in ss["lignes"]:
+                        desc = lg.get("description") or ""
+                        code = (lg.get("code_typ") or "").strip() or None
+                        if lg.get("type") == "ad_typ" and code:
+                            try:
+                                typ = typ_service.get_ligne(jwt_token, code)
+                            except typ_service.TypServiceError as e:
+                                if e.status_code == 404:
+                                    # Introuvable → ligne manuelle + signalement.
+                                    warnings.append({
+                                        "code": code, "description": desc,
+                                        "message": "item catalogue introuvable, inséré en ligne manuelle",
+                                    })
+                                    _insert_manual(cur, projet_id, sec_code, desc)
+                                    inserted += 1
+                                    continue
+                                # Indispo (502, etc.) : on abandonne proprement.
+                                raise HTTPException(
+                                    status_code=502,
+                                    detail=f"Ad TYP indisponible : {e.detail}",
+                                )
+                            m = _map_typ_to_budget_cols(typ, 1)  # tarifé catalogue courant, qté=1
+                            cur.execute(
+                                """
+                                INSERT INTO ad_budget.budget_lignes
+                                (projet_id, section, description, unite, prix_unitaire, qte,
+                                 heures, taux_horaire, sous_traitant_montant,
+                                 ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant, actif,
+                                 source_typ_code, source_typ_snapshot_at)
+                                VALUES (%s,%s,%s,%s,%s,1,%s,%s,%s,0,0,0,TRUE,%s,NOW())
+                                """,
+                                (projet_id, sec_code, desc or m["description"], m["unite"],
+                                 m["prix_unitaire"], m["heures"], m["taux_horaire"],
+                                 m["sous_traitant_montant"], code),
                             )
-                        m = _map_typ_to_budget_cols(typ, 1)  # tarifé catalogue courant, qté=1
-                        cur.execute(
-                            """
-                            INSERT INTO ad_budget.budget_lignes
-                            (projet_id, section, description, unite, prix_unitaire, qte,
-                             heures, taux_horaire, sous_traitant_montant,
-                             ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant, actif,
-                             source_typ_code, source_typ_snapshot_at)
-                            VALUES (%s,%s,%s,%s,%s,1,%s,%s,%s,0,0,0,TRUE,%s,NOW())
-                            """,
-                            (projet_id, sec_code, desc or m["description"], m["unite"],
-                             m["prix_unitaire"], m["heures"], m["taux_horaire"],
-                             m["sous_traitant_montant"], code),
-                        )
-                        inserted += 1
-                    else:
-                        _insert_manual(cur, projet_id, sec_code, desc)
-                        inserted += 1
+                            inserted += 1
+                        else:
+                            _insert_manual(cur, projet_id, sec_code, desc)
+                            inserted += 1
             conn.commit()
             return {"status": "inserted", "nb_lignes": inserted, "warnings": warnings}
         except HTTPException:
