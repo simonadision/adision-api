@@ -485,7 +485,12 @@ def _map_typ_to_budget_cols(typ: dict, qte) -> dict:
     else:
         heures = 0.0
         taux = 0.0
-    section = typ.get("csi_section_code") or typ.get("csi_division_code") or ""
+    # Cellule code du budget = CODE CSI COMPLET de la ligne Ad TYP (ex.
+    # « 06 40 00.01 »), pas la section (06 40 00) ni la division (06 00 00).
+    # Le regroupement budget (getPrefix) dérive division/sous-section des 4
+    # premiers chiffres → le suffixe « .01 » ne casse pas le rangement.
+    section = (typ.get("code") or typ.get("csi_section_code")
+               or typ.get("csi_division_code") or "")
     return {
         "section": section,
         "description": typ.get("description") or "",
