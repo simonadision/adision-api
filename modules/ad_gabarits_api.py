@@ -559,7 +559,11 @@ def register_ad_gabarits_routes(get_conn):
                                     status_code=502,
                                     detail=f"Ad TYP indisponible : {e.detail}",
                                 )
-                            m = _map_typ_to_budget_cols(typ, 1)  # tarifé catalogue courant, qté=1
+                            # Tarifé au catalogue COURANT mais à QTÉ 0 (défaut Ad BUD :
+                            # une ligne neuve naît sans quantité). prix_unitaire (par
+                            # unité) est préservé → quand l'user saisit une qté, MAT
+                            # scale live et MO/ST sont re-snapshotés via apply-typ.
+                            m = _map_typ_to_budget_cols(typ, 0)
                             cur.execute(
                                 """
                                 INSERT INTO ad_budget.budget_lignes
@@ -567,7 +571,7 @@ def register_ad_gabarits_routes(get_conn):
                                  heures, taux_horaire, sous_traitant_montant,
                                  ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant, actif,
                                  source_typ_code, source_typ_snapshot_at)
-                                VALUES (%s,%s,%s,%s,%s,1,%s,%s,%s,0,0,0,TRUE,%s,NOW())
+                                VALUES (%s,%s,%s,%s,%s,0,%s,%s,%s,0,0,0,TRUE,%s,NOW())
                                 """,
                                 (projet_id, sec_code, desc or m["description"], m["unite"],
                                  m["prix_unitaire"], m["heures"], m["taux_horaire"],

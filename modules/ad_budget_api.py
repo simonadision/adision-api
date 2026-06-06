@@ -2983,7 +2983,9 @@ def register_ad_budget_routes(get_conn):
         code = (data.get("code") or "").strip()
         if not code:
             raise HTTPException(status_code=400, detail="code Ad TYP requis")
-        qte = data.get("qte", 1)
+        # Défaut Ad BUD : une ligne neuve naît à QTÉ 0 (MO/ST = 0 ; prix_unitaire
+        # par unité préservé → scaling à la saisie de la qté).
+        qte = data.get("qte", 0)
         jwt_token = _extract_bearer(authorization, None)
         try:
             typ = typ_service.get_ligne(jwt_token, code)
@@ -3064,10 +3066,11 @@ def register_ad_budget_routes(get_conn):
         INSERT comme from-typ). Pose source_typ_code (re-tarif ⟳ ultérieur) et
         EFFACE item_id_ad_mat (la ligne devient sourcée Ad TYP, plus Ad MAT).
 
-        qte : on PRÉSERVE la qté déjà saisie sur la ligne (> 0) ; sinon on prend
-        celle du body, sinon 1 (parité avec from-typ). Le mapping MO dépend de
-        la qté (cf. _map_typ_to_budget_cols), donc heures est calculée à cette
-        qté et stockée avec elle pour rester cohérent.
+        qte : la qté du body fait FOI (0 inclus). Sinon on PRÉSERVE la qté déjà
+        saisie sur la ligne (> 0) ; sinon 0 (défaut Ad BUD : ligne neuve sans
+        quantité — parité avec from-typ). Le mapping MO dépend de la qté (cf.
+        _map_typ_to_budget_cols), donc heures est calculée à cette qté et stockée
+        avec elle pour rester cohérent.
         """
         _load_and_authorize_projet(get_conn, projet_id, user, "write")
         code = (data.get("code") or "").strip()
@@ -3088,18 +3091,19 @@ def register_ad_budget_routes(get_conn):
             # Qté du body : si FOURNIE (0 inclus), elle fait FOI — le front
             # re-snapshot à la qté SAISIE par l'utilisateur (y compris 0 →
             # MO/ST = 0). Le 0 ne doit JAMAIS être ignoré, sinon la saisie « 0 »
-            # rebondit à l'ancienne qté du snapshot. Si NON fournie (import sans
-            # qté pré-saisie), on préserve une qté existante (> 0) sinon 1.
+            # rebondit à l'ancienne qté du snapshot. Si NON fournie, on préserve
+            # une qté existante (> 0) sinon 0 (défaut Ad BUD : ligne neuve sans
+            # quantité — plus de défaut implicite à 1).
             raw_qte = data.get("qte")
             if raw_qte not in (None, ""):
                 try:
                     qte = max(0.0, float(raw_qte))
                 except (TypeError, ValueError):
-                    qte = ligne["qte"] if (ligne["qte"] or 0) > 0 else 1
+                    qte = ligne["qte"] if (ligne["qte"] or 0) > 0 else 0
             elif (ligne["qte"] or 0) > 0:
                 qte = ligne["qte"]
             else:
-                qte = 1
+                qte = 0
             try:
                 typ = typ_service.get_ligne(jwt_token, code)
             except typ_service.TypServiceError as e:
