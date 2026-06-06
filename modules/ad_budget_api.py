@@ -3213,6 +3213,11 @@ def register_ad_budget_routes(get_conn):
             "sous_traitant_type", "sous_traitant_montant",
             # Sprint 1.5 : liens logiques vers Ad MAT (cross-DB, pas de FK physique).
             "item_id_ad_mat", "ad_hub_pending_id",
+            # Provenance Ad TYP : exposée en écriture pour pouvoir l'EFFACER
+            # (null) quand la ligne bascule sur une source Ad MAT — garantit
+            # qu'une ligne ne porte jamais les deux provenances. (La pose d'une
+            # provenance Ad TYP reste faite par apply-typ, pas par ce PUT.)
+            "source_typ_code", "source_typ_snapshot_at",
             # Passerelle Ad RES → Ad BUD : lien logique vers app_central.contacts
             # (UUID, cross-DB). NULL = saisie libre / ligne déliée.
             "sous_traitant_contact_id",
