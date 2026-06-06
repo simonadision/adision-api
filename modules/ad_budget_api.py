@@ -235,19 +235,13 @@ def _create_snapshot(cur, projet_row, trigger_event: str) -> int:
 
 
 def _effective_qte(ligne, mobilisation, surface_plancher, surface_mur, surface_gypse):
-    """Qté effective d'une ligne en tenant compte des paramètres globaux du projet,
-    miroir de getQte côté frontend (App.jsx). Permet d'avoir des totaux PDF qui
-    matchent l'affichage de la page projet quand qte n'est pas persisté en DB."""
-    desc = (ligne.get("description") or "").lower()
-    unite = (ligne.get("unite") or "global").lower()
-    if any(t in desc for t in SURFACE_PLANCHER_TERMS):
-        return float(surface_plancher or 0)
-    if any(t in desc for t in SURFACE_MUR_TERMS):
-        return float(surface_mur or 0)
-    if any(t in desc for t in SURFACE_GYPSE_TERMS):
-        return float(surface_gypse or 0)
-    if unite == "sem":
-        return float(mobilisation or 0)
+    """Qté de la ligne = qté SAISIE (stockée en BD).
+
+    L'auto-remplissage depuis les paramètres globaux (mobilisation/surfaces) a été
+    RETIRÉ (chantier « tout manuel ») : le budget — et donc les totaux PDF /
+    snapshots / export Ad CON — ne se calcule QUE depuis les lignes. Les paramètres
+    restent en arguments (compat des appelants) mais ne pilotent plus la qté ;
+    ils demeurent une donnée projet (usage futur Ad ANA)."""
     return float(ligne.get("qte") or 0)
 
 
