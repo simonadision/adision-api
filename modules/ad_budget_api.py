@@ -1583,13 +1583,12 @@ def register_ad_budget_routes(get_conn):
             ))
             row = cur.fetchone()
             projet_id = row["id"]
-            # Squelette complet (~180 lignes catalogue master, toutes divisions).
-            # Le filtre AUTHORIZED_DIVISIONS du commit 3a35308 (2026-05-11) a ete
-            # reverte : la creation manuelle de projet n'a pas a savoir ce que
-            # Ad VIU analyse, l'estimateur veut son squelette complet pour saisie
-            # manuelle. Le filtre n'est applique que sur push Ad VIU (DELETE
-            # REPLACE dans from-viu-v2).
-            nb_lignes = _apply_master_template(cur, projet_id)
+            # Plus de squelette par défaut : un nouveau budget naît VIDE. Le
+            # contenu de départ vient UNIQUEMENT du système de gabarits (gabarit
+            # par défaut / nouveau gabarit insérés via insert-gabarit), ou reste
+            # vide (« sans gabarit »). L'ancien _apply_master_template s'empilait
+            # par-dessus les gabarits insérés (redondant) — retiré.
+            nb_lignes = 0
             conn.commit()
         except Exception:
             # Sprint C1 — rollback applicatif : si on a créé un projet HUB
