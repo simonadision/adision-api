@@ -168,21 +168,92 @@ def register_ad_gabarits_routes(get_conn):
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         try:
+            # is_default : LEFT JOIN sur le défaut DE CE USER (par-user, pas org).
             cur.execute(
                 """
                 SELECT g.id, g.nom, g.description, g.created_at, g.updated_at,
                        COUNT(DISTINCT s.id) AS nb_sections,
-                       COUNT(l.id)          AS nb_lignes
+                       COUNT(l.id)          AS nb_lignes,
+                       (d.user_id IS NOT NULL) AS is_default
                 FROM ad_budget.gabarits g
                 LEFT JOIN ad_budget.gabarit_sections s ON s.gabarit_id = g.id
                 LEFT JOIN ad_budget.gabarit_lignes  l ON l.gabarit_section_id = s.id
+                LEFT JOIN ad_budget.user_gabarit_defaut d
+                       ON d.gabarit_id = g.id AND d.user_id = %s
                 WHERE g.organization_id = %s
-                GROUP BY g.id
+                GROUP BY g.id, d.user_id
                 ORDER BY g.updated_at DESC, g.id DESC
                 """,
-                (org,),
+                (user["id"], org),
             )
             return {"gabarits": cur.fetchall()}
+        finally:
+            cur.close()
+            conn.close()
+
+    # ─── Gabarit PAR DÉFAUT (par user — un seul) ──────────────────────────
+    @router.get("/gabarits/default")
+    def get_default_gabarit(user=Depends(jwt_user)):
+        """Gabarit par défaut DU USER courant (scopé à son org). null sinon."""
+        org = _org(user)
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute(
+                "SELECT d.gabarit_id, g.nom FROM ad_budget.user_gabarit_defaut d "
+                "JOIN ad_budget.gabarits g "
+                "  ON g.id = d.gabarit_id AND g.organization_id = %s "
+                "WHERE d.user_id = %s",
+                (org, user["id"]),
+            )
+            row = cur.fetchone()
+            return {"gabarit_id": row["gabarit_id"], "nom": row["nom"]} if row \
+                else {"gabarit_id": None, "nom": None}
+        finally:
+            cur.close()
+            conn.close()
+
+    @router.post("/gabarits/{gabarit_id}/default")
+    def set_default_gabarit(gabarit_id: int, user=Depends(jwt_user)):
+        """Marque ce gabarit comme défaut DU USER (UPSERT → un seul défaut :
+        écrase le précédent défaut de ce user). Le gabarit doit être de l'org."""
+        org = _org(user)
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            _load_gabarit_scoped(cur, gabarit_id, org)  # 404 si autre org
+            cur.execute(
+                "INSERT INTO ad_budget.user_gabarit_defaut "
+                "(user_id, gabarit_id, organization_id, updated_at) "
+                "VALUES (%s, %s, %s, NOW()) "
+                "ON CONFLICT (user_id) DO UPDATE SET "
+                "  gabarit_id = EXCLUDED.gabarit_id, "
+                "  organization_id = EXCLUDED.organization_id, updated_at = NOW()",
+                (user["id"], gabarit_id, org),
+            )
+            conn.commit()
+            return {"status": "default_set", "gabarit_id": gabarit_id}
+        except HTTPException:
+            conn.rollback()
+            raise
+        finally:
+            cur.close()
+            conn.close()
+
+    @router.delete("/gabarits/{gabarit_id}/default")
+    def unset_default_gabarit(gabarit_id: int, user=Depends(jwt_user)):
+        """Retire le défaut DU USER si ce gabarit en était le défaut."""
+        _org(user)
+        conn = get_conn()
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "DELETE FROM ad_budget.user_gabarit_defaut "
+                "WHERE user_id = %s AND gabarit_id = %s",
+                (user["id"], gabarit_id),
+            )
+            conn.commit()
+            return {"status": "default_unset"}
         finally:
             cur.close()
             conn.close()
