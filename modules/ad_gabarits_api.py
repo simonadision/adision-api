@@ -564,6 +564,13 @@ def register_ad_gabarits_routes(get_conn):
                             # unité) est préservé → quand l'user saisit une qté, MAT
                             # scale live et MO/ST sont re-snapshotés via apply-typ.
                             m = _map_typ_to_budget_cols(typ, 0)
+                            # section = CODE CSI COMPLET de l'item (m["section"] =
+                            # typ["code"], ex. « 06 40 00.01 »), comme apply-typ —
+                            # PAS le code de sous-section du gabarit (sec_code).
+                            # Le regroupement budget dérive division/sous-section
+                            # des 4 premiers chiffres → le suffixe « .01 » n'altère
+                            # pas le rangement. Fallback sec_code si m["section"] vide.
+                            line_section = m["section"] or sec_code
                             cur.execute(
                                 """
                                 INSERT INTO ad_budget.budget_lignes
@@ -573,7 +580,7 @@ def register_ad_gabarits_routes(get_conn):
                                  source_typ_code, source_typ_snapshot_at)
                                 VALUES (%s,%s,%s,%s,%s,0,%s,%s,%s,0,0,0,TRUE,%s,NOW())
                                 """,
-                                (projet_id, sec_code, desc or m["description"], m["unite"],
+                                (projet_id, line_section, desc or m["description"], m["unite"],
                                  m["prix_unitaire"], m["heures"], m["taux_horaire"],
                                  m["sous_traitant_montant"], code),
                             )
