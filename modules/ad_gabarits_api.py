@@ -18,6 +18,7 @@ Réutilise le pont Ad TYP (typ_service + _map_typ_to_budget_cols) et
 l'autorisation projet (_load_and_authorize_projet) d'ad_budget_api — pas de
 duplication.
 """
+import json
 import logging
 import os
 import re
@@ -54,7 +55,7 @@ def _org(user) -> str:
 
 
 def register_ad_gabarits_routes(get_conn):
-    jwt_user, _jwt_user_or_token, _jwt_admin, _ = make_jwt_deps(get_conn)
+    jwt_user, _jwt_user_or_token, _jwt_admin, jwt_super_admin = make_jwt_deps(get_conn)
     router = APIRouter(prefix="/budget", tags=["Ad BUD — Gabarits"])
 
     # ─── Helpers internes ─────────────────────────────────────────────────
@@ -224,7 +225,9 @@ def register_ad_gabarits_routes(get_conn):
                        COUNT(DISTINCT s.id)  AS nb_sections,
                        COUNT(DISTINCT ss.id) AS nb_sous_sections,
                        COUNT(l.id)           AS nb_lignes,
-                       (d.user_id IS NOT NULL) AS is_default
+                       (d.user_id IS NOT NULL) AS is_default,
+                       g.est_master,
+                       (g.source_master_gabarit_id IS NOT NULL) AS is_pushed_copy
                 FROM ad_budget.gabarits g
                 LEFT JOIN ad_budget.gabarit_sections s       ON s.gabarit_id = g.id
                 LEFT JOIN ad_budget.gabarit_sous_sections ss ON ss.gabarit_section_id = s.id
@@ -263,6 +266,170 @@ def register_ad_gabarits_routes(get_conn):
         finally:
             cur.close()
             conn.close()
+
+    # ─── Partage MASTER (super_admin) — pattern push-master réversible ────────
+    # Calque le carnet Ad RES (push descendant + copie réversible + audit/rollback)
+    # dans ad_budget. Marquer un gabarit MASTER, le pousser (deep-copy) vers org(s)
+    # cible(s), historiser, annuler. PAS de lien vivant, PAS de consentement.
+    def _load_gabarit_any(cur, gabarit_id):
+        """Charge un gabarit SANS scope org (super_admin transverse). 404 sinon."""
+        cur.execute(
+            "SELECT id, organization_id, nom, description, est_master "
+            "FROM ad_budget.gabarits WHERE id = %s", (gabarit_id,))
+        g = cur.fetchone()
+        if not g:
+            raise HTTPException(status_code=404, detail="Gabarit introuvable")
+        return g
+
+    def _copy_gabarit_to_org(cur, master, target_org, push_id):
+        """Deep-copy d'un gabarit master vers target_org (copie indépendante,
+        traçable). Réutilise _full_gabarit (lecture arbre) + _replace_structure."""
+        cur.execute(
+            "INSERT INTO ad_budget.gabarits "
+            "(organization_id, nom, description, est_master, source_master_gabarit_id, push_id) "
+            "VALUES (%s, %s, %s, FALSE, %s, %s) RETURNING id",
+            (target_org, master["nom"], master.get("description"), master["id"], push_id))
+        new_id = cur.fetchone()["id"]
+        _replace_structure(cur, new_id, _full_gabarit(cur, master["id"]))
+        return new_id
+
+    @router.patch("/gabarits/{gabarit_id}/master")
+    def set_gabarit_master(gabarit_id: int, data: dict, _su=Depends(jwt_super_admin)):
+        """Marque/démarque un gabarit comme MASTER (partageable). super_admin only."""
+        est_master = bool((data or {}).get("est_master"))
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            _load_gabarit_any(cur, gabarit_id)
+            cur.execute(
+                "UPDATE ad_budget.gabarits SET est_master = %s, updated_at = NOW() "
+                "WHERE id = %s RETURNING id, est_master", (est_master, gabarit_id))
+            row = cur.fetchone()
+            conn.commit()
+            return {"id": row["id"], "est_master": row["est_master"]}
+        finally:
+            cur.close(); conn.close()
+
+    @router.post("/gabarits/{gabarit_id}/push-to-org")
+    def push_gabarit_to_org(gabarit_id: int, data: dict, su=Depends(jwt_super_admin)):
+        """Pousse (deep-copy réversible) un gabarit MASTER vers une/des org(s).
+        Body { target_organization_ids:[uuid…] | target_organization_id, mode }.
+        mode 'additif' (défaut) = skip si déjà poussé chez la cible ; 'replace' =
+        remplace la copie existante par la version master courante. Un push_id +
+        une ligne gabarit_push_log par org cible (rollback granulaire)."""
+        data = data or {}
+        targets = data.get("target_organization_ids")
+        if not targets and data.get("target_organization_id"):
+            targets = [data["target_organization_id"]]
+        mode = (data.get("mode") or "additif").lower()
+        if mode not in ("additif", "replace"):
+            mode = "additif"
+        if not targets:
+            raise HTTPException(status_code=400, detail="target_organization_ids requis")
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            master = _load_gabarit_any(cur, gabarit_id)
+            source_org = str(master["organization_id"])
+            results = []
+            for raw in targets:
+                target_org = str(raw)
+                if target_org == source_org:
+                    results.append({"org": target_org, "error": "source = cible (flux descendant)"})
+                    continue
+                # Copies déjà poussées de CE master chez cette org.
+                cur.execute(
+                    "SELECT id FROM ad_budget.gabarits "
+                    "WHERE organization_id = %s AND source_master_gabarit_id = %s",
+                    (target_org, gabarit_id))
+                existing = [r["id"] for r in cur.fetchall()]
+                # Log AVANT → obtient push_id.
+                cur.execute(
+                    "INSERT INTO ad_budget.gabarit_push_log "
+                    "(org_source, org_cible, gabarit_master_id, pushed_by_user_id, "
+                    " pushed_by_email, snapshot_before) "
+                    "VALUES (%s,%s,%s,%s,%s,%s::jsonb) RETURNING push_id",
+                    (source_org, target_org, gabarit_id, su.get("sub"),
+                     su.get("email"), json.dumps([str(i) for i in existing])))
+                push_id = cur.fetchone()["push_id"]
+                inserted = replaced = skipped = 0
+                new_ids = []
+                if existing and mode == "additif":
+                    skipped = len(existing)            # déjà poussé → ne pas dupliquer
+                else:
+                    if existing and mode == "replace":
+                        cur.execute("DELETE FROM ad_budget.gabarits WHERE id = ANY(%s)", (existing,))
+                        replaced = len(existing)
+                    new_ids.append(_copy_gabarit_to_org(cur, master, target_org, push_id))
+                    inserted = 1
+                cur.execute(
+                    "UPDATE ad_budget.gabarit_push_log SET count_inserted=%s, count_replaced=%s, "
+                    "count_skipped=%s, snapshot_after=%s::jsonb WHERE push_id=%s",
+                    (inserted, replaced, skipped, json.dumps([str(i) for i in new_ids]), push_id))
+                results.append({"org": target_org, "push_id": str(push_id),
+                                "inserted": inserted, "replaced": replaced, "skipped": skipped})
+            conn.commit()
+            return {"results": results}
+        except HTTPException:
+            conn.rollback(); raise
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Push refusé : {e}")
+        finally:
+            cur.close(); conn.close()
+
+    @router.get("/gabarits/push-log")
+    def gabarit_push_log(_su=Depends(jwt_super_admin)):
+        """Historique des pushes (audit). super_admin only."""
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute(
+                "SELECT push_id, org_source, org_cible, gabarit_master_id, pushed_by_email, "
+                "count_inserted, count_replaced, count_skipped, created_at, "
+                "rolled_back_at, rolled_back_by_email "
+                "FROM ad_budget.gabarit_push_log ORDER BY created_at DESC LIMIT 200")
+            return {"push_log": [{
+                "push_id": str(r["push_id"]),
+                "org_source": str(r["org_source"]), "org_cible": str(r["org_cible"]),
+                "gabarit_master_id": r["gabarit_master_id"],
+                "pushed_by_email": r["pushed_by_email"],
+                "count_inserted": r["count_inserted"], "count_replaced": r["count_replaced"],
+                "count_skipped": r["count_skipped"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                "rolled_back_at": r["rolled_back_at"].isoformat() if r["rolled_back_at"] else None,
+                "rolled_back_by_email": r["rolled_back_by_email"],
+            } for r in cur.fetchall()]}
+        finally:
+            cur.close(); conn.close()
+
+    @router.post("/gabarits/push-rollback")
+    def gabarit_push_rollback(data: dict, su=Depends(jwt_super_admin)):
+        """Annule un push : supprime les copies insérées par ce push_id (réversible).
+        super_admin only. Les gabarits PRIVÉS du client et les autres push intacts."""
+        push_id = (data or {}).get("push_id")
+        if not push_id:
+            raise HTTPException(status_code=400, detail="push_id requis")
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute("SELECT push_id, rolled_back_at FROM ad_budget.gabarit_push_log "
+                        "WHERE push_id = %s", (push_id,))
+            log = cur.fetchone()
+            if not log:
+                raise HTTPException(status_code=404, detail="Push introuvable")
+            if log["rolled_back_at"]:
+                raise HTTPException(status_code=409, detail="Push déjà annulé")
+            cur.execute("DELETE FROM ad_budget.gabarits WHERE push_id = %s", (push_id,))
+            deleted = cur.rowcount
+            cur.execute("UPDATE ad_budget.gabarit_push_log SET rolled_back_at = NOW(), "
+                        "rolled_back_by_email = %s WHERE push_id = %s", (su.get("email"), push_id))
+            conn.commit()
+            return {"deleted": deleted}
+        except HTTPException:
+            conn.rollback(); raise
+        finally:
+            cur.close(); conn.close()
 
     @router.post("/gabarits/{gabarit_id}/default")
     def set_default_gabarit(gabarit_id: int, user=Depends(jwt_user)):
