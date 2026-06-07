@@ -68,6 +68,30 @@ ALLOWED_REGIONS = {
     "Chaudière-Appalaches", "Laval", "Lanaudière", "Laurentides",
     "Montérégie", "Centre-du-Québec",
 }
+# Sprint 3.9 — Ad HUB stocke la région en CODE snake_case ('capitale_nationale'),
+# Ad BUD valide des LIBELLÉS FR ('Capitale-Nationale'). Un projet hérité d'Ad HUB
+# (Direction A) envoyait donc une région « invalide ». Filet de sécurité : on
+# normalise le code HUB → libellé avant validation (miroir @adision/ui
+# REGION_LABELS). Le front mappe déjà ; ceci protège tout autre appelant.
+HUB_REGION_CODE_TO_LABEL = {
+    "bas_saint_laurent": "Bas-Saint-Laurent",
+    "saguenay_lac_saint_jean": "Saguenay–Lac-Saint-Jean",
+    "capitale_nationale": "Capitale-Nationale",
+    "mauricie": "Mauricie",
+    "estrie": "Estrie",
+    "montreal": "Montréal",
+    "outaouais": "Outaouais",
+    "abitibi_temiscamingue": "Abitibi-Témiscamingue",
+    "cote_nord": "Côte-Nord",
+    "nord_du_quebec": "Nord-du-Québec",
+    "gaspesie_iles_de_la_madeleine": "Gaspésie–Îles-de-la-Madeleine",
+    "chaudiere_appalaches": "Chaudière-Appalaches",
+    "laval": "Laval",
+    "lanaudiere": "Lanaudière",
+    "laurentides": "Laurentides",
+    "monteregie": "Montérégie",
+    "centre_du_quebec": "Centre-du-Québec",
+}
 DATE_ADJ_ALLOWED_FOR_STATUTS = {"adjuge", "complet", "perdu"}
 
 # === Sprint B : statuts qui figent le budget (snapshot dans app_ana) ===
@@ -92,6 +116,10 @@ def _validate_projet_fields(data: dict, current_statut: Optional[str] = None) ->
             raise HTTPException(status_code=400, detail="Type de bâtiment invalide")
     if "region" in data:
         v = data["region"]
+        # Normalise un code région HUB (snake_case) en libellé FR avant validation.
+        if v in HUB_REGION_CODE_TO_LABEL:
+            v = HUB_REGION_CODE_TO_LABEL[v]
+            data["region"] = v
         if v not in (None, "") and v not in ALLOWED_REGIONS:
             raise HTTPException(status_code=400, detail="Région invalide")
     if "superficie_m2" in data:
