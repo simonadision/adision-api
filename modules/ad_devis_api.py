@@ -103,7 +103,7 @@ def register_ad_devis_routes(get_conn):
         # Entreprise (fiche org HUB) — non bloquant.
         entreprise = {}
         try:
-            entreprise = hub_service.fetch_organization(jwt_token) or {}
+            entreprise = hub_service.fetch_organization(jwt_token, projet.get("organization_id")) or {}
         except Exception as e:  # noqa: BLE001
             print(f"[devis] fetch_organization échec: {e}", flush=True)
         # Documents GED du projet HUB lié — non bloquant.
@@ -208,7 +208,7 @@ def register_ad_devis_routes(get_conn):
         jwt_token = _extract_bearer(authorization, token)
         entreprise = {}
         try:
-            entreprise = hub_service.fetch_organization(jwt_token) or {}
+            entreprise = hub_service.fetch_organization(jwt_token, projet.get("organization_id")) or {}
         except Exception as e:  # noqa: BLE001
             print(f"[devis] fetch_organization échec (pdf): {e}", flush=True)
 

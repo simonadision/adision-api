@@ -199,11 +199,18 @@ def fetch_client(jwt_token: str, client_id: int) -> Optional[dict]:
         raise
 
 
-def fetch_organization(jwt_token: str) -> Optional[dict]:
-    """Fiche entreprise de l'org courante (HUB) : name, neq, rbq, telephone,
-    courriel, adresse, logo_url… via GET /api/organization. None si 404."""
+def fetch_organization(jwt_token: str, organization_id=None) -> Optional[dict]:
+    """Fiche entreprise (HUB) : name, neq, rbq, telephone, courriel, logo_url…
+    via GET /api/organization. Si organization_id fourni, lit CETTE org (et non
+    l'org du JWT) — un super_admin peut lire toute org ; un user normal voit la
+    sienne (= celle du projet). Indispensable pour que l'entrepreneur d'un devis
+    soit l'org du PROJET, pas l'org de connexion. None si 404."""
+    path = "/api/organization"
+    if organization_id:
+        from urllib.parse import quote
+        path += f"?organization_id={quote(str(organization_id))}"
     try:
-        data = _hub_request("GET", "/api/organization", jwt_token)
+        data = _hub_request("GET", path, jwt_token)
         if isinstance(data, dict) and "organization" in data:
             return data["organization"]
         return data
