@@ -2442,29 +2442,31 @@ def register_ad_budget_routes(get_conn):
         # par la nouvelle UI ; les ajust_* par section le remplacent.
         ALL_COLS = [
             "section", "description", "qte", "unite",
-            "prix_unitaire", "ajust_materiaux",
-            "heures", "taux_horaire", "ajust_main_oeuvre",
+            "prix_unitaire", "ajust_materiaux", "st_materiaux",
+            "heures", "taux_horaire", "ajust_main_oeuvre", "st_main_oeuvre",
             "sous_traitant_type", "sous_traitant_nom",
-            "sous_traitant_montant", "ajust_sous_traitant",
+            "sous_traitant_montant", "ajust_sous_traitant", "st_sous_traitant",
             "sous_total", "ajustement_pct", "total", "note",
         ]
         COL_LABELS = {
             "section": "Section", "description": "Description", "qte": "Qté",
             "unite": "Unité",
             "prix_unitaire": "Coût u.", "ajust_materiaux": "Aj. mat.",
+            "st_materiaux": "S/T mat.",
             "heures": "Heures", "taux_horaire": "Taux $",
-            "ajust_main_oeuvre": "Aj. M-O",
+            "ajust_main_oeuvre": "Aj. M-O", "st_main_oeuvre": "S/T M-O",
             "sous_traitant_type": "Type S-T", "sous_traitant_nom": "Sous-traitant",
             "sous_traitant_montant": "Mt S-T", "ajust_sous_traitant": "Aj. S-T",
-            "sous_total": "S/T", "ajustement_pct": "Adj %",
+            "st_sous_traitant": "S/T s-tr.",
+            "sous_total": "S/T ligne", "ajustement_pct": "Adj %",
             "total": "Total", "note": "Note",
         }
         _col_widths_base = {
             "section": 55, "description": 130, "qte": 28, "unite": 30,
-            "prix_unitaire": 45, "ajust_materiaux": 30,
-            "heures": 30, "taux_horaire": 35, "ajust_main_oeuvre": 30,
+            "prix_unitaire": 45, "ajust_materiaux": 30, "st_materiaux": 50,
+            "heures": 30, "taux_horaire": 35, "ajust_main_oeuvre": 30, "st_main_oeuvre": 50,
             "sous_traitant_type": 45, "sous_traitant_nom": 70,
-            "sous_traitant_montant": 45, "ajust_sous_traitant": 30,
+            "sous_traitant_montant": 45, "ajust_sous_traitant": 30, "st_sous_traitant": 50,
             "sous_total": 55, "ajustement_pct": 30,
             "total": 60, "note": 80,
         }
@@ -2473,12 +2475,14 @@ def register_ad_budget_routes(get_conn):
         # rangée.
         COL_SECTION = {
             "prix_unitaire": "materiaux", "ajust_materiaux": "materiaux",
+            "st_materiaux": "materiaux",
             "heures": "mainOeuvre", "taux_horaire": "mainOeuvre",
-            "ajust_main_oeuvre": "mainOeuvre",
+            "ajust_main_oeuvre": "mainOeuvre", "st_main_oeuvre": "mainOeuvre",
             "sous_traitant_type": "sousTraitant",
             "sous_traitant_nom": "sousTraitant",
             "sous_traitant_montant": "sousTraitant",
             "ajust_sous_traitant": "sousTraitant",
+            "st_sous_traitant": "sousTraitant",
         }
         SECTION_LABELS = {
             "materiaux": "MATÉRIAUX",
@@ -2491,10 +2495,10 @@ def register_ad_budget_routes(get_conn):
             "sousTraitant": colors.HexColor("#DDF2EC"),
         }
         PRIX_DEPENDENT = {
-            "prix_unitaire", "ajust_materiaux",
-            "heures", "taux_horaire", "ajust_main_oeuvre",
+            "prix_unitaire", "ajust_materiaux", "st_materiaux",
+            "heures", "taux_horaire", "ajust_main_oeuvre", "st_main_oeuvre",
             "sous_traitant_type", "sous_traitant_nom",
-            "sous_traitant_montant", "ajust_sous_traitant",
+            "sous_traitant_montant", "ajust_sous_traitant", "st_sous_traitant",
             "sous_total", "ajustement_pct", "total", "note",
         }
 
@@ -2551,7 +2555,7 @@ def register_ad_budget_routes(get_conn):
             return f"{v:,.2f}".replace(",", " ").replace(".", ",")
 
         def cell_for(col, l, qte, prix, adj, st, tot,
-                     heures, taux, st_mo, st_montant,
+                     heures, taux, st_mo, st_mat, st_st, st_montant,
                      ajm, ajmo, ajst):
             if col == "section": return l["section"] or ""
             if col == "description": return cell(l["description"] or "")
@@ -2559,13 +2563,16 @@ def register_ad_budget_routes(get_conn):
             if col == "unite": return l["unite"] or ""
             if col == "prix_unitaire": return _frca_num(prix)
             if col == "ajust_materiaux": return f"{ajm:g}"
+            if col == "st_materiaux": return _frca_num(st_mat)
             if col == "heures": return f"{heures:g}"
             if col == "taux_horaire": return _frca_num(taux)
             if col == "ajust_main_oeuvre": return f"{ajmo:g}"
+            if col == "st_main_oeuvre": return _frca_num(st_mo)
             if col == "sous_traitant_type": return l["sous_traitant_type"] or ""
             if col == "sous_traitant_nom": return cell(l["sous_traitant_nom"] or "")
             if col == "sous_traitant_montant": return _frca_num(st_montant)
             if col == "ajust_sous_traitant": return f"{ajst:g}"
+            if col == "st_sous_traitant": return _frca_num(st_st)
             if col == "sous_total": return _frca_num(st)
             if col == "ajustement_pct": return f"{adj:g}"
             if col == "total": return _frca_num(tot)
@@ -2667,7 +2674,7 @@ def register_ad_budget_routes(get_conn):
                     non_grouped_total += tot_real
                 table_data.append([
                     cell_for(c, l, qte, prix, adj, st, tot,
-                             heures, taux, st_mo, st_montant,
+                             heures, taux, st_mo, st_mat, st_st, st_montant,
                              ajm, ajmo, ajst)
                     for c in selected
                 ])
