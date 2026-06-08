@@ -3,6 +3,7 @@ import io
 import json
 import os
 import re
+import unicodedata
 from collections import OrderedDict
 from datetime import date, datetime, timezone
 from typing import Optional
@@ -38,6 +39,18 @@ from reportlab.platypus import (
 DEFAULT_LOGO_PATH = os.path.join(
     os.path.dirname(__file__), "..", "assets", "adision_logo_default.png"
 )
+
+
+def _deaccent_lower(s):
+    """Désaccentue + minuscule (NFKD, drop combining) — pour matcher
+    'Contremaître'/'Contremaitre' insensiblement aux accents et à la casse."""
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", s or "") if not unicodedata.combining(c)
+    ).lower()
+
+
+def _is_contremaitre(desc):
+    return "contremaitre" in _deaccent_lower(desc)
 
 BUDGET_GROUPS_PDF = [
     ("conditions", "Conditions générales", "pct_admin_conditions", lambda n: n == 1),
@@ -2633,6 +2646,11 @@ def register_ad_budget_routes(get_conn):
         subtotal_rows = []
         group_subtotals = {key: 0.0 for key, _, _, _ in BUDGET_GROUPS_PDF}
         non_grouped_total = 0.0
+        # Totaux d'heures : production (MO hors contremaître) vs contremaître.
+        # Heures lues directement dans la colonne `heures` (décision Simon :
+        # somme directe, pas de conversion ; l'unité « sem. » est cosmétique).
+        mo_h = 0.0
+        contremaitre_h = 0.0
 
         for sec, sec_lignes in sections_groups.items():
             sec_total = 0.0
@@ -2652,6 +2670,11 @@ def register_ad_budget_routes(get_conn):
                 has_st = st_montant > 0
                 if qte <= 0 and not has_mo and not has_st:
                     continue
+                if heures > 0:
+                    if _is_contremaitre(l["description"]):
+                        contremaitre_h += heures
+                    else:
+                        mo_h += heures
                 prix = float(l["prix_unitaire"] or 0)
                 ajm = float(l["ajust_materiaux"] or 0)
                 adj = float(l["ajustement_pct"] or 0)
@@ -2817,6 +2840,23 @@ def register_ad_budget_routes(get_conn):
             totals_table.setStyle(TableStyle(totals_style))
             story.append(Spacer(1, 14))
             story.append(totals_table)
+
+        # Récap des HEURES de main-d'œuvre (production vs contremaître). HORS du
+        # gate `show_totals_row` : les heures ne sont PAS des montants, on les
+        # affiche même en mode « sans prix ».
+        if (mo_h + contremaitre_h) > 0:
+            def _h(v):
+                # fr-CA : espace milliers (régulier), virgule décimale, pas de
+                # décimale inutile si entier.
+                s = f"{v:,.0f}" if float(v).is_integer() else f"{v:,.1f}"
+                return s.replace(",", " ").replace(".", ",")
+            heures_para = (
+                "Heures — Main-d'œuvre : <b>" + _h(mo_h) + " h</b>"
+                " · Contremaître : <b>" + _h(contremaitre_h) + " h</b>"
+                " · Total : <b>" + _h(mo_h + contremaitre_h) + " h</b>"
+            )
+            story.append(Spacer(1, 10))
+            story.append(Paragraph(heures_para, ss["Normal"]))
 
         # Sprint DT-56 D5 — footer "Propulsé par Adision" sur chaque page
         # (cohérent avec PoweredByAdision sidebar D4). Texte gris pâle centré
