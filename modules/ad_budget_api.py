@@ -2539,6 +2539,17 @@ def register_ad_budget_routes(get_conn):
                 section_spans.append((i, j - 1, grp))
                 i = j
 
+        def _frca_num(value):
+            # Format fr-CA : séparateur de milliers = ESPACE, décimale = VIRGULE.
+            # Ex. 1234.5 -> "1 234,50". US (,/.) puis permutation. On N'utilise PAS
+            # U+00A0 (insécable) : il se rend mal dans ce PDF reportlab. Un espace
+            # régulier rend bien ; dans une colonne montant le nombre ne se coupe pas.
+            try:
+                v = float(value or 0)
+            except (TypeError, ValueError):
+                v = 0.0
+            return f"{v:,.2f}".replace(",", " ").replace(".", ",")
+
         def cell_for(col, l, qte, prix, adj, st, tot,
                      heures, taux, st_mo, st_montant,
                      ajm, ajmo, ajst):
@@ -2546,18 +2557,18 @@ def register_ad_budget_routes(get_conn):
             if col == "description": return cell(l["description"] or "")
             if col == "qte": return f"{qte:g}"
             if col == "unite": return l["unite"] or ""
-            if col == "prix_unitaire": return f"{prix:,.2f}"
+            if col == "prix_unitaire": return _frca_num(prix)
             if col == "ajust_materiaux": return f"{ajm:g}"
             if col == "heures": return f"{heures:g}"
-            if col == "taux_horaire": return f"{taux:,.2f}"
+            if col == "taux_horaire": return _frca_num(taux)
             if col == "ajust_main_oeuvre": return f"{ajmo:g}"
             if col == "sous_traitant_type": return l["sous_traitant_type"] or ""
             if col == "sous_traitant_nom": return cell(l["sous_traitant_nom"] or "")
-            if col == "sous_traitant_montant": return f"{st_montant:,.2f}"
+            if col == "sous_traitant_montant": return _frca_num(st_montant)
             if col == "ajust_sous_traitant": return f"{ajst:g}"
-            if col == "sous_total": return f"{st:,.2f}"
+            if col == "sous_total": return _frca_num(st)
             if col == "ajustement_pct": return f"{adj:g}"
-            if col == "total": return f"{tot:,.2f}"
+            if col == "total": return _frca_num(tot)
             if col == "note": return cell(l["note"] or "")
             return ""
 
@@ -2571,7 +2582,7 @@ def register_ad_budget_routes(get_conn):
                 row[desc_idx] = label
             elif total_idx is not None and total_idx > 0:
                 row[total_idx - 1] = label
-            row[total_idx] = f"{value:,.2f}"
+            row[total_idx] = _frca_num(value)
             return row
 
         # Surfaces dérivées (mêmes formules que côté frontend)
@@ -2726,28 +2737,28 @@ def register_ad_budget_routes(get_conn):
                 ap = sub * pct / 100
                 if key in selected_ap:
                     # Mode classique : sous-total et admin & profit affichés séparément
-                    totals_rows.append([f"Sous-total {label}", f"{sub:,.2f} $"])
+                    totals_rows.append([f"Sous-total {label}", f"{_frca_num(sub)} $"])
                     totals_kinds.append("subtotal")
-                    totals_rows.append([f"Administration et profit {pct:g}%", f"{ap:,.2f} $"])
+                    totals_rows.append([f"Administration et profit {pct:g}%", f"{_frca_num(ap)} $"])
                     totals_kinds.append("admin")
                 else:
                     # Mode distribution : sous-total gonflé (= sub + ap), pas de ligne admin
-                    totals_rows.append([f"Sous-total {label}", f"{(sub + ap):,.2f} $"])
+                    totals_rows.append([f"Sous-total {label}", f"{_frca_num(sub + ap)} $"])
                     totals_kinds.append("subtotal")
 
             # 3. Sous-total avant taxes (visuel uniquement)
             if avec_sous_total_avant_taxes:
-                totals_rows.append(["Sous-total avant taxes", f"{real_sub_avant_taxes:,.2f} $"])
+                totals_rows.append(["Sous-total avant taxes", f"{_frca_num(real_sub_avant_taxes)} $"])
                 totals_kinds.append("subtotal_taxes")
 
             # 4. TPS / TVQ — affectent réellement le TOTAL GÉNÉRAL
             tps_amount = real_sub_avant_taxes * TPS_RATE
             tvq_amount = real_sub_avant_taxes * TVQ_RATE
             if avec_tps:
-                totals_rows.append([f"TPS {TPS_RATE * 100:g}%", f"{tps_amount:,.2f} $"])
+                totals_rows.append([f"TPS {TPS_RATE * 100:g}%", f"{_frca_num(tps_amount)} $"])
                 totals_kinds.append("tax")
             if avec_tvq:
-                totals_rows.append([f"TVQ {TVQ_RATE * 100:g}%", f"{tvq_amount:,.2f} $"])
+                totals_rows.append([f"TVQ {TVQ_RATE * 100:g}%", f"{_frca_num(tvq_amount)} $"])
                 totals_kinds.append("tax")
 
             # 5. TOTAL GÉNÉRAL = sous-total avant taxes + TPS (si coché) + TVQ (si coché)
@@ -2756,7 +2767,7 @@ def register_ad_budget_routes(get_conn):
                 total_general += tps_amount
             if avec_tvq:
                 total_general += tvq_amount
-            totals_rows.append(["TOTAL GÉNÉRAL", f"{total_general:,.2f} $"])
+            totals_rows.append(["TOTAL GÉNÉRAL", f"{_frca_num(total_general)} $"])
             totals_kinds.append("grand")
 
             totals_style = [
