@@ -52,6 +52,21 @@ def _deaccent_lower(s):
 def _is_contremaitre(desc):
     return "contremaitre" in _deaccent_lower(desc)
 
+
+def _group_admin_profit(projet, pct_field, sub, sub_mat, sub_mo, sub_st):
+    """Admin & profit d'un regroupement. Hiérarchie : %catégorie (pct_field_<cat>)
+    -> %discipline (pct_field) -> 0. GARANTIE RÉTROCOMPAT : si AUCUN % catégorie
+    n'est défini (les 3 NULL), on retombe EXACTEMENT sur l'existant
+    (sub × %discipline). Sinon : Σ sous-total_cat × %cat_applicable."""
+    disc = float(projet.get(pct_field) or 0)
+    raws = {c: projet.get(f"{pct_field}_{c}") for c in ("mat", "mo", "st")}
+    if all(raws[c] is None for c in raws):
+        return sub * disc / 100.0
+    def eff(c):
+        r = raws[c]
+        return float(r) if r is not None else disc
+    return (sub_mat * eff("mat") + sub_mo * eff("mo") + sub_st * eff("st")) / 100.0
+
 BUDGET_GROUPS_PDF = [
     ("conditions", "Conditions générales", "pct_admin_conditions", lambda n: n == 1),
     ("architecture", "Architecture", "pct_admin_architecture", lambda n: 2 <= n <= 14),
@@ -1723,6 +1738,13 @@ def register_ad_budget_routes(get_conn):
             "pct_admin_conditions", "pct_admin_architecture",
             "pct_admin_mecanique", "pct_admin_excavation",
         }
+        # Admin & profit PAR CATÉGORIE (mat/mo/st) — NULL = non défini = hérite
+        # du % discipline (≠ PCT_FIELDS qui force 0). "" reçu -> NULL.
+        PCT_CAT_FIELDS = {
+            f"pct_admin_{g}_{c}"
+            for g in ("conditions", "architecture", "mecanique", "excavation")
+            for c in ("mat", "mo", "st")
+        }
         # Champs qui doivent être normalisés à NULL si reçus en chaîne vide
         # (typés DATE, NUMERIC, ou VARCHAR optionnels).
         NULLABLE_EMPTY_FIELDS = {
@@ -1740,6 +1762,11 @@ def register_ad_budget_routes(get_conn):
             "logo_base64",
             "pct_admin_conditions", "pct_admin_architecture",
             "pct_admin_mecanique", "pct_admin_excavation",
+            # Admin & profit par catégorie (12 champs ; NULL = hérite discipline)
+            "pct_admin_conditions_mat", "pct_admin_conditions_mo", "pct_admin_conditions_st",
+            "pct_admin_architecture_mat", "pct_admin_architecture_mo", "pct_admin_architecture_st",
+            "pct_admin_mecanique_mat", "pct_admin_mecanique_mo", "pct_admin_mecanique_st",
+            "pct_admin_excavation_mat", "pct_admin_excavation_mo", "pct_admin_excavation_st",
             # Sprint A
             "type_batiment", "region", "date_adjudication", "superficie_m2",
             "dernier_snapshot_id",
@@ -1753,7 +1780,9 @@ def register_ad_budget_routes(get_conn):
         ]:
             if field in data:
                 v = data[field]
-                if field in NULLABLE_EMPTY_FIELDS and v == "":
+                if field in PCT_CAT_FIELDS and (v == "" or v is None):
+                    v = None  # NULL = non défini = hérite du % discipline
+                elif field in NULLABLE_EMPTY_FIELDS and v == "":
                     v = None
                 elif field in PCT_FIELDS and (v == "" or v is None):
                     v = 0
@@ -2645,6 +2674,11 @@ def register_ad_budget_routes(get_conn):
             header_offset = 1
         subtotal_rows = []
         group_subtotals = {key: 0.0 for key, _, _, _ in BUDGET_GROUPS_PDF}
+        # Sous-totaux par CATÉGORIE et par groupe (pré-ajustement_pct, comme le
+        # front) pour l'admin & profit décomposé.
+        group_sub_mat = {key: 0.0 for key, _, _, _ in BUDGET_GROUPS_PDF}
+        group_sub_mo = {key: 0.0 for key, _, _, _ in BUDGET_GROUPS_PDF}
+        group_sub_st = {key: 0.0 for key, _, _, _ in BUDGET_GROUPS_PDF}
         non_grouped_total = 0.0
         # Totaux d'heures : production (MO hors contremaître) vs contremaître.
         # Heures lues directement dans la colonne `heures` (décision Simon :
@@ -2693,6 +2727,9 @@ def register_ad_budget_routes(get_conn):
                 sec_total += tot
                 if gkey is not None:
                     group_subtotals[gkey] += tot_real
+                    group_sub_mat[gkey] += st_mat
+                    group_sub_mo[gkey] += st_mo
+                    group_sub_st[gkey] += st_st
                 else:
                     non_grouped_total += tot_real
                 table_data.append([
@@ -2753,8 +2790,9 @@ def register_ad_budget_routes(get_conn):
                 sub = group_subtotals[key]
                 if sub <= 0:
                     continue
-                pct_d = float(projet.get(pct_field) or 0)
-                real_sub_avant_taxes += sub + sub * pct_d / 100
+                ap = _group_admin_profit(projet, pct_field, sub,
+                                         group_sub_mat[key], group_sub_mo[key], group_sub_st[key])
+                real_sub_avant_taxes += sub + ap
 
             # 2. Affichage des lignes par regroupement (filtré par selected_st / selected_ap)
             for key, label, pct_field, _ in BUDGET_GROUPS_PDF:
@@ -2764,12 +2802,16 @@ def register_ad_budget_routes(get_conn):
                 if key not in selected_st:
                     continue
                 pct = float(projet.get(pct_field) or 0)
-                ap = sub * pct / 100
+                ap = _group_admin_profit(projet, pct_field, sub,
+                                         group_sub_mat[key], group_sub_mo[key], group_sub_st[key])
+                decomposed = any(projet.get(f"{pct_field}_{c}") is not None for c in ("mat", "mo", "st"))
+                ap_label = ("Administration et profit (décomposé)" if decomposed
+                            else f"Administration et profit {pct:g}%")
                 if key in selected_ap:
                     # Mode classique : sous-total et admin & profit affichés séparément
                     totals_rows.append([f"Sous-total {label}", f"{_frca_num(sub)} $"])
                     totals_kinds.append("subtotal")
-                    totals_rows.append([f"Administration et profit {pct:g}%", f"{_frca_num(ap)} $"])
+                    totals_rows.append([ap_label, f"{_frca_num(ap)} $"])
                     totals_kinds.append("admin")
                 else:
                     # Mode distribution : sous-total gonflé (= sub + ap), pas de ligne admin
