@@ -197,3 +197,28 @@ def fetch_client(jwt_token: str, client_id: int) -> Optional[dict]:
         if e.status_code == 404:
             return None
         raise
+
+
+def fetch_organization(jwt_token: str) -> Optional[dict]:
+    """Fiche entreprise de l'org courante (HUB) : name, neq, rbq, telephone,
+    courriel, adresse, logo_url… via GET /api/organization. None si 404."""
+    try:
+        data = _hub_request("GET", "/api/organization", jwt_token)
+        if isinstance(data, dict) and "organization" in data:
+            return data["organization"]
+        return data
+    except HubServiceError as e:
+        if e.status_code == 404:
+            return None
+        raise
+
+
+def fetch_project_documents(jwt_token: str, project_id: int) -> Optional[dict]:
+    """Arbre des documents GED d'un projet HUB (categories > disciplines >
+    documents) via GET /api/projects/{id}/documents. None si 404."""
+    try:
+        return _hub_request("GET", f"/api/projects/{project_id}/documents", jwt_token)
+    except HubServiceError as e:
+        if e.status_code == 404:
+            return None
+        raise
