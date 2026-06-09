@@ -3196,6 +3196,10 @@ def register_ad_budget_routes(get_conn):
             "revision_label": projet.get("revision_label") or "Originale",
             "montant_avant_taxes": snapshot["totaux"]["montant_avant_taxes"],
             "montant_apres_taxes": snapshot["totaux"]["montant_apres_taxes"],
+            # Montant TEL QU'AFFICHÉ dans le PDF filtré (TOTAL GÉNÉRAL de la vue
+            # modale, reflète sections/taxes décochées) -> détection rapport
+            # partiel côté HUB. Le snapshot ci-dessus reste le budget complet.
+            "montant_affiche_pdf": _filtered_snap["totaux"]["montant_apres_taxes"],
             "gabarit_id": gabarit_id,
             "gabarit_nom": gabarit_nom,
             "source_ref": projet_id,
