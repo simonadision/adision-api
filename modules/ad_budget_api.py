@@ -1777,10 +1777,14 @@ def register_ad_budget_routes(get_conn):
             # (cross-base, BIGINT nullable). Le client peut être relié
             # ou délié après la création initiale.
             "client_id",
+            # Option d'arrondissement au dollar (mode calcul/affichage).
+            "arrondi_dollar",
         ]:
             if field in data:
                 v = data[field]
-                if field in PCT_CAT_FIELDS and (v == "" or v is None):
+                if field == "arrondi_dollar":
+                    v = bool(v)
+                elif field in PCT_CAT_FIELDS and (v == "" or v is None):
                     v = None  # NULL = non défini = hérite du % discipline
                 elif field in NULLABLE_EMPTY_FIELDS and v == "":
                     v = None
@@ -2686,6 +2690,15 @@ def register_ad_budget_routes(get_conn):
         mo_h = 0.0
         contremaitre_h = 0.0
 
+        # Mode arrondi au dollar (option projet). R() arrondit au dollar le plus
+        # près en mode arrondi, sinon identité (rétrocompat exacte). Appliqué au
+        # TOTAL DE LIGNE, à l'A&P par groupe et aux taxes — modèle « lignes + A&P
+        # arrondis séparément » : sous-total = Σ lignes arrondies + Σ A&P arrondis.
+        arr = bool(projet.get("arrondi_dollar"))
+
+        def R(v):
+            return float(round(v)) if arr else v
+
         for sec, sec_lignes in sections_groups.items():
             sec_total = 0.0
             section_has_visible_lines = False
@@ -2724,16 +2737,19 @@ def register_ad_budget_routes(get_conn):
                 gkey = _group_key_for(_section_prefix_n(l["section"]))
                 factor = group_factors.get(gkey, 1) if gkey is not None else 1
                 tot = tot_real * factor  # gonflé si admin distribué
-                sec_total += tot
+                # Total de ligne arrondi (mode arrondi) : accumulé dans les
+                # sous-totaux ET affiché, pour que Σ lignes affichées = sous-total.
+                tot_disp = R(tot)
+                sec_total += tot_disp
                 if gkey is not None:
-                    group_subtotals[gkey] += tot_real
+                    group_subtotals[gkey] += R(tot_real)
                     group_sub_mat[gkey] += st_mat
                     group_sub_mo[gkey] += st_mo
                     group_sub_st[gkey] += st_st
                 else:
-                    non_grouped_total += tot_real
+                    non_grouped_total += R(tot_real)
                 table_data.append([
-                    cell_for(c, l, qte, prix, adj, st, tot,
+                    cell_for(c, l, qte, prix, adj, R(st), tot_disp,
                              heures, taux, st_mo, st_mat, st_st, st_montant,
                              ajm, ajmo, ajst)
                     for c in selected
@@ -2790,8 +2806,8 @@ def register_ad_budget_routes(get_conn):
                 sub = group_subtotals[key]
                 if sub <= 0:
                     continue
-                ap = _group_admin_profit(projet, pct_field, sub,
-                                         group_sub_mat[key], group_sub_mo[key], group_sub_st[key])
+                ap = R(_group_admin_profit(projet, pct_field, sub,
+                                           group_sub_mat[key], group_sub_mo[key], group_sub_st[key]))
                 real_sub_avant_taxes += sub + ap
 
             # 2. Affichage des lignes par regroupement (filtré par selected_st / selected_ap)
@@ -2802,8 +2818,8 @@ def register_ad_budget_routes(get_conn):
                 if key not in selected_st:
                     continue
                 pct = float(projet.get(pct_field) or 0)
-                ap = _group_admin_profit(projet, pct_field, sub,
-                                         group_sub_mat[key], group_sub_mo[key], group_sub_st[key])
+                ap = R(_group_admin_profit(projet, pct_field, sub,
+                                           group_sub_mat[key], group_sub_mo[key], group_sub_st[key]))
                 decomposed = any(projet.get(f"{pct_field}_{c}") is not None for c in ("mat", "mo", "st"))
                 ap_label = ("Administration et profit (décomposé)" if decomposed
                             else f"Administration et profit {pct:g}%")
@@ -2823,9 +2839,10 @@ def register_ad_budget_routes(get_conn):
                 totals_rows.append(["Sous-total avant taxes", f"{_frca_num(real_sub_avant_taxes)} $"])
                 totals_kinds.append("subtotal_taxes")
 
-            # 4. TPS / TVQ — affectent réellement le TOTAL GÉNÉRAL
-            tps_amount = real_sub_avant_taxes * TPS_RATE
-            tvq_amount = real_sub_avant_taxes * TVQ_RATE
+            # 4. TPS / TVQ — affectent réellement le TOTAL GÉNÉRAL. Chaque taxe
+            #    arrondie au dollar séparément (mode arrondi).
+            tps_amount = R(real_sub_avant_taxes * TPS_RATE)
+            tvq_amount = R(real_sub_avant_taxes * TVQ_RATE)
             if avec_tps:
                 totals_rows.append([f"TPS {TPS_RATE * 100:g}%", f"{_frca_num(tps_amount)} $"])
                 totals_kinds.append("tax")
