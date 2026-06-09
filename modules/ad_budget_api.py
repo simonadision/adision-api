@@ -3133,15 +3133,31 @@ def register_ad_budget_routes(get_conn):
         projet_id: int,
         user=Depends(jwt_user),
         authorization: Optional[str] = Header(None),
+        # Config PDF (modale) — pilote UNIQUEMENT l'artefact PDF (une VUE).
+        actifs_seulement: bool = True,
+        avec_prix: bool = True,
+        sections: str = "",
+        colonnes: str = "",
+        sous_totaux: Optional[str] = None,
+        admin_profits: Optional[str] = None,
+        avec_sous_total_avant_taxes: bool = True,
         avec_tps: bool = True,
         avec_tvq: bool = True,
+        avec_heures: bool = True,
+        orientation: str = "portrait",
+        mobilisation: float = 0,
+        surface_plancher: float = 0,
+        hauteur_cloisons: float = 0,
+        longueur_cloisons: float = 0,
         gabarit_id: Optional[int] = None,
         gabarit_nom: Optional[str] = None,
     ):
-        """Émet le RAPPORT DE CALCUL (quantitatif) vers l'Espace Rapports HUB :
-        PDF + snapshot (même passe) -> POST multipart HUB -> marque la révision
-        courante émise (emitted_at_current_revision=TRUE). Le PDF poussé est
-        byte-identique à l'aperçu (même builder _build_projet_report)."""
+        """Émet le RAPPORT DE CALCUL (quantitatif) vers l'Espace Rapports HUB.
+        DISSOCIATION (décision Simon, option 1) : le PDF poussé reflète la CONFIG
+        de la modale (sections/colonnes/taxes/heures décochées = vue filtrée) ;
+        le snapshot_data est calculé sur le BUDGET COMPLET (toutes sections,
+        toutes lignes actives, tous totaux/taxes/heures), INDÉPENDAMMENT des
+        filtres — c'est la VÉRITÉ pour Ad ANA. Marque la révision émise."""
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
@@ -3158,11 +3174,20 @@ def register_ad_budget_routes(get_conn):
             raise HTTPException(status_code=400,
                                 detail="Projet non lié à un projet HUB (ad_hub_project_id manquant)")
 
-        buf, snapshot = _build_projet_report(
-            projet_id, True, True, "", "", None, None, True, avec_tps, avec_tvq,
-            "portrait", 0, 0, 0, 0,
+        # 1. PDF = config de la modale (artefact / vue). On ignore son snapshot.
+        buf, _filtered_snap = _build_projet_report(
+            projet_id, actifs_seulement, avec_prix, sections, colonnes,
+            sous_totaux, admin_profits, avec_sous_total_avant_taxes, avec_tps,
+            avec_tvq, orientation, mobilisation, surface_plancher,
+            hauteur_cloisons, longueur_cloisons, avec_heures=avec_heures,
         )
         pdf_bytes = buf.getvalue()
+        # 2. Snapshot = budget COMPLET (vérité Ad ANA) : aucune section/colonne
+        #    filtrée, taxes complètes (avec_tps/avec_tvq=True), lignes actives.
+        _full_buf, snapshot = _build_projet_report(
+            projet_id, True, True, "", "", None, None, True, True, True,
+            "portrait", 0, 0, 0, 0,
+        )
 
         jwt_token = _extract_bearer(authorization, None)
         fields = {
