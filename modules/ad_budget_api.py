@@ -2390,6 +2390,7 @@ def register_ad_budget_routes(get_conn):
             sous_totaux, admin_profits, avec_sous_total_avant_taxes, avec_tps,
             avec_tvq, orientation, mobilisation, surface_plancher,
             hauteur_cloisons, longueur_cloisons, avec_heures=avec_heures,
+            jwt_token=_extract_bearer(authorization, token),
         )
         safe_nom = "".join(c if c.isalnum() or c in "-_ " else "_" for c in (_snapshot["project"]["nom"] or "projet")).strip() or "projet"
         return StreamingResponse(
@@ -2414,6 +2415,7 @@ def register_ad_budget_routes(get_conn):
         _buf, snapshot = _build_projet_report(
             projet_id, actifs_seulement, True, "", "", None, None, True,
             avec_tps, avec_tvq, "portrait", 0, 0, 0, 0,
+            jwt_token=_extract_bearer(authorization, None),
         )
         return snapshot
 
@@ -2434,11 +2436,13 @@ def register_ad_budget_routes(get_conn):
         hauteur_cloisons=0,
         longueur_cloisons=0,
         avec_heures=True,
+        jwt_token=None,
     ):
         """Construit le PDF rapport ET le snapshot JSON dans la MÊME passe.
         Retourne (buf: BytesIO, snapshot: dict). Le rendu PDF est INCHANGÉ
         (rétrocompat byte-identique — preuve hash). L'auth est faite par
-        l'appelant (route)."""
+        l'appelant (route), qui passe AUSSI le jwt_token (pour les logos
+        client/org via hub_service) ; None -> logo neutre, jamais de crash."""
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         cur.execute("SELECT * FROM ad_budget.projets WHERE id = %s", (projet_id,))
@@ -2515,12 +2519,8 @@ def register_ad_budget_routes(get_conn):
         #   4. Placeholder NEUTRE (aucun logo) — décision Simon : JAMAIS Adision.
         # Échec gracieux : si un fetch Ad HUB plante (network/401/timeout),
         # on retombe sur le rang suivant plutôt que de casser l'export PDF.
-        jwt_token = None
-        try:
-            jwt_token = _extract_bearer(authorization, token)
-        except HTTPException:
-            # Ne devrait pas arriver (jwt_user_or_token a déjà validé en amont).
-            pass
+        # jwt_token est fourni par l'appelant (route) ; None -> pas de fetch
+        # HUB -> logo neutre (jamais de crash).
         # rang 2 (défaut) : logo historique du projet.
         chosen_logo_base64 = projet.get("logo_base64") or ""
         # rang 1 : logo du client lié — PRIME sur le logo projet.
@@ -3294,12 +3294,15 @@ def register_ad_budget_routes(get_conn):
                 conn.close()
         # 'correction' (ou émission directe) : on reste sur rev_no/rev_label courants.
 
+        # Token pour les logos (client/org via hub_service) ET l'émission HUB.
+        jwt_token = _extract_bearer(authorization, None)
         # 1. PDF = config de la modale (artefact / vue). On ignore son snapshot.
         buf, _filtered_snap = _build_projet_report(
             projet_id, actifs_seulement, avec_prix, sections, colonnes,
             sous_totaux, admin_profits, avec_sous_total_avant_taxes, avec_tps,
             avec_tvq, orientation, mobilisation, surface_plancher,
             hauteur_cloisons, longueur_cloisons, avec_heures=avec_heures,
+            jwt_token=jwt_token,
         )
         pdf_bytes = buf.getvalue()
         # 2. Snapshot = budget COMPLET (vérité Ad ANA) : aucune section/colonne
@@ -3307,9 +3310,9 @@ def register_ad_budget_routes(get_conn):
         _full_buf, snapshot = _build_projet_report(
             projet_id, True, True, "", "", None, None, True, True, True,
             "portrait", 0, 0, 0, 0,
+            jwt_token=jwt_token,
         )
 
-        jwt_token = _extract_bearer(authorization, None)
         fields = {
             "report_type": "calcul_quantitatif",
             "revision_no": rev_no,
