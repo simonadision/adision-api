@@ -227,6 +227,78 @@ def register_ad_devis_routes(get_conn):
         couleur: str = "adision",
     ):
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        jwt_token = _extract_bearer(authorization, token)
+        buf, _snap = _build_devis(projet_id, montant, couleur, jwt_token)
+        safe = "".join(c if c.isalnum() or c in "-_ " else "_"
+                       for c in (_snap["project"]["nom"] or "devis")).strip() or "devis"
+        return StreamingResponse(
+            buf, media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="devis_{safe}.pdf"'},
+        )
+
+    @router.post("/projets/{projet_id}/devis/emit")
+    def emit_devis_to_hub(
+        projet_id: int,
+        user=Depends(jwt_user),
+        authorization: Optional[str] = Header(None),
+        montant: float = 0,
+        couleur: str = "adision",
+    ):
+        """Émet la PROPOSITION/DEVIS vers l'Espace Rapports HUB
+        (report_type='proposition_devis', montant_avant_taxes = le quantitatif).
+        Marque la révision courante émise (emitted_at_current_revision=TRUE)."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        jwt_token = _extract_bearer(authorization, None)
+        buf, snapshot = _build_devis(projet_id, montant, couleur, jwt_token)
+        pdf_bytes = buf.getvalue()
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute("SELECT * FROM ad_budget.projets WHERE id = %s", (projet_id,))
+            projet = cur.fetchone()
+        finally:
+            cur.close()
+            conn.close()
+        if not projet:
+            raise HTTPException(status_code=404, detail="Projet introuvable")
+        hub_pid = projet.get("ad_hub_project_id")
+        if not hub_pid:
+            raise HTTPException(status_code=400,
+                                detail="Projet non lié à un projet HUB")
+        fields = {
+            "report_type": "proposition_devis",
+            "revision_no": projet.get("revision_no", 0),
+            "revision_label": projet.get("revision_label") or "Originale",
+            "montant_avant_taxes": snapshot["totaux"]["montant_avant_taxes"],
+            "montant_apres_taxes": snapshot["totaux"]["montant_apres_taxes"],
+            "source_ref": projet_id,
+            "generated_by": user.get("id"),
+            "snapshot_data": json.dumps(snapshot, default=str),
+        }
+        try:
+            result = hub_service.post_report(jwt_token, int(hub_pid), pdf_bytes, fields)
+        except hub_service.HubServiceError as e:
+            raise HTTPException(status_code=502, detail=f"Échec émission HUB : {e.detail}")
+        conn = get_conn()
+        cur = conn.cursor()
+        try:
+            cur.execute("UPDATE ad_budget.projets SET emitted_at_current_revision = TRUE, "
+                        "updated_at = NOW() WHERE id = %s", (projet_id,))
+            conn.commit()
+        finally:
+            cur.close()
+            conn.close()
+        return {
+            "emitted": True,
+            "report_type": "proposition_devis",
+            "revision_no": projet.get("revision_no", 0),
+            "revision_label": projet.get("revision_label") or "Originale",
+            "hub": result,
+        }
+
+    def _build_devis(projet_id, montant, couleur, jwt_token):
+        """Construit le PDF devis ET le snapshot (proposition_devis) ; retourne
+        (buf, snapshot). Auth faite par l'appelant (route)."""
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         try:
@@ -238,7 +310,6 @@ def register_ad_devis_routes(get_conn):
         finally:
             cur.close()
             conn.close()
-        jwt_token = _extract_bearer(authorization, token)
         entreprise = {}
         try:
             entreprise = hub_service.fetch_organization(jwt_token, projet.get("organization_id")) or {}
@@ -485,11 +556,38 @@ def register_ad_devis_routes(get_conn):
 
         doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
         buf.seek(0)
-        safe = "".join(c if c.isalnum() or c in "-_ " else "_"
-                       for c in (projet.get("nom") or "devis")).strip() or "devis"
-        return StreamingResponse(
-            buf, media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="devis_{safe}.pdf"'},
-        )
+
+        # Snapshot proposition_devis : montant_avant_taxes = le quantitatif (le
+        # prix du devis EST le quantitatif). Bloc devis rempli ; totaux détaillés
+        # (mat/mo/st, heures, A&P) restent côté rapport de calcul (null ici).
+        def _lines(txt):
+            return [ln.strip() for ln in (txt or "").split("\n") if ln.strip()]
+        m = float(montant or 0)
+        tps = round(m * 0.05, 2)
+        tvq = round(m * 0.09975, 2)
+        snapshot = {
+            "schema_version": 1,
+            "report_type": "proposition_devis",
+            "project": {"central_project_id": projet.get("ad_hub_project_id"),
+                        "nom": projet.get("nom")},
+            "revision": {"no": projet.get("revision_no", 0),
+                         "label": projet.get("revision_label") or "Originale"},
+            "options": {"arrondi_dollar": bool(projet.get("arrondi_dollar"))},
+            "totaux": {
+                "sous_total_mat": None, "sous_total_mo": None, "sous_total_st": None,
+                "montant_avant_taxes": round(m, 2),
+                "tps": tps, "tvq": tvq,
+                "montant_apres_taxes": round(m + tps + tvq, 2),
+            },
+            "heures": {"mo": None, "contremaitre": None, "total": None},
+            "admin_profit": {"mode": None, "details": []},
+            "regroupements_csi": [],
+            "devis": {
+                "destinataire_contact": projet.get("contact_client"),
+                "travaux_inclus": _lines(devis.get("travaux_inclus")),
+                "travaux_non_inclus": _lines(devis.get("travaux_non_inclus")),
+            },
+        }
+        return buf, snapshot
 
     return router
