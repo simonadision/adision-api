@@ -14,6 +14,7 @@ import io
 import json
 import logging
 import os
+import re
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
@@ -321,10 +322,20 @@ def register_ad_devis_routes(get_conn):
                                  ("RIGHTPADDING", (0, 0), (0, 0), 12)]))
         story.append(two)
 
+        # Espace net entre le bloc entrepreneur/client et le texte.
+        story.append(Spacer(1, 18))
+
         # 4. PRÉSENTATION — texte seul, sans titre de section (le corps
-        #    « Madame, Monsieur… » commence directement). Espace d'aération
-        #    avant TRAVAUX INCLUS.
-        story.append(para_multiline(devis.get("presentation") or "—"))
+        #    « Madame, Monsieur… » commence directement). Rendu paragraphe par
+        #    paragraphe (séparés par des lignes vides) avec interligne plus
+        #    confortable (leading 16) et espace après chaque paragraphe, pour
+        #    aérer la page 1 (qui a de la place grâce au saut de page forcé).
+        #    Aéré mais pas dispersé. Espace d'aération avant TRAVAUX INCLUS.
+        pres_style = ParagraphStyle("pres", parent=body, leading=16, spaceAfter=11)
+        pres_txt = (devis.get("presentation") or "—").strip()
+        for para in re.split(r"\n\s*\n", pres_txt) or [pres_txt]:
+            if para.strip():
+                story.append(Paragraph(esc(para).replace("\n", "<br/>"), pres_style))
         story.append(Spacer(1, 22))
 
         # 6 + 7 : TRAVAUX INCLUS / NON INCLUS
