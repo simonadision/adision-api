@@ -8,6 +8,7 @@ from collections import OrderedDict
 from datetime import date, datetime, timezone
 from typing import Optional
 
+import httpx
 import openpyxl
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -406,8 +407,12 @@ def _apply_master_template(
 
 
 def build_pdf_logo(logo_base64: str, max_width: float = 180):
-    """Return a reportlab Image flowable for the projet logo, or default if empty.
-    Falls back to empty string if no source is usable.
+    """Return a reportlab Image flowable for the given logo (base64), or "" if
+    none. Décision Simon : PAS de fallback Adision codé en dur — une org/projet
+    sans logo rend un PLACEHOLDER NEUTRE (aucun logo), jamais la marque Adision.
+    Le défaut white-label (logo de l'org active) est résolu en amont par les
+    callers via fetch_org_logo_base64(). DEFAULT_LOGO_PATH conservé (legacy) mais
+    n'est plus un fallback automatique.
     """
     source = None
     try:
@@ -416,8 +421,6 @@ def build_pdf_logo(logo_base64: str, max_width: float = 180):
             if "," in data:
                 data = data.split(",", 1)[1]
             source = io.BytesIO(base64.b64decode(data))
-        elif os.path.exists(DEFAULT_LOGO_PATH):
-            source = DEFAULT_LOGO_PATH
         if source is None:
             return ""
         ir = ImageReader(source if isinstance(source, str) else io.BytesIO(source.getvalue()))
@@ -430,6 +433,24 @@ def build_pdf_logo(logo_base64: str, max_width: float = 180):
         return Image(img_src, width=max_width, height=h)
     except Exception:
         return ""
+
+def fetch_org_logo_base64(jwt_token, organization_id):
+    """Logo de l'org (HUB Info entreprise / R2 proxy stable) en base64, ou "" si
+    l'org n'a pas de logo. Sert de DÉFAUT white-label : le PDF porte le logo de
+    l'org du projet / active. Échec gracieux (network/401/timeout) -> "" (le
+    caller tombe alors sur le placeholder neutre — jamais Adision)."""
+    try:
+        org = hub_service.fetch_organization(jwt_token, organization_id) or {}
+        url = org.get("logo_url")
+        if not url:
+            return ""
+        r = httpx.get(url, timeout=10.0)
+        if r.status_code == 200 and r.content:
+            return base64.b64encode(r.content).decode("ascii")
+    except Exception as e:  # noqa: BLE001
+        print(f"[ad-bud PDF] logo org échec (organization_id={organization_id}): {e}", flush=True)
+    return ""
+
 
 def _authorize_projet(projet, user, mode):
     """Contrôle d'accès centralisé à un projet Ad BUD (PHASE 3A multi-tenant).
@@ -2423,29 +2444,34 @@ def register_ad_budget_routes(get_conn):
         #      logo_base64 récupéré via hub_service cross-service)
         #   2. logo HISTORIQUE du projet (ad_budget.projets.logo_base64 —
         #      compat anciens projets sans client formel)
-        #   3. Fallback Adision (DEFAULT_LOGO_PATH géré par build_pdf_logo)
-        # Échec gracieux : si fetch Ad HUB plante (network/401/timeout),
-        # on tombe sur le fallback projet/Adision plutôt que de casser
-        # l'export PDF entier.
+        #   3. logo de l'ORG du projet (HUB Info entreprise / R2) — défaut
+        #      white-label : chaque org voit SON logo (multi-tenant).
+        #   4. Placeholder NEUTRE (aucun logo) — décision Simon : JAMAIS Adision.
+        # Échec gracieux : si un fetch Ad HUB plante (network/401/timeout),
+        # on retombe sur le rang suivant plutôt que de casser l'export PDF.
+        jwt_token = None
+        try:
+            jwt_token = _extract_bearer(authorization, token)
+        except HTTPException:
+            # Ne devrait pas arriver (jwt_user_or_token a déjà validé en amont).
+            pass
+        # rang 2 (défaut) : logo historique du projet.
         chosen_logo_base64 = projet.get("logo_base64") or ""
-        if projet.get("client_id"):
+        # rang 1 : logo du client lié — PRIME sur le logo projet.
+        if projet.get("client_id") and jwt_token:
             try:
-                jwt_token = _extract_bearer(authorization, token)
                 client_data = hub_service.fetch_client(jwt_token, int(projet["client_id"]))
                 if client_data and client_data.get("logo_base64"):
                     chosen_logo_base64 = client_data["logo_base64"]
             except hub_service.HubServiceError as e:
-                # Network/401/etc. — on log et on continue avec le fallback.
                 print(
                     f"[ad-bud PDF] fetch_client {projet['client_id']} échec, "
-                    f"fallback projet/Adision : {e}",
+                    f"fallback org/neutre : {e}",
                     flush=True,
                 )
-            except HTTPException:
-                # _extract_bearer peut lever 401 si aucun JWT extractible.
-                # Ne devrait pas arriver puisque jwt_user_or_token a déjà
-                # validé en amont, mais ceinture+bretelles.
-                pass
+        # rang 3 — défaut white-label : logo de l'org du projet (jamais Adision).
+        if not chosen_logo_base64 and jwt_token:
+            chosen_logo_base64 = fetch_org_logo_base64(jwt_token, projet.get("organization_id"))
         logo_flowable = build_pdf_logo(chosen_logo_base64)
         # Logo plus grand (180pt) → colonnes latérales 190pt pour l'accommoder
         # avec une petite marge ; centre = total_w - 380 (~147pt portrait,

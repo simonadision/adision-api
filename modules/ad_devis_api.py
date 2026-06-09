@@ -90,7 +90,8 @@ def _trim_logo_whitespace(content: bytes) -> bytes:
 def _logo_flowable_for_org(org, max_width=150):
     """Image reportlab du logo entreprise depuis org.logo_url (R2 proxy stable).
     Le blanc autour du logo est rogné pour un alignement franc à la marge.
-    Fallback build_pdf_logo('') -> logo Adision si indispo."""
+    Org sans logo / fetch en échec -> build_pdf_logo('') -> "" (placeholder
+    NEUTRE, jamais Adision — décision Simon, cohérent multi-tenant)."""
     url = (org or {}).get("logo_url")
     if url:
         try:
