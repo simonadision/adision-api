@@ -432,9 +432,10 @@ def register_ad_devis_routes(get_conn):
         _inclus = (devis.get("travaux_inclus") or "").strip()
         _non_inclus = (devis.get("travaux_non_inclus") or "").strip()
 
-        # Espace au-dessus de la présentation. Aucun bloc travaux -> 120 (la page
-        # a de la place -> on centre plus bas) ; avec travaux -> 18 (sûr).
-        story.append(Spacer(1, 18 if (_inclus or _non_inclus) else 120))
+        # Espace au-dessus de la présentation. Aucun bloc travaux -> 94 (la page
+        # a de la place -> on centre, un peu plus haut que 120 : ~2 lignes de
+        # moins) ; avec travaux -> 18 (sûr, inchangé).
+        story.append(Spacer(1, 18 if (_inclus or _non_inclus) else 94))
 
         # 4. PRÉSENTATION — texte seul, sans titre de section (le corps
         #    « Madame, Monsieur… » commence directement). Rendu paragraphe par
