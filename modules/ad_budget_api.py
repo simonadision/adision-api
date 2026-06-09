@@ -3441,11 +3441,14 @@ def register_ad_budget_routes(get_conn):
             except typ_service.TypServiceError as e:
                 raise _typ_err(e)
             m = _map_typ_to_budget_cols(typ, ligne["qte"])   # re-mappe à la qté courante
+            # ⟳ EXPLICITE = acceptation user : réaligne le coût sur Ad TYP et
+            # remet l'override à FALSE (ignore volontairement le flag).
             cur.execute("""
                 UPDATE ad_budget.budget_lignes SET
                   section=%s, description=%s, unite=%s, prix_unitaire=%s,
                   heures=%s, taux_horaire=%s, sous_traitant_montant=%s,
-                  source_typ_snapshot_at=NOW(), updated_at=NOW()
+                  source_typ_snapshot_at=NOW(), prix_unitaire_override=FALSE,
+                  updated_at=NOW()
                 WHERE id=%s AND projet_id=%s RETURNING *
             """, (m["section"], m["description"], m["unite"], m["prix_unitaire"],
                   m["heures"], m["taux_horaire"], m["sous_traitant_montant"], ligne_id, projet_id))
@@ -3510,16 +3513,50 @@ def register_ad_budget_routes(get_conn):
             except typ_service.TypServiceError as e:
                 raise _typ_err(e)
             m = _map_typ_to_budget_cols(typ, qte)
-            cur.execute("""
-                UPDATE ad_budget.budget_lignes SET
-                  section=%s, description=%s, unite=%s, prix_unitaire=%s,
-                  qte=%s, heures=%s, taux_horaire=%s, sous_traitant_montant=%s,
-                  source_typ_code=%s, source_typ_snapshot_at=NOW(),
-                  item_id_ad_mat=NULL, updated_at=NOW()
-                WHERE id=%s AND projet_id=%s RETURNING *
-            """, (m["section"], m["description"], m["unite"], m["prix_unitaire"],
-                  qte, m["heures"], m["taux_horaire"], m["sous_traitant_montant"],
-                  code, ligne_id, projet_id))
+            # auto=True : re-snapshot AUTOMATIQUE déclenché par un changement de
+            # qté (pas un clic d'acceptation). Dans ce cas, on NE re-pull PAS le
+            # MAT (prix_unitaire est PAR UNITÉ et scale déjà via getRow) : on
+            # recalcule SEULEMENT la part qté-dépendante (heures MO + montant ST,
+            # stockés en total). Préserve prix_unitaire + override (Fix A+B :
+            # jamais écraser une saisie manuelle sans acceptation explicite).
+            auto = bool(data.get("auto"))
+            if auto and "prix_unitaire" in data:
+                # Saisie de coût en cours (overlay non encore sauvé) au moment du
+                # changement de qté : on la persiste + pose l'override pour la
+                # protéger (sinon elle serait perdue à la purge de l'overlay).
+                cur.execute("""
+                    UPDATE ad_budget.budget_lignes SET
+                      qte=%s, heures=%s, taux_horaire=%s, sous_traitant_montant=%s,
+                      prix_unitaire=%s, prix_unitaire_override=%s,
+                      source_typ_snapshot_at=NOW(), updated_at=NOW()
+                    WHERE id=%s AND projet_id=%s RETURNING *
+                """, (qte, m["heures"], m["taux_horaire"], m["sous_traitant_montant"],
+                      float(data.get("prix_unitaire") or 0),
+                      bool(data.get("prix_unitaire_override", True)),
+                      ligne_id, projet_id))
+            elif auto:
+                # Rescale qté pur : préserve prix_unitaire / override / section /
+                # description / unité ; ne touche que heures / taux / ST.
+                cur.execute("""
+                    UPDATE ad_budget.budget_lignes SET
+                      qte=%s, heures=%s, taux_horaire=%s, sous_traitant_montant=%s,
+                      source_typ_snapshot_at=NOW(), updated_at=NOW()
+                    WHERE id=%s AND projet_id=%s RETURNING *
+                """, (qte, m["heures"], m["taux_horaire"], m["sous_traitant_montant"],
+                      ligne_id, projet_id))
+            else:
+                # Pioche EXPLICITE (autocomplete) : re-pull complet depuis Ad TYP ;
+                # le coût vient d'Ad TYP -> override remis à FALSE.
+                cur.execute("""
+                    UPDATE ad_budget.budget_lignes SET
+                      section=%s, description=%s, unite=%s, prix_unitaire=%s,
+                      qte=%s, heures=%s, taux_horaire=%s, sous_traitant_montant=%s,
+                      source_typ_code=%s, source_typ_snapshot_at=NOW(),
+                      item_id_ad_mat=NULL, prix_unitaire_override=FALSE, updated_at=NOW()
+                    WHERE id=%s AND projet_id=%s RETURNING *
+                """, (m["section"], m["description"], m["unite"], m["prix_unitaire"],
+                      qte, m["heures"], m["taux_horaire"], m["sous_traitant_montant"],
+                      code, ligne_id, projet_id))
             row = cur.fetchone()
             conn.commit()
         except HTTPException:
@@ -3631,6 +3668,9 @@ def register_ad_budget_routes(get_conn):
             # Passerelle Ad RES → Ad BUD : lien logique vers app_central.contacts
             # (UUID, cross-DB). NULL = saisie libre / ligne déliée.
             "sous_traitant_contact_id",
+            # Flag override coût manuel : posé par le front quand l'user édite le
+            # coût à la main -> protège prix_unitaire contre le resync Ad TYP AUTO.
+            "prix_unitaire_override",
         ]:
             if field in data:
                 val = data[field]
@@ -3638,6 +3678,8 @@ def register_ad_budget_routes(get_conn):
                 # cast "" → uuid qui planterait). Délier = renvoyer null.
                 if field == "sous_traitant_contact_id":
                     val = val or None
+                elif field == "prix_unitaire_override":
+                    val = bool(val)
                 fields.append(f"{field} = %s")
                 values.append(val)
         fields.append("updated_at = NOW()")
