@@ -150,14 +150,17 @@ def register_ad_devis_routes(get_conn):
                 """
                 INSERT INTO ad_budget.devis
                   (projet_id, presentation, travaux_inclus, travaux_non_inclus,
-                   responsable_nom, responsable_email, responsable_tel,
+                   responsable_nom, titre_responsable, organisation,
+                   responsable_email, responsable_tel,
                    documents, couleur, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, NOW())
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, NOW())
                 ON CONFLICT (projet_id) DO UPDATE SET
                   presentation = EXCLUDED.presentation,
                   travaux_inclus = EXCLUDED.travaux_inclus,
                   travaux_non_inclus = EXCLUDED.travaux_non_inclus,
                   responsable_nom = EXCLUDED.responsable_nom,
+                  titre_responsable = EXCLUDED.titre_responsable,
+                  organisation = EXCLUDED.organisation,
                   responsable_email = EXCLUDED.responsable_email,
                   responsable_tel = EXCLUDED.responsable_tel,
                   documents = EXCLUDED.documents,
@@ -171,6 +174,8 @@ def register_ad_devis_routes(get_conn):
                     (data.get("travaux_inclus") or "").strip() or None,
                     (data.get("travaux_non_inclus") or "").strip() or None,
                     (data.get("responsable_nom") or "").strip() or None,
+                    (data.get("titre_responsable") or "").strip() or None,
+                    (data.get("organisation") or "").strip() or None,
                     (data.get("responsable_email") or "").strip() or None,
                     (data.get("responsable_tel") or "").strip() or None,
                     json.dumps([str(x) for x in docs]),
@@ -325,19 +330,33 @@ def register_ad_devis_routes(get_conn):
         ]))
         story.append(montant_tbl)
 
-        # 9. SIGNATURE : responsable (gauche) + entrepreneur (droite)
+        # 9. SIGNATURE : une seule colonne empilée à gauche, sans libellés
+        #    « Responsable »/« Entrepreneur ». Ordre : nom -> titre ->
+        #    organisation -> courriel -> téléphone. Organisation pré-remplie
+        #    depuis l'entrepreneur (org du projet) si non saisie.
         story.append(Spacer(1, 24))
-        resp = block("Responsable", [
-            ("", devis.get("responsable_nom") or user.get("nom") or "—"),
-            ("Courriel :", devis.get("responsable_email") or user.get("email") or "—"),
-            ("Téléphone :", devis.get("responsable_tel") or "—"),
-        ])
-        entr_sig = block("Entrepreneur", [("", entreprise.get("name") or "—")])
-        sig = Table([[resp, entr_sig]], colWidths=[doc.width / 2.0, doc.width / 2.0])
-        sig.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
+        nom_resp = devis.get("responsable_nom") or user.get("nom") or "—"
+        titre_resp = devis.get("titre_responsable")
+        org_resp = devis.get("organisation") or entreprise.get("name")
+        courriel_resp = devis.get("responsable_email") or user.get("email") or "—"
+        tel_resp = devis.get("responsable_tel") or "—"
+
+        sig_name_style = ParagraphStyle("signame", parent=small,
+                                        fontName="Helvetica-Bold", textColor=ACCENT)
+        sig_lines = [[Paragraph(esc(nom_resp), sig_name_style)]]
+        if titre_resp:
+            sig_lines.append([Paragraph(esc(titre_resp), small)])
+        if org_resp:
+            sig_lines.append([Paragraph(esc(org_resp), small)])
+        sig_lines.append([Paragraph(f"<b>Courriel :</b> {esc(courriel_resp)}", small)])
+        sig_lines.append([Paragraph(f"<b>Téléphone :</b> {esc(tel_resp)}", small)])
+        sig = Table(sig_lines, colWidths=[doc.width * 0.5])
+        sig.setStyle(TableStyle([("LEFTPADDING", (0, 0), (-1, -1), 0),
+                                 ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                                 ("TOPPADDING", (0, 0), (-1, -1), 1),
+                                 ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
                                  ("LINEABOVE", (0, 0), (0, 0), 0.5, MUTED),
-                                 ("LINEABOVE", (1, 0), (1, 0), 0.5, MUTED),
-                                 ("TOPPADDING", (0, 0), (-1, -1), 6)]))
+                                 ("TOPPADDING", (0, 0), (0, 0), 6)]))
         story.append(sig)
 
         # 10. FOOTER : « Propulsé par » + logo Ad FLO complet (wordmark +
