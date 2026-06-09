@@ -37,9 +37,17 @@ les 4 tests rapport au ROUGE (NameError). Vérifié.
 déployé** sur Railway pour chaque service (BUD, HUB, VIU, TAK, EST, CON, MAT…).
 Évite de tester pendant un build (« pushé ≠ déployé »).
 ```
-python tools/check_all_deploys.py
+python tools/check_all_deploys.py       # backends Railway
+python tools/check_vercel_deploys.py     # fronts Vercel
 ```
-Exit 1 si un service a `déployé != HEAD` ou `status != SUCCESS`.
+- `check_all_deploys.py` : exit 1 si un service Railway a `déployé != HEAD` ou
+  `status != SUCCESS`. Cible le BON service par nom (un projet peut en héberger
+  plusieurs, ex. adision-app = web/HUB + adision-est-api).
+- `check_vercel_deploys.py` : pour chaque front Vercel, commit du dernier
+  déploiement PROD READY (= servi) vs git HEAD du monorepo + état du dernier
+  build. `[BUILD]` = en cours (NE PAS tester), `[X]` ERROR = live périmé,
+  `[skip]` = build sauté (ignored-build-step, aucun fichier du front changé,
+  bénin), `[behind]` = front non réaffecté. Réutilise le token du Vercel CLI.
 
 ## Volet 4 — Hook pré-push (AUTOMATIQUE après installation)
 
