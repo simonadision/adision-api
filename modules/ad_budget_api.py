@@ -434,6 +434,72 @@ def build_pdf_logo(logo_base64: str, max_width: float = 180):
     except Exception:
         return ""
 
+def draw_adflo_footer(canvas, doc, nb=False):
+    """Footer PDF partagé : « Propulsé par » + logo Ad FLO (wordmark tricolore
+    « A d FLO » + croix), reproduit 1:1 du SVG officiel @adision/ui AdLogo
+    suffix='FLO'. SOURCE UNIQUE utilisée en onFirstPage/onLaterPages par le
+    devis (_build_devis) ET le rapport de calcul (_build_projet_report) — même
+    rendu, même logo, même texte. nb=True -> version N&B (lettres encre, croix
+    grise). Centré horizontalement, ~12 mm du bord inférieur.
+
+    Coords SVG (viewBox 300x140, y vers le BAS) -> canvas reportlab (y vers le
+    HAUT) via flip base_y + k*(SVG_H - y)."""
+    C_RED, C_GREEN, C_BLUE = (
+        colors.HexColor("#ef4444"),
+        colors.HexColor("#10b981"),
+        colors.HexColor("#1e3a8a"),
+    )
+    C_INK, C_GREY = colors.HexColor("#111827"), colors.HexColor("#6b7280")
+
+    canvas.saveState()
+    cx = doc.pagesize[0] / 2.0
+    y0 = 12 * mm                       # baseline « Propulsé par » + « A »/« d »
+    k = 0.12                           # échelle SVG -> points
+    SVG_H = 140.0
+    base_y = y0 - k * (SVG_H - 112.0)  # repère canvas pour SVG y=140
+
+    def _ty(svg_y):                    # baseline texte SVG -> canvas
+        return base_y + k * (SVG_H - svg_y)
+
+    # Largeurs pour centrer le groupe « Propulsé par » + logo.
+    prefix = "Propulsé par "
+    w_prefix = canvas.stringWidth(prefix, "Helvetica", 7)
+    fs = 76.0 * k
+    logo_w = k * 98.0 + canvas.stringWidth("FLO", "Helvetica-Bold", fs)
+    start_x = cx - (w_prefix + logo_w) / 2.0
+    lx = start_x + w_prefix            # origine x du logo
+
+    def _rect(svg_x, svg_y, w, h, col):  # rect SVG (top-left) -> canvas
+        canvas.setFillColor(col)
+        canvas.rect(lx + k * svg_x, base_y + k * (SVG_H - svg_y - h),
+                    k * w, k * h, fill=1, stroke=0)
+
+    # « Propulsé par » (gris), baseline alignée sur « A »/« d ».
+    canvas.setFont("Helvetica", 7)
+    canvas.setFillColor(C_GREY if nb else colors.HexColor("#94a3b8"))
+    canvas.drawString(start_x, y0, prefix)
+
+    col_a = col_d = col_flo = C_INK
+    col_x1 = col_x2 = col_x3 = C_GREY
+    if not nb:
+        col_a, col_d, col_flo = C_RED, C_GREEN, C_BLUE
+        col_x1, col_x2, col_x3 = C_BLUE, C_RED, C_GREEN
+
+    # Croix tricolore (translate(28,0) absorbé dans les x absolus).
+    _rect(55, 0,  6,  27, col_x1)      # barre haute (bleu)
+    _rect(61, 27, 27, 6,  col_x1)      # barre droite (bleu)
+    _rect(55, 33, 6,  27, col_x2)      # barre basse (rouge)
+    _rect(28, 27, 27, 6,  col_x3)      # barre gauche (vert)
+
+    # Wordmark « A d FLO ».
+    canvas.setFont("Helvetica-Bold", fs)
+    canvas.setFillColor(col_a);   canvas.drawString(lx + k * 0.0,  _ty(112), "A")
+    canvas.setFillColor(col_d);   canvas.drawString(lx + k * 52.0, _ty(112), "d")
+    canvas.setFillColor(col_flo); canvas.drawString(lx + k * 98.0, _ty(130), "FLO")
+
+    canvas.restoreState()
+
+
 def fetch_org_logo_base64(jwt_token, organization_id):
     """Logo de l'org (HUB Info entreprise / R2 proxy stable) en base64, ou "" si
     l'org n'a pas de logo. Sert de DÉFAUT white-label : le PDF porte le logo de
@@ -3030,19 +3096,11 @@ def register_ad_budget_routes(get_conn):
             story.append(Spacer(1, 10))
             story.append(Paragraph(heures_para, ss["Normal"]))
 
-        # Sprint DT-56 D5 — footer "Propulsé par Adision" sur chaque page
-        # (cohérent avec PoweredByAdision sidebar D4). Texte gris pâle centré
-        # à 10mm du bord inférieur, fontSize 7 pour rester discret.
+        # Footer « Propulsé par Ad FLO » + logo, IDENTIQUE au devis (source
+        # unique draw_adflo_footer). Remplace l'ancien texte « Propulsé par
+        # Adision ». Rapport toujours en couleur -> nb=False.
         def _draw_pdf_footer(canvas, _doc):
-            canvas.saveState()
-            canvas.setFont("Helvetica", 7)
-            canvas.setFillColor(colors.HexColor("#94a3b8"))
-            canvas.drawCentredString(
-                _doc.pagesize[0] / 2.0,
-                10 * mm,
-                "Propulsé par Adision",
-            )
-            canvas.restoreState()
+            draw_adflo_footer(canvas, _doc, nb=False)
 
         doc.build(story, onFirstPage=_draw_pdf_footer, onLaterPages=_draw_pdf_footer)
         buf.seek(0)
