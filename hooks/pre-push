@@ -1,0 +1,13 @@
+#!/bin/sh
+# Hook pré-push Ad BUD (adision-api) — bloque le push si un chemin PDF casse.
+# Installer une fois :  git config core.hooksPath hooks
+#
+# Tests des chemins critiques : rapport de calcul (sans/avec client/vide),
+# devis, snapshot, émission HUB, + garde anti-régression du 500 NameError.
+set -e
+echo "[pre-push] Tests PDF critiques (rapport/devis/émission)…"
+if ! python tests/test_pdf_critical.py; then
+  echo "[pre-push] ÉCHEC des tests PDF — push BLOQUÉ." >&2
+  exit 1
+fi
+echo "[pre-push] OK — chemins critiques verts."
