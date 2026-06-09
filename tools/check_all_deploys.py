@@ -37,7 +37,13 @@ def _head(cwd):
     return _run(["git", "rev-parse", "HEAD"], cwd).strip()
 
 
-def _deployed(cwd):
+def _deployed(cwd, repo_name):
+    """Commit déployé du BON service. Un projet Railway peut héberger PLUSIEURS
+    services (ex. adision-app = web/HUB + adision-est-api + Postgres) ; comparer
+    au « plus récent tous services confondus » donne un faux écart. On cible :
+      1. le service dont le nom == repo_name (ex. 'adision-est-api') ;
+      2. sinon, l'unique service applicatif (hors Postgres) ;
+    Retourne (commit, createdAt, status, serviceName) ou None."""
     raw = _run(["railway", "status", "--json"], cwd)
     if not raw.strip():
         return None
@@ -45,15 +51,33 @@ def _deployed(cwd):
         d = json.loads(raw)
     except json.JSONDecodeError:
         return None
-    best = None
+    # Dernier déploiement par service (hors Postgres).
+    by_service = {}
     for env in d.get("environments", {}).get("edges", []):
+        if env["node"].get("name") != "production":
+            continue
         for si in env["node"].get("serviceInstances", {}).get("edges", []):
+            sname = si["node"].get("serviceName", "")
+            if sname.lower() in ("postgres", "postgresql"):
+                continue
             for dep in si["node"].get("activeDeployments", []):
                 ch = (dep.get("meta") or {}).get("commitHash")
                 ca = dep.get("createdAt") or ""
-                if ch and (best is None or ca > best[1]):
-                    best = (ch, ca, dep.get("status"))
-    return best
+                if not ch:
+                    continue
+                cur = by_service.get(sname)
+                if cur is None or ca > cur[1]:
+                    by_service[sname] = (ch, ca, dep.get("status"), sname)
+    if not by_service:
+        return None
+    if repo_name in by_service:                 # 1. match exact du nom
+        return by_service[repo_name]
+    apps = list(by_service.values())
+    if len(apps) == 1:                          # 2. unique service applicatif
+        return apps[0]
+    # Plusieurs services sans match de nom : ambigu -> on prend le plus récent
+    # mais on le signalera (serviceName != repo_name visible dans la sortie).
+    return max(apps, key=lambda t: t[1])
 
 
 def main():
@@ -69,14 +93,17 @@ def main():
         head = _head(cwd)
         if not head:
             continue
-        dep = _deployed(cwd)
+        dep = _deployed(cwd, name)
         if dep is None:
             print(f"{name:18} {head[:8]:10} {'n/a':10} {'n/a':12} (non lié Railway)")
             continue
         checked += 1
-        commit, _ca, status = dep
+        commit, _ca, status, sname = dep
         ok = (head[:12].startswith(commit[:12]) or commit[:12].startswith(head[:12])) and status == "SUCCESS"
         verdict = "[OK]" if ok else "[X] pas à jour"
+        # Service ciblé différent du repo -> on l'affiche (lien Railway à vérifier).
+        if sname and sname != name:
+            verdict += f" (svc={sname})"
         if not ok:
             stale += 1
         print(f"{name:18} {head[:8]:10} {commit[:8]:10} {str(status):12} {verdict}")
