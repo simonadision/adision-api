@@ -243,14 +243,15 @@ def register_ad_devis_routes(get_conn):
         authorization: Optional[str] = Header(None),
         montant: float = 0,
         couleur: str = "adision",
+        revision_choice: Optional[str] = None,
     ):
         """Émet la PROPOSITION/DEVIS vers l'Espace Rapports HUB
         (report_type='proposition_devis', montant_avant_taxes = le quantitatif).
-        Marque la révision courante émise (emitted_at_current_revision=TRUE)."""
+        Mécanique de révision (option A) identique au rapport : si la révision a
+        déjà été émise ET que le budget a changé depuis, on demande à l'user
+        (choice_required) ; 'new' bumpe, 'correction' remplace. dirty -> FALSE."""
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
         jwt_token = _extract_bearer(authorization, None)
-        buf, snapshot = _build_devis(projet_id, montant, couleur, jwt_token)
-        pdf_bytes = buf.getvalue()
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         try:
@@ -265,10 +266,36 @@ def register_ad_devis_routes(get_conn):
         if not hub_pid:
             raise HTTPException(status_code=400,
                                 detail="Projet non lié à un projet HUB")
+
+        # Mécanique de révision (option A) — choix user si budget changé.
+        rev_no = projet.get("revision_no", 0)
+        rev_label = projet.get("revision_label") or "Originale"
+        needs_choice = bool(projet.get("emitted_at_current_revision")
+                            and projet.get("budget_modifie_depuis_emission"))
+        if needs_choice and revision_choice not in ("new", "correction"):
+            return {"choice_required": True, "current_label": rev_label,
+                    "next_label": f"R.{rev_no + 1}"}
+        if needs_choice and revision_choice == "new":
+            rev_no = rev_no + 1
+            rev_label = f"R.{rev_no}"
+            conn = get_conn()
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    "UPDATE ad_budget.projets SET revision_no = %s, "
+                    "revision_label = %s, updated_at = NOW() WHERE id = %s",
+                    (rev_no, rev_label, projet_id))
+                conn.commit()
+            finally:
+                cur.close()
+                conn.close()
+
+        buf, snapshot = _build_devis(projet_id, montant, couleur, jwt_token)
+        pdf_bytes = buf.getvalue()
         fields = {
             "report_type": "proposition_devis",
-            "revision_no": projet.get("revision_no", 0),
-            "revision_label": projet.get("revision_label") or "Originale",
+            "revision_no": rev_no,
+            "revision_label": rev_label,
             "montant_avant_taxes": snapshot["totaux"]["montant_avant_taxes"],
             "montant_apres_taxes": snapshot["totaux"]["montant_apres_taxes"],
             "source_ref": projet_id,
@@ -283,7 +310,8 @@ def register_ad_devis_routes(get_conn):
         cur = conn.cursor()
         try:
             cur.execute("UPDATE ad_budget.projets SET emitted_at_current_revision = TRUE, "
-                        "updated_at = NOW() WHERE id = %s", (projet_id,))
+                        "budget_modifie_depuis_emission = FALSE, updated_at = NOW() "
+                        "WHERE id = %s", (projet_id,))
             conn.commit()
         finally:
             cur.close()
@@ -291,8 +319,8 @@ def register_ad_devis_routes(get_conn):
         return {
             "emitted": True,
             "report_type": "proposition_devis",
-            "revision_no": projet.get("revision_no", 0),
-            "revision_label": projet.get("revision_label") or "Originale",
+            "revision_no": rev_no,
+            "revision_label": rev_label,
             "hub": result,
         }
 
