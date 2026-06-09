@@ -426,8 +426,15 @@ def register_ad_devis_routes(get_conn):
                                  ("RIGHTPADDING", (0, 0), (0, 0), 12)]))
         story.append(two)
 
-        # Espace net entre le bloc entrepreneur/client et le texte.
-        story.append(Spacer(1, 18))
+        # Travaux inclus/non inclus calculés TÔT : pilotent l'espace de centrage
+        # du bloc présentation (grand si aucun travaux pour descendre/centrer le
+        # paragraphe ; modéré sinon pour ne pas pousser le contenu hors page).
+        _inclus = (devis.get("travaux_inclus") or "").strip()
+        _non_inclus = (devis.get("travaux_non_inclus") or "").strip()
+
+        # Espace au-dessus de la présentation. Aucun bloc travaux -> 120 (la page
+        # a de la place -> on centre plus bas) ; avec travaux -> 18 (sûr).
+        story.append(Spacer(1, 18 if (_inclus or _non_inclus) else 120))
 
         # 4. PRÉSENTATION — texte seul, sans titre de section (le corps
         #    « Madame, Monsieur… » commence directement). Rendu paragraphe par
@@ -451,9 +458,7 @@ def register_ad_devis_routes(get_conn):
         h_non_inclus = ParagraphStyle("h_non_inclus", parent=h,
                                       textColor=h.textColor if nb else colors.HexColor("#ef4444"))
         # Chaque section ne s'affiche QUE si elle a du contenu (titre + bloc),
-        # indépendamment l'une de l'autre.
-        _inclus = (devis.get("travaux_inclus") or "").strip()
-        _non_inclus = (devis.get("travaux_non_inclus") or "").strip()
+        # indépendamment l'une de l'autre. (_inclus/_non_inclus calculés plus haut.)
         if _inclus:
             story.append(Paragraph("TRAVAUX INCLUS", h_inclus))
             story.append(para_multiline(_inclus))
