@@ -321,9 +321,11 @@ def register_ad_devis_routes(get_conn):
                                  ("RIGHTPADDING", (0, 0), (0, 0), 12)]))
         story.append(two)
 
-        # 4. PRÉSENTATION
-        story.append(Paragraph("PRÉSENTATION DE LA PROPOSITION", h))
+        # 4. PRÉSENTATION — texte seul, sans titre de section (le corps
+        #    « Madame, Monsieur… » commence directement). Espace d'aération
+        #    avant TRAVAUX INCLUS.
         story.append(para_multiline(devis.get("presentation") or "—"))
+        story.append(Spacer(1, 22))
 
         # 6 + 7 : TRAVAUX INCLUS / NON INCLUS
         story.append(Paragraph("TRAVAUX INCLUS", h))
