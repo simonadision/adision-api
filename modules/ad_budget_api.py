@@ -2284,8 +2284,64 @@ def register_ad_budget_routes(get_conn):
         hauteur_cloisons: float = 0,
         longueur_cloisons: float = 0,
     ):
-        # PHASE 3A — authentification + autorisation (lecture : PDF = lecture).
+        # PHASE 3A — auth (lecture). Délègue au builder partagé qui produit le
+        # PDF ET le snapshot JSON dans la MÊME passe ; la route ne renvoie que
+        # le PDF (rendu byte-identique — l'émission Espace Rapports réutilise
+        # _build_projet_report pour le PDF + snapshot).
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        buf, _snapshot = _build_projet_report(
+            projet_id, actifs_seulement, avec_prix, sections, colonnes,
+            sous_totaux, admin_profits, avec_sous_total_avant_taxes, avec_tps,
+            avec_tvq, orientation, mobilisation, surface_plancher,
+            hauteur_cloisons, longueur_cloisons,
+        )
+        safe_nom = "".join(c if c.isalnum() or c in "-_ " else "_" for c in (_snapshot["project"]["nom"] or "projet")).strip() or "projet"
+        return StreamingResponse(
+            buf,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{safe_nom}.pdf"'},
+        )
+
+    @router.get("/projets/{projet_id}/report-snapshot")
+    def export_projet_report_snapshot(
+        projet_id: int,
+        user=Depends(jwt_user_or_token),
+        authorization: Optional[str] = Header(None),
+        token: Optional[str] = Query(None),
+        actifs_seulement: bool = True,
+        avec_tps: bool = True,
+        avec_tvq: bool = True,
+    ):
+        # Snapshot JSON seul (inspection + preuve poste-par-poste) — calculé par
+        # la MÊME passe que le PDF, donc nombres identiques au rapport.
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        _buf, snapshot = _build_projet_report(
+            projet_id, actifs_seulement, True, "", "", None, None, True,
+            avec_tps, avec_tvq, "portrait", 0, 0, 0, 0,
+        )
+        return snapshot
+
+    def _build_projet_report(
+        projet_id,
+        actifs_seulement=True,
+        avec_prix=True,
+        sections="",
+        colonnes="",
+        sous_totaux=None,
+        admin_profits=None,
+        avec_sous_total_avant_taxes=True,
+        avec_tps=True,
+        avec_tvq=True,
+        orientation="portrait",
+        mobilisation=0,
+        surface_plancher=0,
+        hauteur_cloisons=0,
+        longueur_cloisons=0,
+    ):
+        """Construit le PDF rapport ET le snapshot JSON dans la MÊME passe.
+        Retourne (buf: BytesIO, snapshot: dict). Le rendu PDF est INCHANGÉ
+        (rétrocompat byte-identique — preuve hash). L'auth est faite par
+        l'appelant (route)."""
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         cur.execute("SELECT * FROM ad_budget.projets WHERE id = %s", (projet_id,))
@@ -2689,6 +2745,11 @@ def register_ad_budget_routes(get_conn):
         # somme directe, pas de conversion ; l'unité « sem. » est cosmétique).
         mo_h = 0.0
         contremaitre_h = 0.0
+        # Sous-totaux GLOBAUX par section (toutes lignes, groupées ou non) pour
+        # le snapshot : sous_total_mat/mo/st. Exacts ici, arrondis à la sortie.
+        snap_mat = 0.0
+        snap_mo = 0.0
+        snap_st = 0.0
 
         # Mode arrondi au dollar (option projet). R() arrondit au dollar le plus
         # près en mode arrondi, sinon identité (rétrocompat exacte). Appliqué au
@@ -2730,6 +2791,9 @@ def register_ad_budget_routes(get_conn):
                 st_st = st_montant * (1 + ajst / 100)
                 # Sous-total ligne = somme des 3 sous-totaux par section.
                 st = st_mat + st_mo + st_st
+                snap_mat += st_mat
+                snap_mo += st_mo
+                snap_st += st_st
                 # tot_real = total brut. ajustement_pct historique reste appliqué
                 # pour rétro-compat des projets antérieurs à la refonte ; sera
                 # à 0 sur les nouvelles saisies.
@@ -2794,6 +2858,15 @@ def register_ad_budget_routes(get_conn):
         table.setStyle(TableStyle(table_style_cmds))
         story.append(table)
 
+        # Valeurs financières du snapshot — init à 0 (cas avec_prix=False) ;
+        # le bloc ci-dessous les renseigne quand avec_prix. group_ap = A&P par
+        # groupe (mêmes nombres que le bloc totaux affiché).
+        real_sub_avant_taxes = 0.0
+        tps_amount = 0.0
+        tvq_amount = 0.0
+        total_general = 0.0
+        group_ap = {}
+
         # ── Totals block (per-regroupement subtotals + admin&profit + taxes + grand total) ──
         if avec_prix:
             totals_rows = []
@@ -2808,6 +2881,7 @@ def register_ad_budget_routes(get_conn):
                     continue
                 ap = R(_group_admin_profit(projet, pct_field, sub,
                                            group_sub_mat[key], group_sub_mo[key], group_sub_st[key]))
+                group_ap[key] = ap
                 real_sub_avant_taxes += sub + ap
 
             # 2. Affichage des lignes par regroupement (filtré par selected_st / selected_ap)
@@ -2934,13 +3008,70 @@ def register_ad_budget_routes(get_conn):
         doc.build(story, onFirstPage=_draw_pdf_footer, onLaterPages=_draw_pdf_footer)
         buf.seek(0)
 
-        safe_nom = "".join(c if c.isalnum() or c in "-_ " else "_" for c in (projet["nom"] or "projet")).strip() or "projet"
-        filename = f"{safe_nom}.pdf"
-        return StreamingResponse(
-            buf,
-            media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        )
+        # ── Snapshot JSON (MÊME passe que le PDF) — chaque poste vient des
+        #    variables qui alimentent le rapport, donc identique au rendu. ──
+        groups_detail = []
+        ap_mode = "simple"
+        for key, label, pct_field, _ in BUDGET_GROUPS_PDF:
+            sub = group_subtotals.get(key, 0.0)
+            if sub <= 0:
+                continue
+            decomposed = any(projet.get(f"{pct_field}_{c}") is not None for c in ("mat", "mo", "st"))
+            pct_disc = float(projet.get(pct_field) or 0)
+            if decomposed:
+                ap_mode = "categorie"
+            elif pct_disc and ap_mode != "categorie":
+                ap_mode = "discipline"
+            gd = {
+                "key": key,
+                "label": label,
+                "sous_total": round(sub, 2),
+                "admin_profit": round(group_ap.get(key, 0.0), 2),
+                "pct_discipline": pct_disc,
+                "decomposed": decomposed,
+            }
+            if decomposed:
+                gd["pct_categorie"] = {
+                    c: (float(projet[f"{pct_field}_{c}"]) if projet.get(f"{pct_field}_{c}") is not None else None)
+                    for c in ("mat", "mo", "st")
+                }
+            groups_detail.append(gd)
+
+        snapshot = {
+            "schema_version": 1,
+            "report_type": "calcul_quantitatif",
+            "project": {
+                "central_project_id": projet.get("ad_hub_project_id"),
+                "nom": projet.get("nom"),
+            },
+            "revision": {
+                "no": projet.get("revision_no", 0),
+                "label": projet.get("revision_label") or "Originale",
+            },
+            "options": {"arrondi_dollar": bool(projet.get("arrondi_dollar"))},
+            "totaux": {
+                "sous_total_mat": round(R(snap_mat), 2),
+                "sous_total_mo": round(R(snap_mo), 2),
+                "sous_total_st": round(R(snap_st), 2),
+                "montant_avant_taxes": round(real_sub_avant_taxes, 2),
+                "tps": round(tps_amount, 2),
+                "tvq": round(tvq_amount, 2),
+                "montant_apres_taxes": round(total_general, 2),
+            },
+            "heures": {
+                "mo": round(mo_h, 2),
+                "contremaitre": round(contremaitre_h, 2),
+                "total": round(mo_h + contremaitre_h, 2),
+            },
+            "admin_profit": {"mode": ap_mode, "details": groups_detail},
+            "regroupements_csi": [
+                {"key": g["key"], "label": g["label"],
+                 "sous_total": g["sous_total"], "admin_profit": g["admin_profit"]}
+                for g in groups_detail
+            ],
+            "devis": {"destinataire_contact": None, "travaux_inclus": [], "travaux_non_inclus": []},
+        }
+        return buf, snapshot
 
     # ══════════════════════════════════════════════════════════
     # SNAPSHOTS (Sprint B - app_ana.project_snapshots)
