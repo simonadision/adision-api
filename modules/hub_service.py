@@ -229,3 +229,36 @@ def fetch_project_documents(jwt_token: str, project_id: int) -> Optional[dict]:
         if e.status_code == 404:
             return None
         raise
+
+
+def post_report(jwt_token: str, hub_project_id: int, pdf_bytes: bytes,
+                fields: dict, timeout_s: float = 30.0) -> Optional[dict]:
+    """Émet un rapport vers l'Espace Rapports HUB : POST multipart (PDF + form)
+    sur /api/hub/projects/{hub_project_id}/reports (Sprint Espace Rapports).
+
+    `fields` : champs form (report_type, revision_no, revision_label,
+    montant_avant_taxes, montant_apres_taxes, gabarit_id, gabarit_nom,
+    source_ref, generated_by, snapshot_data). snapshot_data DOIT déjà être une
+    chaîne JSON. None -> chaîne vide (le HUB applique ses défauts).
+
+    Timeout plus long que les GET (upload PDF + écriture R2 côté HUB). Lève
+    HubServiceError sur 4xx/5xx/réseau (le caller décide du rollback applicatif).
+    """
+    url = f"{HUB_API_URL}/api/hub/projects/{hub_project_id}/reports"
+    headers = {"Authorization": f"Bearer {jwt_token}"}
+    files = {"pdf": ("rapport.pdf", pdf_bytes, "application/pdf")}
+    data = {k: ("" if v is None else str(v)) for k, v in fields.items()}
+    try:
+        with httpx.Client(timeout=timeout_s) as client:
+            r = client.post(url, headers=headers, files=files, data=data)
+    except httpx.RequestError as e:
+        logger.error("hub_service post_report network error: %s -> %s", url, e)
+        raise HubServiceError(None, f"Network error: {e}") from e
+    if r.status_code >= 400:
+        try:
+            detail = r.json().get("detail", r.text[:200])
+        except Exception:  # noqa: BLE001
+            detail = r.text[:200]
+        logger.error("hub_service post_report %s -> %s : %s", url, r.status_code, detail)
+        raise HubServiceError(r.status_code, str(detail))
+    return r.json() if r.content else None

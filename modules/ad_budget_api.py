@@ -1823,6 +1823,11 @@ def register_ad_budget_routes(get_conn):
         conn.commit()
         cur.close()
         conn.close()
+        # Bump de révision UNIQUEMENT si un champ affectant le snapshot/montant a
+        # changé (% A&P, mode A&P, arrondi, params de quantités). Les métadonnées
+        # (nom, client, statut, notes…) ne bumpent pas.
+        if set(data) & SNAPSHOT_AFFECTING_FIELDS:
+            _bump_revision_if_emitted(projet_id)
         return updated
 
     @router.delete("/projets/{projet_id}")
@@ -3074,6 +3079,121 @@ def register_ad_budget_routes(get_conn):
         return buf, snapshot
 
     # ══════════════════════════════════════════════════════════
+    # ESPACE RAPPORTS — émission vers le HUB + mécanique de révision
+    # ══════════════════════════════════════════════════════════
+    # Champs projet qui affectent le SNAPSHOT/MONTANT -> une mutation de ces
+    # champs grave la révision suivante (si déjà émise). Le cosmétique / les
+    # métadonnées (nom, client, notes, largeur de colonnes…) n'y sont PAS.
+    SNAPSHOT_AFFECTING_FIELDS = (
+        {f"pct_admin_{g}" for g in ("conditions", "architecture", "mecanique", "excavation")}
+        | {f"pct_admin_{g}_{c}"
+           for g in ("conditions", "architecture", "mecanique", "excavation")
+           for c in ("mat", "mo", "st")}
+        | {"arrondi_dollar", "mobilisation", "surface_plancher",
+           "hauteur_cloisons", "longueur_cloisons"}
+    )
+
+    def _bump_revision_if_emitted(projet_id):
+        """Grave la révision suivante SI la courante a déjà été émise
+        (emitted_at_current_revision=TRUE) : revision_no++, label par défaut
+        recalculé ('R.n'), emitted=FALSE. No-op sinon — mutations libres tant
+        que rien n'est émis, et un seul bump par cycle d'émission. Critère
+        Simon : appelé uniquement sur les mutations qui changent snapshot_data
+        ou le montant ; jamais sur le cosmétique/UI."""
+        conn = get_conn()
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                """
+                UPDATE ad_budget.projets
+                   SET revision_no = revision_no + 1,
+                       revision_label = 'R.' || (revision_no + 1),
+                       emitted_at_current_revision = FALSE,
+                       updated_at = NOW()
+                 WHERE id = %s AND emitted_at_current_revision = TRUE
+                """,
+                (projet_id,),
+            )
+            conn.commit()
+        except Exception:  # noqa: BLE001
+            conn.rollback()
+        finally:
+            cur.close()
+            conn.close()
+
+    @router.post("/projets/{projet_id}/emit-report")
+    def emit_report_to_hub(
+        projet_id: int,
+        user=Depends(jwt_user),
+        authorization: Optional[str] = Header(None),
+        avec_tps: bool = True,
+        avec_tvq: bool = True,
+        gabarit_id: Optional[int] = None,
+        gabarit_nom: Optional[str] = None,
+    ):
+        """Émet le RAPPORT DE CALCUL (quantitatif) vers l'Espace Rapports HUB :
+        PDF + snapshot (même passe) -> POST multipart HUB -> marque la révision
+        courante émise (emitted_at_current_revision=TRUE). Le PDF poussé est
+        byte-identique à l'aperçu (même builder _build_projet_report)."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute("SELECT * FROM ad_budget.projets WHERE id = %s", (projet_id,))
+            projet = cur.fetchone()
+        finally:
+            cur.close()
+            conn.close()
+        if not projet:
+            raise HTTPException(status_code=404, detail="Projet introuvable")
+        hub_pid = projet.get("ad_hub_project_id")
+        if not hub_pid:
+            raise HTTPException(status_code=400,
+                                detail="Projet non lié à un projet HUB (ad_hub_project_id manquant)")
+
+        buf, snapshot = _build_projet_report(
+            projet_id, True, True, "", "", None, None, True, avec_tps, avec_tvq,
+            "portrait", 0, 0, 0, 0,
+        )
+        pdf_bytes = buf.getvalue()
+
+        jwt_token = _extract_bearer(authorization, None)
+        fields = {
+            "report_type": "calcul_quantitatif",
+            "revision_no": projet.get("revision_no", 0),
+            "revision_label": projet.get("revision_label") or "Originale",
+            "montant_avant_taxes": snapshot["totaux"]["montant_avant_taxes"],
+            "montant_apres_taxes": snapshot["totaux"]["montant_apres_taxes"],
+            "gabarit_id": gabarit_id,
+            "gabarit_nom": gabarit_nom,
+            "source_ref": projet_id,
+            "generated_by": user.get("id"),
+            "snapshot_data": json.dumps(snapshot, default=str),
+        }
+        try:
+            result = hub_service.post_report(jwt_token, int(hub_pid), pdf_bytes, fields)
+        except hub_service.HubServiceError as e:
+            raise HTTPException(status_code=502, detail=f"Échec émission HUB : {e.detail}")
+
+        conn = get_conn()
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "UPDATE ad_budget.projets SET emitted_at_current_revision = TRUE, "
+                "updated_at = NOW() WHERE id = %s", (projet_id,))
+            conn.commit()
+        finally:
+            cur.close()
+            conn.close()
+        return {
+            "emitted": True,
+            "report_type": "calcul_quantitatif",
+            "revision_no": projet.get("revision_no", 0),
+            "revision_label": projet.get("revision_label") or "Originale",
+            "hub": result,
+        }
+
+    # ══════════════════════════════════════════════════════════
     # SNAPSHOTS (Sprint B - app_ana.project_snapshots)
     # ══════════════════════════════════════════════════════════
     # Colonnes retournées par défaut par les endpoints snapshots ; on omet
@@ -3228,6 +3348,7 @@ def register_ad_budget_routes(get_conn):
         conn.commit()
         cur.close()
         conn.close()
+        _bump_revision_if_emitted(projet_id)  # ajout de ligne -> snapshot
         return {"status": "created", "ligne": row}
 
     # ─── Pont Ad TYP → Ad BUD (étape 1) — lecture cross-service + snapshot ───
@@ -3284,6 +3405,7 @@ def register_ad_budget_routes(get_conn):
             conn.commit()
         finally:
             cur.close(); conn.close()
+        _bump_revision_if_emitted(projet_id)  # ajout depuis Ad TYP -> snapshot
         return {"status": "created", "ligne": row, "mo_flat": m["mo_flat"]}
 
     @router.post("/projets/{projet_id}/lignes/{ligne_id}/refresh-typ")
@@ -3330,6 +3452,7 @@ def register_ad_budget_routes(get_conn):
             conn.rollback(); raise
         finally:
             cur.close(); conn.close()
+        _bump_revision_if_emitted(projet_id)  # re-tarif Ad TYP -> snapshot
         return {"status": "refreshed", "ligne": row, "mo_flat": m["mo_flat"]}
 
     @router.post("/projets/{projet_id}/lignes/{ligne_id}/apply-typ")
@@ -3400,6 +3523,7 @@ def register_ad_budget_routes(get_conn):
             conn.rollback(); raise
         finally:
             cur.close(); conn.close()
+        _bump_revision_if_emitted(projet_id)  # apply Ad TYP sur ligne -> snapshot
         return {"status": "applied", "ligne": row, "mo_flat": m["mo_flat"]}
 
     @router.post("/projets/{projet_id}/lignes/import")
@@ -3454,6 +3578,8 @@ def register_ad_budget_routes(get_conn):
         conn.commit()
         cur.close()
         conn.close()
+        if inserted:
+            _bump_revision_if_emitted(projet_id)  # import de lignes -> snapshot
         return {"status": "imported", "count": inserted}
 
     # Valeurs autorisées pour sous_traitant_type. None / "" = vide.
@@ -3524,6 +3650,7 @@ def register_ad_budget_routes(get_conn):
         conn.commit()
         cur.close()
         conn.close()
+        _bump_revision_if_emitted(projet_id)  # mutation de ligne -> snapshot
         return {"status": "updated"}
 
     @router.patch("/projets/{projet_id}/lignes/{ligne_id}")
@@ -3591,6 +3718,7 @@ def register_ad_budget_routes(get_conn):
         conn.commit()
         cur.close()
         conn.close()
+        _bump_revision_if_emitted(projet_id)  # suppression de ligne -> snapshot
         return {"status": "deleted"}
 
     @router.get("/projets/{projet_id}/total")
