@@ -7,6 +7,10 @@ sqlalchemy
 pandas
 openpyxl
 reportlab
+# Pillow : rognage du blanc autour du logo entreprise dans le devis
+# (modules/ad_devis_api.py:_trim_logo_whitespace). Déjà tiré transitivement
+# par reportlab pour l'embarquage PNG, explicité ici car on l'importe.
+pillow
 pyjwt
 # Sprint C1 — client HTTP cross-service Ad BUD → Ad HUB (modules/hub_service.py).
 # Aligné sur Ad VIU qui utilise déjà httpx>=0.27 pour son propre hub_service.

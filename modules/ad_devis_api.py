@@ -61,8 +61,34 @@ def _flatten_doc_names(tree) -> list:
     return out
 
 
+def _trim_logo_whitespace(content: bytes) -> bytes:
+    """Rogne la marge blanche/transparente autour du logo. Sans ça, le blanc
+    INTERNE du fichier décale le visuel vs le texte aligné à la marge (mesuré :
+    le logo Contracta a ~16px de blanc à gauche -> ~10pt de décalage dans le
+    PDF). Best-effort : retourne l'original si PIL absent ou crop vide/échec.
+    RGBA/LA -> bbox du contenu opaque ; sinon -> bbox du contenu non blanc."""
+    try:
+        from PIL import Image as PILImage, ImageChops
+        im = PILImage.open(io.BytesIO(content))
+        if im.mode in ("RGBA", "LA"):
+            bbox = im.split()[-1].getbbox()
+        else:
+            rgb = im.convert("RGB")
+            bg = PILImage.new("RGB", im.size, (255, 255, 255))
+            bbox = ImageChops.difference(rgb, bg).getbbox()
+        if not bbox:
+            return content
+        out = io.BytesIO()
+        im.crop(bbox).save(out, format="PNG")
+        return out.getvalue()
+    except Exception as e:  # noqa: BLE001
+        print(f"[devis] trim logo échec: {e}", flush=True)
+        return content
+
+
 def _logo_flowable_for_org(org, max_width=150):
     """Image reportlab du logo entreprise depuis org.logo_url (R2 proxy stable).
+    Le blanc autour du logo est rogné pour un alignement franc à la marge.
     Fallback build_pdf_logo('') -> logo Adision si indispo."""
     url = (org or {}).get("logo_url")
     if url:
@@ -70,7 +96,8 @@ def _logo_flowable_for_org(org, max_width=150):
             r = httpx.get(url, timeout=10.0)
             if r.status_code == 200 and r.content:
                 import base64
-                return build_pdf_logo(base64.b64encode(r.content).decode("ascii"), max_width=max_width)
+                content = _trim_logo_whitespace(r.content)
+                return build_pdf_logo(base64.b64encode(content).decode("ascii"), max_width=max_width)
         except Exception as e:  # noqa: BLE001
             print(f"[devis] logo org fetch échec: {e}", flush=True)
     return build_pdf_logo("", max_width=max_width)
@@ -250,8 +277,10 @@ def register_ad_devis_routes(get_conn):
         logo = _logo_flowable_for_org(entreprise, max_width=150)
         if logo is not None and not isinstance(logo, str):
             logo.hAlign = "LEFT"
+        # alignment=0 (LEFT) : le titre démarre au même x que le bloc CLIENT
+        # en dessous (début de la colonne droite, x mesuré = 306) — choix Simon.
         title_para = Paragraph("PROPOSITION / DEVIS", ParagraphStyle(
-            "t", parent=ss["Normal"], fontSize=20, leading=24, alignment=2,
+            "t", parent=ss["Normal"], fontSize=20, leading=24, alignment=0,
             textColor=ACCENT, fontName="Helvetica-Bold"))
         head = Table([[logo or "", title_para]], colWidths=[doc.width / 2.0, doc.width / 2.0])
         head.setStyle(TableStyle([
