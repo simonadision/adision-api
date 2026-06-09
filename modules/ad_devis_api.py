@@ -338,10 +338,17 @@ def register_ad_devis_routes(get_conn):
                 story.append(Paragraph(esc(para).replace("\n", "<br/>"), pres_style))
         story.append(Spacer(1, 22))
 
-        # 6 + 7 : TRAVAUX INCLUS / NON INCLUS
-        story.append(Paragraph("TRAVAUX INCLUS", h))
+        # 6 + 7 : TRAVAUX INCLUS (titre vert) / NON INCLUS (titre rouge).
+        #    SEULS les titres sont colorés, et uniquement en mode couleur ;
+        #    en N&B ils restent neutres (couleur ACCENT = #111827). Le corps
+        #    de texte reste en `body` (noir) dans tous les cas.
+        h_inclus = ParagraphStyle("h_inclus", parent=h,
+                                  textColor=h.textColor if nb else colors.HexColor("#10b981"))
+        h_non_inclus = ParagraphStyle("h_non_inclus", parent=h,
+                                      textColor=h.textColor if nb else colors.HexColor("#ef4444"))
+        story.append(Paragraph("TRAVAUX INCLUS", h_inclus))
         story.append(para_multiline(devis.get("travaux_inclus") or "—"))
-        story.append(Paragraph("TRAVAUX NON INCLUS", h))
+        story.append(Paragraph("TRAVAUX NON INCLUS", h_non_inclus))
         story.append(para_multiline(devis.get("travaux_non_inclus") or "—"))
 
         # 8. MONTANT (avant taxes)
