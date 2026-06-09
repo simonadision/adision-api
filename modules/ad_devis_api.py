@@ -25,7 +25,7 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm, mm
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from modules import hub_service
 from modules.auth_jwt import make_jwt_deps, _extract_bearer
@@ -296,20 +296,6 @@ def register_ad_devis_routes(get_conn):
         story.append(Paragraph("PRÉSENTATION DE LA PROPOSITION", h))
         story.append(para_multiline(devis.get("presentation") or "—"))
 
-        # 5. DOCUMENTS CONSULTÉS
-        docs = devis.get("documents") or []
-        if isinstance(docs, str):
-            try:
-                docs = json.loads(docs)
-            except Exception:  # noqa: BLE001
-                docs = []
-        story.append(Paragraph("DOCUMENTS CONSULTÉS", h))
-        if docs:
-            for nm in docs:
-                story.append(Paragraph(f"• {esc(nm)}", body))
-        else:
-            story.append(Paragraph("—", body))
-
         # 6 + 7 : TRAVAUX INCLUS / NON INCLUS
         story.append(Paragraph("TRAVAUX INCLUS", h))
         story.append(para_multiline(devis.get("travaux_inclus") or "—"))
@@ -335,6 +321,24 @@ def register_ad_devis_routes(get_conn):
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ]))
         story.append(montant_tbl)
+
+        # ── SAUT DE PAGE FORCÉ : fin page 1 (montant), début page 2.
+        story.append(PageBreak())
+
+        # 7bis. DOCUMENTS CONSULTÉS — déplacé en page 2, juste avant la
+        #       signature (était auparavant page 1 après la présentation).
+        docs = devis.get("documents") or []
+        if isinstance(docs, str):
+            try:
+                docs = json.loads(docs)
+            except Exception:  # noqa: BLE001
+                docs = []
+        story.append(Paragraph("DOCUMENTS CONSULTÉS", h))
+        if docs:
+            for nm in docs:
+                story.append(Paragraph(f"• {esc(nm)}", body))
+        else:
+            story.append(Paragraph("—", body))
 
         # 9. SIGNATURE : une seule colonne empilée à gauche, sans libellés
         #    « Responsable »/« Entrepreneur ». Ordre : nom -> titre ->
