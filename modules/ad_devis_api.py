@@ -450,10 +450,16 @@ def register_ad_devis_routes(get_conn):
                                   textColor=h.textColor if nb else colors.HexColor("#10b981"))
         h_non_inclus = ParagraphStyle("h_non_inclus", parent=h,
                                       textColor=h.textColor if nb else colors.HexColor("#ef4444"))
-        story.append(Paragraph("TRAVAUX INCLUS", h_inclus))
-        story.append(para_multiline(devis.get("travaux_inclus") or "—"))
-        story.append(Paragraph("TRAVAUX NON INCLUS", h_non_inclus))
-        story.append(para_multiline(devis.get("travaux_non_inclus") or "—"))
+        # Chaque section ne s'affiche QUE si elle a du contenu (titre + bloc),
+        # indépendamment l'une de l'autre.
+        _inclus = (devis.get("travaux_inclus") or "").strip()
+        _non_inclus = (devis.get("travaux_non_inclus") or "").strip()
+        if _inclus:
+            story.append(Paragraph("TRAVAUX INCLUS", h_inclus))
+            story.append(para_multiline(_inclus))
+        if _non_inclus:
+            story.append(Paragraph("TRAVAUX NON INCLUS", h_non_inclus))
+            story.append(para_multiline(_non_inclus))
 
         # 8. MONTANT (avant taxes)
         story.append(Spacer(1, 8))
