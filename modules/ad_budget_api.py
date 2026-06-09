@@ -2291,6 +2291,7 @@ def register_ad_budget_routes(get_conn):
         surface_plancher: float = 0,
         hauteur_cloisons: float = 0,
         longueur_cloisons: float = 0,
+        avec_heures: bool = True,
     ):
         # PHASE 3A — auth (lecture). Délègue au builder partagé qui produit le
         # PDF ET le snapshot JSON dans la MÊME passe ; la route ne renvoie que
@@ -2301,7 +2302,7 @@ def register_ad_budget_routes(get_conn):
             projet_id, actifs_seulement, avec_prix, sections, colonnes,
             sous_totaux, admin_profits, avec_sous_total_avant_taxes, avec_tps,
             avec_tvq, orientation, mobilisation, surface_plancher,
-            hauteur_cloisons, longueur_cloisons,
+            hauteur_cloisons, longueur_cloisons, avec_heures=avec_heures,
         )
         safe_nom = "".join(c if c.isalnum() or c in "-_ " else "_" for c in (_snapshot["project"]["nom"] or "projet")).strip() or "projet"
         return StreamingResponse(
@@ -2345,6 +2346,7 @@ def register_ad_budget_routes(get_conn):
         surface_plancher=0,
         hauteur_cloisons=0,
         longueur_cloisons=0,
+        avec_heures=True,
     ):
         """Construit le PDF rapport ET le snapshot JSON dans la MÊME passe.
         Retourne (buf: BytesIO, snapshot: dict). Le rendu PDF est INCHANGÉ
@@ -2984,8 +2986,10 @@ def register_ad_budget_routes(get_conn):
 
         # Récap des HEURES de main-d'œuvre (production vs contremaître). HORS du
         # gate `show_totals_row` : les heures ne sont PAS des montants, on les
-        # affiche même en mode « sans prix ».
-        if (mo_h + contremaitre_h) > 0:
+        # affiche même en mode « sans prix ». Option `avec_heures` (gabarit
+        # d'export) : contrôle UNIQUEMENT l'AFFICHAGE PDF ; les heures restent
+        # TOUJOURS dans snapshot_data.heures (flywheel Ad ANA) — cf. plus bas.
+        if avec_heures and (mo_h + contremaitre_h) > 0:
             def _h(v):
                 # fr-CA : espace milliers (régulier), virgule décimale, pas de
                 # décimale inutile si entier.
