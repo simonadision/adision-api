@@ -300,6 +300,7 @@ def register_ad_devis_routes(get_conn):
             "montant_apres_taxes": snapshot["totaux"]["montant_apres_taxes"],
             "source_ref": projet_id,
             "generated_by": user.get("id"),
+            "generated_by_nom": user.get("nom") or user.get("email"),
             "snapshot_data": json.dumps(snapshot, default=str),
         }
         try:
@@ -379,9 +380,13 @@ def register_ad_devis_routes(get_conn):
             logo.hAlign = "LEFT"
         # alignment=0 (LEFT) : le titre démarre au même x que le bloc CLIENT
         # en dessous (début de la colonne droite, x mesuré = 306) — choix Simon.
-        title_para = Paragraph("PROPOSITION / DEVIS", ParagraphStyle(
-            "t", parent=ss["Normal"], fontSize=20, leading=24, alignment=0,
-            textColor=ACCENT, fontName="Helvetica-Bold"))
+        # Étiquette de révision (Espace Rapports) près du titre, en plus petit.
+        _rev_lbl = esc(projet.get("revision_label") or "Originale")
+        title_para = Paragraph(
+            f"PROPOSITION / DEVIS <font size='11'>— {_rev_lbl}</font>",
+            ParagraphStyle(
+                "t", parent=ss["Normal"], fontSize=20, leading=24, alignment=0,
+                textColor=ACCENT, fontName="Helvetica-Bold"))
         head = Table([[logo or "", title_para]], colWidths=[doc.width / 2.0, doc.width / 2.0])
         head.setStyle(TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),

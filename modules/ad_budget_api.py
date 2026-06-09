@@ -2414,7 +2414,8 @@ def register_ad_budget_routes(get_conn):
         )
         # Non-breaking spaces ( ) au lieu d'espaces normaux : empêchent
         # le wrap de la Paragraph reportlab si la colonne centrale est étroite.
-        title_para = Paragraph("RAPPORT DE BUDGET", title_style)
+        _rev_lbl = projet.get("revision_label") or "Originale"
+        title_para = Paragraph("RAPPORT DE BUDGET — " + _rev_lbl, title_style)
 
         # Sprint DT-56 D5 — white-label PDF officiel.
         # Priorité du logo en haut du rapport :
@@ -3239,6 +3240,7 @@ def register_ad_budget_routes(get_conn):
             "gabarit_nom": gabarit_nom,
             "source_ref": projet_id,
             "generated_by": user.get("id"),
+            "generated_by_nom": user.get("nom") or user.get("email"),
             "snapshot_data": json.dumps(snapshot, default=str),
         }
         try:
