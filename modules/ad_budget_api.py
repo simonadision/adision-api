@@ -1779,6 +1779,9 @@ def register_ad_budget_routes(get_conn):
             "client_id",
             # Option d'arrondissement au dollar (mode calcul/affichage).
             "arrondi_dollar",
+            # Étiquette de révision éditable (Espace Rapports). PAS dans
+            # SNAPSHOT_AFFECTING_FIELDS -> l'éditer ne bump pas la révision.
+            "revision_label",
         ]:
             if field in data:
                 v = data[field]
