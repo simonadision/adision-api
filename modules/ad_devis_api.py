@@ -242,12 +242,18 @@ def register_ad_devis_routes(get_conn):
                                 title=f"Devis — {projet.get('nom') or projet_id}")
         story = []
 
-        # 1. EN-TÊTE : logo entreprise (gauche) + titre (droite)
+        # 1. EN-TÊTE : logo entreprise (gauche) + titre (droite). Colonnes
+        #    identiques à la table ENTREPRENEUR/CLIENT (doc.width/2) pour que
+        #    logo s'aligne sur ENTREPRENEUR et titre sur CLIENT. Le logo est
+        #    un Image hAlign=CENTER par défaut -> force LEFT pour le coller à
+        #    la marge gauche (même x que le bloc ENTREPRENEUR en dessous).
         logo = _logo_flowable_for_org(entreprise, max_width=150)
+        if logo is not None and not isinstance(logo, str):
+            logo.hAlign = "LEFT"
         title_para = Paragraph("PROPOSITION / DEVIS", ParagraphStyle(
             "t", parent=ss["Normal"], fontSize=20, leading=24, alignment=2,
             textColor=ACCENT, fontName="Helvetica-Bold"))
-        head = Table([[logo or "", title_para]], colWidths=[170, doc.width - 170])
+        head = Table([[logo or "", title_para]], colWidths=[doc.width / 2.0, doc.width / 2.0])
         head.setStyle(TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("LEFTPADDING", (0, 0), (-1, -1), 0),
