@@ -351,6 +351,7 @@ def register_ad_devis_routes(get_conn):
         sig_lines.append([Paragraph(f"<b>Courriel :</b> {esc(courriel_resp)}", small)])
         sig_lines.append([Paragraph(f"<b>Téléphone :</b> {esc(tel_resp)}", small)])
         sig = Table(sig_lines, colWidths=[doc.width * 0.5])
+        sig.hAlign = "LEFT"  # défaut Table = CENTER -> calait le bloc à droite
         sig.setStyle(TableStyle([("LEFTPADDING", (0, 0), (-1, -1), 0),
                                  ("RIGHTPADDING", (0, 0), (-1, -1), 0),
                                  ("TOPPADDING", (0, 0), (-1, -1), 1),
