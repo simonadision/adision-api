@@ -15,6 +15,7 @@ Usage (depuis n'importe où) :
     python adision-api/tools/check_adres_parity.py
 """
 import os
+import re
 import sys
 
 # Features qui DOIVENT être présentes dans les 2 vues Ad RES (marqueur -> sens).
@@ -40,6 +41,35 @@ REQUIRED_IN_BOTH = [
 
 def _monorepo(parent):
     return os.path.join(parent, "adision-monorepo")
+
+
+def _check_default_instructions(srcs, repo):
+    """Garde-fou DUR du pré-remplissage des INSTRUCTIONS par défaut à la CRÉATION
+    d'un AO (régression nuit 2026-06-09 : le champ s'est vidé sur un nouvel AO).
+
+    Vérifie : (1) la constante partagée AO_INSTRUCTIONS_DEFAULT porte un vrai
+    texte ; (2) chaque vue initialise EMPTY_AO.instructions sur cette constante.
+    Imprime les [OK] inline ; RETOURNE la liste des régressions (chaînes [X])."""
+    out = []
+    ao_file = os.path.join(repo, "packages", "ui", "src", "adResAo.js")
+    if not os.path.isfile(ao_file):
+        return [f"  [X] adResAo.js introuvable ({ao_file})"]
+    ao_src = open(ao_file, encoding="utf-8").read()
+    m = re.search(r"AO_INSTRUCTIONS_DEFAULT\s*=\s*(.+?)(?:\nexport\b|\nconst\b|\nfunction\b|\Z)",
+                  ao_src, re.S)
+    literal_len = sum(len(s) for s in re.findall(r'"([^"]*)"', m.group(1))) if m else 0
+    if literal_len < 60:
+        out.append(f"  [X] AO_INSTRUCTIONS_DEFAULT vide/trop court ({literal_len} car.) dans "
+                   "adResAo.js -> le texte par défaut a disparu (régression).")
+    else:
+        print(f"  [OK] AO_INSTRUCTIONS_DEFAULT présent ({literal_len} car.) dans adResAo.js")
+    for name, src in srcs.items():
+        if "instructions: AO_INSTRUCTIONS_DEFAULT" in src:
+            print(f"  [OK] {name} : EMPTY_AO pré-remplit instructions par défaut à la création")
+        else:
+            out.append(f"  [X] {name} : EMPTY_AO sans 'instructions: AO_INSTRUCTIONS_DEFAULT' "
+                       "-> nouvel AO créé SANS le texte par défaut (régression).")
+    return out
 
 
 def main():
@@ -70,12 +100,15 @@ def main():
             miss = [n for n, p in present.items() if not p]
             problems.append(f"  [X] {sense} : présent dans {has} mais PAS dans {miss} -> DIVERGENCE")
 
+    # Garde-fou DUR (au-delà de la parité) : pré-remplissage instructions par défaut.
+    problems += _check_default_instructions(srcs, repo)
+
     if problems:
-        print("\nDIVERGENCE Ad RES (une feature dans une vue seulement) :")
+        print("\nPROBLÈME(S) Ad RES (divergence entre vues et/ou pré-remplissage par défaut) :")
         print("\n".join(problems))
-        print("\n-> Appliquer la feature aux DEUX vues (idéalement via un hook @adision/ui partagé).")
+        print("\n-> Corriger sur les DEUX vues (idéalement via un hook/const @adision/ui partagé).")
         return 1
-    print("\nPARITÉ Ad RES OK — les 2 modules consomment les mêmes features partagées.")
+    print("\nPARITÉ Ad RES OK — features partagées + pré-remplissage instructions par défaut intacts.")
     return 0
 
 
