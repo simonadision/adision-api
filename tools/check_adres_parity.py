@@ -46,6 +46,9 @@ REQUIRED_IN_BOTH = [
     ("Retirer l'invité", "retrait (soft-delete) d'un invité + confirmation modale"),
     # Suivi du DÉPÔT de soumission (manuel), distinct de la réponse du destinataire.
     ("soumission_recue", "suivi manuel du dépôt de soumission (distinct de la réponse)"),
+    # Avis d'addenda : envoi manuel ciblé (oui + sans réponse, jamais non), confirmation.
+    ("Avis d'addenda", "avis d'addenda (point 8) — bouton + modale ciblée + confirmation"),
+    ("avis-addenda", "appel backend de l'avis d'addenda (cibles + envoi)"),
 ]
 
 
