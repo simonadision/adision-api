@@ -40,6 +40,10 @@ REQUIRED_IN_BOTH = [
     ("shared-documents", "aperçu des documents visibles par le destinataire (modale d'envoi)"),
     # Règle « toute entité créable est supprimable » — soft-delete AO + confirmation modale.
     ("Supprimer l'appel d'offres", "suppression (soft-delete) d'un appel d'offres + confirmation modale"),
+    # Badge = réponse réelle du destinataire (Soumissionne/Décline/Indécis), source unique.
+    ("adResInvitationBadge", "badge dérivé de la réponse réelle du destinataire"),
+    # Retrait d'un invité = soft-delete (réponse conservée) + confirmation modale.
+    ("Retirer l'invité", "retrait (soft-delete) d'un invité + confirmation modale"),
 ]
 
 
