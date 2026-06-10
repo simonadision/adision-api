@@ -18,7 +18,7 @@ from psycopg.types.json import Json
 
 from modules import con_service, hub_service, typ_service
 from modules.ad_budget_constants import AD_VIU_BLINDSPOT_DIVISIONS
-from modules.aggregates import adapt_budget_lines, compute_aggregates
+from modules.aggregates import adapt_budget_lines, compute_aggregates, _js_round
 from modules.auth_jwt import _extract_bearer, make_jwt_deps
 from modules.taux_horaires_api import (
     _load_taux_default_map,
@@ -2913,7 +2913,12 @@ def register_ad_budget_routes(get_conn):
         arr = bool(projet.get("arrondi_dollar"))
 
         def R(v):
-            return float(round(v)) if arr else v
+            # Arrondi « demi vers le HAUT » (_js_round = math.floor(v+0.5)),
+            # IDENTIQUE à JS Math.round du front — et NON le round() natif de
+            # Python (banker's / demi-vers-pair) qui divergeait d'un dollar sur
+            # un cas pile au demi (ex. A&P 6 568,50 → 6 569 et non 6 568). Le
+            # front fait foi : rapport PDF = devis = écran, au dollar près.
+            return float(_js_round(v)) if arr else v
 
         for sec, sec_lignes in sections_groups.items():
             sec_total = 0.0
