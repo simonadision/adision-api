@@ -38,6 +38,8 @@ REQUIRED_IN_BOTH = [
     ("confirm_docs", "checkbox de confirmation avant envoi (sécurité GED)"),
     # Option A — aperçu EXACT des documents partagés dans la modale d'envoi.
     ("shared-documents", "aperçu des documents visibles par le destinataire (modale d'envoi)"),
+    # Règle « toute entité créable est supprimable » — soft-delete AO + confirmation modale.
+    ("Supprimer l'appel d'offres", "suppression (soft-delete) d'un appel d'offres + confirmation modale"),
 ]
 
 
