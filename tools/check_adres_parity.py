@@ -27,6 +27,12 @@ REQUIRED_IN_BOTH = [
     ("mapTypeContratAdRes", "type de contrat mappé (lu d'Ad HUB)"),
     ("AO_INSTRUCTIONS_DEFAULT", "instructions par défaut pré-remplies"),
     ("adHubProjectDocsUrl", "lien GED documents du projet"),
+    # Groupe B — dates/heures/SEAO/BSDQ + modale ajustable.
+    ("bsdqLimitDate", "calcul date BSDQ (3 j. ouvrables CCQ, helper partagé)"),
+    ("heure_limite", "heure limite entrepreneurs généraux"),
+    ("numero_seao", "champ # SEAO"),
+    ("numero_bsdq", "champ # BSDQ"),
+    ("resizable", "modale d'édition redimensionnable"),
 ]
 
 
