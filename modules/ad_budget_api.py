@@ -2445,6 +2445,8 @@ def register_ad_budget_routes(get_conn):
             avec_tvq, orientation, mobilisation, surface_plancher,
             hauteur_cloisons, longueur_cloisons, avec_heures=avec_heures,
             jwt_token=_extract_bearer(authorization, token),
+            inclure_ligne_groupe=inclure_ligne_groupe,
+            inclure_ligne_titres=inclure_ligne_titres,
         )
         safe_nom = "".join(c if c.isalnum() or c in "-_ " else "_" for c in (_snapshot["project"]["nom"] or "projet")).strip() or "projet"
         return StreamingResponse(
@@ -2491,6 +2493,8 @@ def register_ad_budget_routes(get_conn):
         longueur_cloisons=0,
         avec_heures=True,
         jwt_token=None,
+        inclure_ligne_groupe=False,
+        inclure_ligne_titres=True,
     ):
         """Construit le PDF rapport ET le snapshot JSON dans la MÊME passe.
         Retourne (buf: BytesIO, snapshot: dict). Le rendu PDF est INCHANGÉ
