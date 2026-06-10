@@ -36,6 +36,8 @@ REQUIRED_IN_BOTH = [
     ("resizable", "modale d'édition redimensionnable"),
     # Bloc 1 — confirmation sécurité avant envoi (accès docs destinataire).
     ("confirm_docs", "checkbox de confirmation avant envoi (sécurité GED)"),
+    # Option A — aperçu EXACT des documents partagés dans la modale d'envoi.
+    ("shared-documents", "aperçu des documents visibles par le destinataire (modale d'envoi)"),
 ]
 
 

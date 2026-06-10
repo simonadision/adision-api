@@ -1,0 +1,3 @@
+# Les hooks git sont exécutés par /bin/sh : garder des fins de ligne LF, sinon
+# un shebang en CRLF (clone Windows) casse l'exécution du hook.
+hooks/pre-push text eol=lf
