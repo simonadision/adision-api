@@ -22,6 +22,11 @@ REQUIRED_IN_BOTH = [
     ("useBulkRemoveSelection(", "sélection multi + retrait en masse (hook partagé)"),
     ("Retirer la sélection", "bouton d'action de masse"),
     ("data-rowindex", "lasso drag-select (rows indexées)"),
+    # Groupe A — champs formulaire appel d'offres (pièces partagées @adision/ui).
+    ("CsiSectionsSelect", "dropdown multi sections CSI (catalogue partagé)"),
+    ("mapTypeContratAdRes", "type de contrat mappé (lu d'Ad HUB)"),
+    ("AO_INSTRUCTIONS_DEFAULT", "instructions par défaut pré-remplies"),
+    ("adHubProjectDocsUrl", "lien GED documents du projet"),
 ]
 
 
