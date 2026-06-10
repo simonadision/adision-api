@@ -2705,16 +2705,18 @@ def register_ad_budget_routes(get_conn):
             "sous_traitant_montant", "ajust_sous_traitant", "st_sous_traitant",
             "sous_total", "ajustement_pct", "total", "note",
         ]
+        # Libellés ALIGNÉS sur l'écran (App.jsx). Les longs wrappent via Paragraph.
         COL_LABELS = {
-            "section": "Section", "description": "Description", "qte": "Qté",
+            "section": "Section CSI", "description": "Description", "qte": "Qté",
             "unite": "Unité",
             "prix_unitaire": "Coût u.", "ajust_materiaux": "Aj. mat.",
-            "st_materiaux": "S/T mat.",
-            "heures": "Heures", "taux_horaire": "Taux $",
-            "ajust_main_oeuvre": "Aj. M-O", "st_main_oeuvre": "S/T M-O",
-            "sous_traitant_type": "Type S-T", "sous_traitant_nom": "Sous-traitant",
+            "st_materiaux": "Sous-total Mat",
+            "heures": "Heures", "taux_horaire": "Taux horaire",
+            "ajust_main_oeuvre": "Aj. M-O", "st_main_oeuvre": "Sous-total M-O",
+            "sous_traitant_type": "Type de document",
+            "sous_traitant_nom": "Sous-traitants et fournisseurs",
             "sous_traitant_montant": "Mt S-T", "ajust_sous_traitant": "Aj. S-T",
-            "st_sous_traitant": "S/T s-tr.",
+            "st_sous_traitant": "Sous-total S-TR",
             "sous_total": "S/T ligne", "ajustement_pct": "Adj %",
             "total": "Total", "note": "Note",
         }
@@ -2770,7 +2772,7 @@ def register_ad_budget_routes(get_conn):
         if not avec_prix:
             requested -= PRIX_DEPENDENT
         selected = [c for c in ALL_COLS if c in requested] or ["section", "description"]
-        headers = [COL_LABELS[c] for c in selected]
+        # `headers` (rangée de libellés) construite plus bas en Paragraph (wrap).
         # Scale calculé sur la sélection effective : tient compte des opt-in.
         _scale = total_w / sum(_col_widths_base[c] for c in selected)
         col_widths = [_col_widths_base[c] * _scale for c in selected]
@@ -2778,27 +2780,30 @@ def register_ad_budget_routes(get_conn):
         # Police adaptive : 8pt par défaut, 7pt si > 12 colonnes pour rester
         # lisible sans débordement en paysage A4.
         body_fontsize = 7 if len(selected) > 12 else 8
+        # En-têtes en Paragraph (et NON strings brutes) : reportlab WRAPPE alors
+        # le libellé sur plusieurs lignes dans la largeur de colonne — les titres
+        # longs (« Sous-traitants et fournisseurs », « Type de document », « Sous-
+        # total … ») ne tiennent pas sur une ligne en paysage 20 colonnes. Centré,
+        # blanc, gras ; splitLongWords (défaut True) évite tout débordement. La
+        # hauteur de la rangée d'en-tête s'ajuste seule à la ligne la plus haute.
+        header_para_style = ParagraphStyle(
+            "BudgetHeader", fontName="Helvetica-Bold",
+            fontSize=body_fontsize, leading=body_fontsize + 1.5,
+            textColor=colors.white, alignment=1,  # 1 = TA_CENTER
+        )
+        headers = [Paragraph(COL_LABELS[c], header_para_style) for c in selected]
 
         # Construction de la rangée "section header" (colspans). On group les
         # colonnes consécutives qui partagent un même groupe de section ;
         # une section qui n'a aucune colonne visible disparaît automatiquement.
+        # Rangée de REGROUPEMENT (bandeaux MATÉRIAUX / MAIN-D'ŒUVRE / SOUS-TRAITANT
+        # au-dessus des libellés) RETIRÉE du rapport (décision Simon) : on ne garde
+        # QU'UNE rangée d'en-tête (les libellés de colonnes). section_header_row
+        # reste None -> table_data ne contient pas de rangée de groupe et le style
+        # de span de section (plus bas) ne s'applique pas. Les colonnes/données ne
+        # bougent pas (le colgroup pilote les largeurs).
         section_header_row = None
-        section_spans = []  # [(start_col, end_col, section_key)]
-        any_section_visible = any(COL_SECTION.get(c) for c in selected)
-        if any_section_visible:
-            section_header_row = [""] * len(selected)
-            i = 0
-            while i < len(selected):
-                grp = COL_SECTION.get(selected[i])
-                if grp is None:
-                    i += 1
-                    continue
-                j = i
-                while j < len(selected) and COL_SECTION.get(selected[j]) == grp:
-                    j += 1
-                section_header_row[i] = SECTION_LABELS[grp]
-                section_spans.append((i, j - 1, grp))
-                i = j
+        section_spans = []  # vide : plus de bandeau de groupe
 
         def _frca_num(value):
             # Format fr-CA : séparateur de milliers = ESPACE, décimale = VIRGULE.
