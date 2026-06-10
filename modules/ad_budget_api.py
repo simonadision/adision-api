@@ -12,6 +12,7 @@ import httpx
 import openpyxl
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from psycopg.errors import UniqueViolation
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
@@ -1669,6 +1670,29 @@ def register_ad_budget_routes(get_conn):
             return None if v in (None, "") else v
 
         try:
+            # V1.3 — garde anti-double-budget : UN seul budget ACTIF
+            # (statut <> 'archive') par projet Ad HUB. Si un existe déjà -> 409 +
+            # son id : le front ouvre l'existant au lieu de créer un jumeau (cf.
+            # incident "Presse de compaction"). En mode B le HUB vient d'être créé
+            # -> aucun budget existant, le check est inoffensif. L'index partiel
+            # uniq_budget_actif_par_hub est le filet STRUCTUREL si le code régresse.
+            if ad_hub_project_id is not None:
+                cur.execute(
+                    "SELECT id FROM ad_budget.projets "
+                    "WHERE ad_hub_project_id = %s AND statut <> 'archive' "
+                    "ORDER BY id LIMIT 1",
+                    (ad_hub_project_id,),
+                )
+                _exist = cur.fetchone()
+                if _exist:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code": "budget_actif_existe",
+                            "message": "Un budget actif existe déjà pour ce projet Ad HUB.",
+                            "existing_budget_id": _exist["id"],
+                        },
+                    )
             cur.execute("""
                 INSERT INTO ad_budget.projets
                   (user_id, organization_id, nom, client, adresse, description, statut,
@@ -1732,6 +1756,34 @@ def register_ad_budget_routes(get_conn):
             # par-dessus les gabarits insérés (redondant) — retiré.
             nb_lignes = 0
             conn.commit()
+        except UniqueViolation:
+            # Race : un budget actif pour ce HUB a été créé entre le pré-check et
+            # l'INSERT -> l'index structurel a tranché. On répond 409 (PAS 500) en
+            # pointant vers l'existant, et on nettoie un éventuel HUB mode B.
+            conn.rollback()
+            if created_hub_id is not None:
+                jwt_token = _extract_bearer(authorization, None)
+                hub_service.soft_delete_project(jwt_token, created_hub_id)
+            existing_id = None
+            try:
+                c2 = conn.cursor(row_factory=dict_row)
+                c2.execute(
+                    "SELECT id FROM ad_budget.projets WHERE ad_hub_project_id = %s "
+                    "AND statut <> 'archive' ORDER BY id LIMIT 1",
+                    (ad_hub_project_id,),
+                )
+                _r = c2.fetchone(); c2.close()
+                existing_id = _r["id"] if _r else None
+            except Exception:
+                pass
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "budget_actif_existe",
+                    "message": "Un budget actif existe déjà pour ce projet Ad HUB.",
+                    "existing_budget_id": existing_id,
+                },
+            )
         except Exception:
             # Sprint C1 — rollback applicatif : si on a créé un projet HUB
             # en amont (mode B), il devient orphelin sans contrepartie BUD.
