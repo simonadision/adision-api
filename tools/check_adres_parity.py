@@ -44,6 +44,8 @@ REQUIRED_IN_BOTH = [
     ("adResInvitationBadge", "badge dérivé de la réponse réelle du destinataire"),
     # Retrait d'un invité = soft-delete (réponse conservée) + confirmation modale.
     ("Retirer l'invité", "retrait (soft-delete) d'un invité + confirmation modale"),
+    # Suivi du DÉPÔT de soumission (manuel), distinct de la réponse du destinataire.
+    ("soumission_recue", "suivi manuel du dépôt de soumission (distinct de la réponse)"),
 ]
 
 
