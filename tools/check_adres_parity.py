@@ -33,6 +33,8 @@ REQUIRED_IN_BOTH = [
     ("numero_seao", "champ # SEAO"),
     ("numero_bsdq", "champ # BSDQ"),
     ("resizable", "modale d'édition redimensionnable"),
+    # Bloc 1 — confirmation sécurité avant envoi (accès docs destinataire).
+    ("confirm_docs", "checkbox de confirmation avant envoi (sécurité GED)"),
 ]
 
 
