@@ -2425,6 +2425,8 @@ def register_ad_budget_routes(get_conn):
         avec_sous_total_avant_taxes: bool = True,
         avec_tps: bool = True,
         avec_tvq: bool = True,
+        inclure_ligne_groupe: bool = False,
+        inclure_ligne_titres: bool = True,
         orientation: str = "portrait",
         mobilisation: float = 0,
         surface_plancher: float = 0,
@@ -2746,7 +2748,7 @@ def register_ad_budget_routes(get_conn):
         SECTION_LABELS = {
             "materiaux": "MATÉRIAUX",
             "mainOeuvre": "MAIN-D'ŒUVRE",
-            "sousTraitant": "SOUS-TRAITANT",
+            "sousTraitant": "SOUS-TRAITANTS ET FOURNISSEURS",
         }
         SECTION_COLORS = {
             "materiaux": colors.HexColor("#E3E7F4"),
@@ -2796,14 +2798,28 @@ def register_ad_budget_routes(get_conn):
         # Construction de la rangée "section header" (colspans). On group les
         # colonnes consécutives qui partagent un même groupe de section ;
         # une section qui n'a aucune colonne visible disparaît automatiquement.
-        # Rangée de REGROUPEMENT (bandeaux MATÉRIAUX / MAIN-D'ŒUVRE / SOUS-TRAITANT
-        # au-dessus des libellés) RETIRÉE du rapport (décision Simon) : on ne garde
-        # QU'UNE rangée d'en-tête (les libellés de colonnes). section_header_row
-        # reste None -> table_data ne contient pas de rangée de groupe et le style
-        # de span de section (plus bas) ne s'applique pas. Les colonnes/données ne
-        # bougent pas (le colgroup pilote les largeurs).
+        # Rangée de REGROUPEMENT (bandeaux MATÉRIAUX / MAIN-D'ŒUVRE / SOUS-TRAITANTS
+        # ET FOURNISSEURS au-dessus des libellés) : affichée UNIQUEMENT si le toggle
+        # inclure_ligne_groupe est coché (défaut OFF). On group les colonnes
+        # consécutives d'une même section (colspan) ; une section sans colonne
+        # visible disparaît d'elle-même.
         section_header_row = None
-        section_spans = []  # vide : plus de bandeau de groupe
+        section_spans = []  # [(start_col, end_col, section_key)]
+        any_section_visible = any(COL_SECTION.get(c) for c in selected)
+        if inclure_ligne_groupe and any_section_visible:
+            section_header_row = [""] * len(selected)
+            i = 0
+            while i < len(selected):
+                grp = COL_SECTION.get(selected[i])
+                if grp is None:
+                    i += 1
+                    continue
+                j = i
+                while j < len(selected) and COL_SECTION.get(selected[j]) == grp:
+                    j += 1
+                section_header_row[i] = SECTION_LABELS[grp]
+                section_spans.append((i, j - 1, grp))
+                i = j
 
         def _frca_num(value):
             # Format fr-CA : séparateur de milliers = ESPACE, décimale = VIRGULE.
@@ -2882,16 +2898,21 @@ def register_ad_budget_routes(get_conn):
             else:
                 group_factors[key] = 1
 
-        # Préfixage du tableau : rangée 0 = headers de section (colspan) si
-        # au moins une section est visible, sinon on commence direct avec les
-        # libellés. header_offset = nombre de rangées d'en-tête à sauter pour
-        # localiser le début du body (utilisé par les styles indexés ci-dessous).
-        if section_header_row is not None:
-            table_data = [section_header_row, headers]
-            header_offset = 2
-        else:
-            table_data = [headers]
-            header_offset = 1
+        # Préfixage du tableau par les rangées d'en-tête réellement demandées :
+        # 0, 1 ou 2 rangées selon les 2 toggles. On mémorise l'INDEX de chaque
+        # rangée (groupe / titres) pour que les styles indexés (SPAN, BACKGROUND,
+        # FONTNAME…) suivent dynamiquement le nombre de rangées présentes — c'est
+        # le recalage qui évitait un bandeau résiduel mal stylé.
+        table_data = []
+        group_row_idx = None
+        titres_row_idx = None
+        if section_header_row is not None:        # groupe (gated inclure_ligne_groupe)
+            group_row_idx = len(table_data)
+            table_data.append(section_header_row)
+        if inclure_ligne_titres:
+            titres_row_idx = len(table_data)
+            table_data.append(headers)
+        header_offset = len(table_data)           # = nb de rangées d'en-tête
         subtotal_rows = []
         group_subtotals = {key: 0.0 for key, _, _, _ in BUDGET_GROUPS_PDF}
         # Sous-totaux par CATÉGORIE et par groupe (pré-ajustement_pct, comme le
@@ -2988,16 +3009,10 @@ def register_ad_budget_routes(get_conn):
                 table_data.append(make_summary_row(f"Sous-total {sec}", sec_total))
                 subtotal_rows.append(len(table_data) - 1)
 
-        # Indice de la rangée des libellés de colonnes (sous l'éventuelle
-        # rangée de header de section).
-        col_header_row = header_offset - 1
+        # body_start_row = 1re rangée de DONNÉES (après les rangées d'en-tête).
         body_start_row = header_offset
 
         table_style_cmds = [
-            # Fond bleu Adision sur la rangée des libellés de colonnes.
-            ("BACKGROUND", (0, col_header_row), (-1, col_header_row), colors.HexColor("#1e3a8a")),
-            ("TEXTCOLOR", (0, col_header_row), (-1, col_header_row), colors.white),
-            ("FONTNAME", (0, col_header_row), (-1, col_header_row), "Helvetica-Bold"),
             ("FONTSIZE", (0, 0), (-1, -1), body_fontsize),
             ("ALIGN", (2, body_start_row), (-1, -1), "RIGHT"),
             ("ALIGN", (0, 0), (1, -1), "LEFT"),
@@ -3006,14 +3021,20 @@ def register_ad_budget_routes(get_conn):
             ("ROWBACKGROUNDS", (0, body_start_row), (-1, -1),
              [colors.white, colors.HexColor("#f1f5f9")]),
         ]
-        # Header de section (rangée 0) : SPAN + fond couleur palette Adision
-        # pâle pour chaque section visible.
-        if section_header_row is not None:
-            table_style_cmds.append(("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"))
-            table_style_cmds.append(("ALIGN", (0, 0), (-1, 0), "CENTER"))
+        # Rangée des TITRES de colonnes (si présente) : fond bleu Adision + texte
+        # blanc gras. Index dynamique (peut être 0 ou 1 selon la rangée groupe).
+        if titres_row_idx is not None:
+            table_style_cmds.append(("BACKGROUND", (0, titres_row_idx), (-1, titres_row_idx), colors.HexColor("#1e3a8a")))
+            table_style_cmds.append(("TEXTCOLOR", (0, titres_row_idx), (-1, titres_row_idx), colors.white))
+            table_style_cmds.append(("FONTNAME", (0, titres_row_idx), (-1, titres_row_idx), "Helvetica-Bold"))
+        # Rangée de REGROUPEMENT (si présente) : SPAN + fond couleur de section,
+        # gras, centré. Index dynamique (toujours 0 quand présente).
+        if group_row_idx is not None:
+            table_style_cmds.append(("FONTNAME", (0, group_row_idx), (-1, group_row_idx), "Helvetica-Bold"))
+            table_style_cmds.append(("ALIGN", (0, group_row_idx), (-1, group_row_idx), "CENTER"))
             for start, end, grp in section_spans:
-                table_style_cmds.append(("SPAN", (start, 0), (end, 0)))
-                table_style_cmds.append(("BACKGROUND", (start, 0), (end, 0),
+                table_style_cmds.append(("SPAN", (start, group_row_idx), (end, group_row_idx)))
+                table_style_cmds.append(("BACKGROUND", (start, group_row_idx), (end, group_row_idx),
                                          SECTION_COLORS[grp]))
         for r in subtotal_rows:
             table_style_cmds.append(("FONTNAME", (0, r), (-1, r), "Helvetica-Bold"))
