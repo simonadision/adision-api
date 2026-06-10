@@ -2557,14 +2557,23 @@ def register_ad_budget_routes(get_conn):
         ss = getSampleStyleSheet()
         story = []
 
-        title_style = ParagraphStyle(
-            "PdfTitle", parent=ss["Title"], fontSize=10, alignment=1,
-            spaceAfter=0, textColor=colors.HexColor("#1e3a8a"),
+        # Titre PRINCIPAL = NOM DU PROJET (gros, centré) ; SOUS-TITRE dessous =
+        # « Rapport de budget — [révision] ». Même source que le bloc CLIENT
+        # (projet["nom"]). Nom vide -> sous-titre seul (jamais de titre vide).
+        nom_titre_style = ParagraphStyle(
+            "PdfNomProjet", parent=ss["Title"], fontSize=15, leading=17, alignment=1,
+            spaceAfter=2, textColor=colors.HexColor("#1e3a8a"),
         )
-        # Non-breaking spaces ( ) au lieu d'espaces normaux : empêchent
-        # le wrap de la Paragraph reportlab si la colonne centrale est étroite.
+        sous_titre_style = ParagraphStyle(
+            "PdfSousTitre", parent=ss["Normal"], fontSize=9, leading=11, alignment=1,
+            textColor=colors.HexColor("#475569"),
+        )
         _rev_lbl = projet.get("revision_label") or "Originale"
-        title_para = Paragraph("RAPPORT DE BUDGET — " + _rev_lbl, title_style)
+        _nom_projet = (projet.get("nom") or "").strip()
+        title_cell = []
+        if _nom_projet:
+            title_cell.append(Paragraph(_nom_projet.upper(), nom_titre_style))
+        title_cell.append(Paragraph("Rapport de budget — " + _rev_lbl, sous_titre_style))
 
         # Sprint DT-56 D5 — white-label PDF officiel.
         # Priorité du logo en haut du rapport :
@@ -2602,7 +2611,7 @@ def register_ad_budget_routes(get_conn):
         # 327pt landscape) pour que le titre tienne sur une seule ligne.
         title_side = 190
         title_row = Table(
-            [[logo_flowable, title_para, ""]],
+            [[logo_flowable, title_cell, ""]],
             colWidths=[title_side, total_w - 2 * title_side, title_side],
         )
         title_row.setStyle(TableStyle([

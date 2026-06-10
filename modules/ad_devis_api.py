@@ -383,12 +383,24 @@ def register_ad_devis_routes(get_conn):
         # en dessous (début de la colonne droite, x mesuré = 306) — choix Simon.
         # Étiquette de révision (Espace Rapports) près du titre, en plus petit.
         _rev_lbl = esc(projet.get("revision_label") or "Originale")
-        title_para = Paragraph(
-            f"PROPOSITION / DEVIS <font size='11'>— {_rev_lbl}</font>",
-            ParagraphStyle(
-                "t", parent=ss["Normal"], fontSize=20, leading=24, alignment=0,
-                textColor=ACCENT, fontName="Helvetica-Bold"))
-        head = Table([[logo or "", title_para]], colWidths=[doc.width / 2.0, doc.width / 2.0])
+        # Titre PRINCIPAL = NOM DU PROJET (gros) ; SOUS-TITRE dessous =
+        # « Proposition / Devis ». Gardé à la position du titre actuel (colonne
+        # droite, alignée au bloc CLIENT) -> AUCUN chevauchement avec le logo
+        # gauche. ACCENT = noir en N&B, bleu marque en couleur. Nom vide ->
+        # sous-titre seul (jamais de titre vide).
+        _nom_projet = esc((projet.get("nom") or "").strip().upper())
+        titre_proj_style = ParagraphStyle(
+            "tp", parent=ss["Normal"], fontSize=18, leading=21, alignment=0,
+            textColor=ACCENT, fontName="Helvetica-Bold")
+        sous_titre_style = ParagraphStyle(
+            "stp", parent=ss["Normal"], fontSize=11, leading=14, alignment=0,
+            textColor=ACCENT)
+        if _nom_projet:
+            title_cell = [Paragraph(_nom_projet, titre_proj_style),
+                          Paragraph(f"Proposition / Devis <font size='9'>— {_rev_lbl}</font>", sous_titre_style)]
+        else:
+            title_cell = [Paragraph(f"PROPOSITION / DEVIS <font size='11'>— {_rev_lbl}</font>", titre_proj_style)]
+        head = Table([[logo or "", title_cell]], colWidths=[doc.width / 2.0, doc.width / 2.0])
         head.setStyle(TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("LEFTPADDING", (0, 0), (-1, -1), 0),
