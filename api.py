@@ -419,6 +419,7 @@ app.add_middleware(
         "https://est.adision.ca",     # Ad EST (Sprint 6 — picker ACQ 4 niveaux)
         "https://mat.adision.ca",     # Ad MAT (futur consommateur potentiel)
         "https://con.adision.ca",     # Ad CON (futur consommateur potentiel)
+        "https://typ.adision.ca",     # Ad TYP (éditeur d'assemblage — taux horaires ACQ)
         "http://localhost:5173",
         "http://localhost:5174",
         "http://localhost:5175",
