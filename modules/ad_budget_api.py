@@ -573,7 +573,7 @@ def _authorize_projet(projet, user, mode):
     raise HTTPException(status_code=404, detail="Projet introuvable")
 
 
-def _load_and_authorize_projet(get_conn, projet_id, user, mode):
+def _load_and_authorize_projet(get_conn, projet_id, user, mode, check_lock=True):
     """Charge le projet {projet_id} sur une connexion DÉDIÉE (fermée aussitôt
     via try/finally — aucune fuite de connexion, même sur un rejet 403/404)
     puis applique _authorize_projet. À appeler en PREMIÈRE ligne de chaque
@@ -583,7 +583,7 @@ def _load_and_authorize_projet(get_conn, projet_id, user, mode):
     try:
         cur = conn.cursor(row_factory=dict_row)
         cur.execute(
-            "SELECT user_id, organization_id FROM ad_budget.projets "
+            "SELECT user_id, organization_id, is_verrouille FROM ad_budget.projets "
             "WHERE id = %s",
             (projet_id,),
         )
@@ -592,9 +592,21 @@ def _load_and_authorize_projet(get_conn, projet_id, user, mode):
     finally:
         conn.close()
     _authorize_projet(projet, user, mode)
-    # Retourne le projet autorisé (user_id, organization_id) — les chemins qui
-    # résolvent un catalogue cross-service DOIVENT utiliser projet.organization_id
-    # (org du PROJET) et non l'org du JWT, sinon contamination cross-org (Loi 25).
+    # VERROU (lecture seule, ORTHOGONAL au statut de cycle de vie) : tout WRITE est
+    # refusé 409 si le projet est verrouillé. C'est LE garde-fou central — tous les
+    # endpoints d'écriture de contenu projet passent par ici en mode='write', donc
+    # aucun n'est oublié. `check_lock=False` pour les exceptions LÉGITIMES : le toggle
+    # du verrou lui-même (sinon on ne pourrait jamais déverrouiller) et la duplication
+    # (crée un NOUVEAU projet, ne modifie pas le verrouillé). Les LECTURES (mode='read'
+    # : GET projet/lignes, rapport, export) ne sont JAMAIS bloquées.
+    if check_lock and mode == "write" and projet and projet.get("is_verrouille"):
+        raise HTTPException(
+            status_code=409,
+            detail="Projet verrouillé — déverrouillez-le pour le modifier.",
+        )
+    # Retourne le projet autorisé (user_id, organization_id, is_verrouille) — les
+    # chemins qui résolvent un catalogue cross-service DOIVENT utiliser
+    # projet.organization_id (org du PROJET), pas l'org du JWT (Loi 25).
     return projet
 
 
@@ -2378,11 +2390,47 @@ def register_ad_budget_routes(get_conn):
         conn.close()
         return {"status": "updated"}
 
+    @router.patch("/projets/{projet_id}/verrou")
+    def toggle_projet_verrou(projet_id: int, data: dict, user=Depends(jwt_user)):
+        """Verrouille / déverrouille un projet (lecture seule), INDÉPENDAMMENT du statut
+        de cycle de vie. Accessible à tout user autorisé en ÉCRITURE sur le projet (même
+        autorisation que les autres writes) MAIS bypass le gate de verrou
+        (check_lock=False) — sinon on ne pourrait jamais déverrouiller. Trace
+        verrouille_par (email) + verrouille_le ; les efface au déverrouillage."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "write", check_lock=False)
+        verrouille = bool(data.get("verrouille"))
+        email = user.get("email") or (str(user.get("id")) if user.get("id") is not None else "inconnu")
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            if verrouille:
+                cur.execute(
+                    "UPDATE ad_budget.projets SET is_verrouille = TRUE, "
+                    "verrouille_par = %s, verrouille_le = NOW(), updated_at = NOW() "
+                    "WHERE id = %s RETURNING is_verrouille, verrouille_par, verrouille_le",
+                    (email, projet_id),
+                )
+            else:
+                cur.execute(
+                    "UPDATE ad_budget.projets SET is_verrouille = FALSE, "
+                    "verrouille_par = NULL, verrouille_le = NULL, updated_at = NOW() "
+                    "WHERE id = %s RETURNING is_verrouille, verrouille_par, verrouille_le",
+                    (projet_id,),
+                )
+            row = cur.fetchone()
+            conn.commit()
+        finally:
+            cur.close(); conn.close()
+        return {"status": "ok", "is_verrouille": row["is_verrouille"],
+                "verrouille_par": row["verrouille_par"], "verrouille_le": row["verrouille_le"]}
+
     @router.post("/projets/{projet_id}/duplicate")
     def duplicate_projet(projet_id: int, user=Depends(jwt_user)):
         # PHASE 3A — authentification + autorisation (écriture : dupliquer le
         # projet d'un autre user est refusé, même à un superviseur d'org).
-        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        # check_lock=False : la duplication LIT la source et CRÉE un nouveau projet
+        # (déverrouillé par défaut) — elle ne modifie pas le projet verrouillé.
+        _load_and_authorize_projet(get_conn, projet_id, user, "write", check_lock=False)
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         cur.execute("SELECT id, nom FROM ad_budget.projets WHERE id = %s", (projet_id,))
