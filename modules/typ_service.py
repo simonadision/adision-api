@@ -65,6 +65,30 @@ def search_catalogue(jwt_token: str, *, q=None, division=None, section=None, lim
     return r.json()
 
 
+def get_batch(jwt_token: str, codes) -> dict:
+    """Résolution CLIENT-FIRST EN LOT de plusieurs codes Ad TYP (anti-N+1 pour
+    l'onglet « MAJ » d'Ad BUD). UN appel cross-service au lieu de N get_ligne.
+
+    Renvoie {code: entry} ; entry = {description, unite, prix_mat, prix_mo,
+    prix_st, prix_unitaire, heures_unit, source}. Codes absents du catalogue
+    (inactifs/non validés/supprimés) = simplement omis de la map (le caller
+    traite alors la ligne comme « source introuvable », pas comme divergente)."""
+    codes = [c for c in (codes or []) if c]
+    if not codes:
+        return {}
+    url = f"{TYP_API_URL}/typ/catalogue/batch"
+    try:
+        with httpx.Client(timeout=TYP_TIMEOUT_S) as client:
+            r = client.post(url, headers=_headers(jwt_token), json={"codes": list(codes)})
+    except httpx.HTTPError as e:
+        logger.warning("typ_service get_batch réseau: %s -> %s", url, e)
+        raise TypServiceError(502, f"Ad TYP injoignable ({type(e).__name__})")
+    if r.status_code != 200:
+        raise TypServiceError(r.status_code, f"Ad TYP batch HTTP {r.status_code}")
+    items = r.json().get("items", []) if isinstance(r.json(), dict) else []
+    return {it["code"]: it for it in items if it.get("code")}
+
+
 def get_ligne(jwt_token: str, code: str) -> dict:
     """Détail d'une ligne Ad TYP validée + ses composants (pour le mapping)."""
     url = f"{TYP_API_URL}/typ/catalogue/{urllib.parse.quote(code, safe='')}"

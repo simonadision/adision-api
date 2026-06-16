@@ -612,11 +612,19 @@ def _map_typ_to_budget_cols(typ: dict, qte) -> dict:
     prix_mat = float(typ.get("prix_mat") or 0)
     prix_mo = float(typ.get("prix_mo") or 0)
     prix_st = float(typ.get("prix_st") or 0)
-    heures_unit = 0.0
-    for c in (typ.get("composants") or []):
-        rend = c.get("mo_rendement")
-        if rend not in (None, ""):
-            heures_unit += float(rend) * float(c.get("qte") or 1)
+    # heures_unit = Σ(rendement×qté) des composants. La résolution DÉTAIL
+    # (get_ligne) fournit `composants` → on somme. La résolution EN LOT (batch,
+    # onglet MAJ) fournit `heures_unit` PRÉ-CALCULÉ (même formule SQL que la liste)
+    # et PAS de composants → on l'utilise tel quel. Les deux donnent le même MO.
+    hu = typ.get("heures_unit")
+    if hu is None:
+        heures_unit = 0.0
+        for c in (typ.get("composants") or []):
+            rend = c.get("mo_rendement")
+            if rend not in (None, ""):
+                heures_unit += float(rend) * float(c.get("qte") or 1)
+    else:
+        heures_unit = float(hu or 0)
     mo_flat = False
     if heures_unit > 0:
         heures = round(heures_unit * qte, 4)
@@ -646,6 +654,58 @@ def _map_typ_to_budget_cols(typ: dict, qte) -> dict:
         "mo_flat": mo_flat,
         "taux_pondere": taux,
     }
+
+
+# ─── Onglet « MAJ » Ad BUD : détection de divergence ligne ↔ source Ad TYP ───
+# Helpers PURS (testables) partagés par les endpoints detect_maj_typ / apply_maj_typ.
+_MAJ_LINE_COLS = ("id, source_typ_code, qte, section, description, unite, "
+                  "prix_unitaire, sous_traitant_montant, heures, taux_horaire, "
+                  "prix_unitaire_override, heures_manuelles")
+
+
+def _maj_money_diff(a, b) -> bool:
+    return abs(float(a or 0) - float(b or 0)) > 0.005
+
+
+def _maj_str_diff(a, b) -> bool:
+    return str(a or "").strip() != str(b or "").strip()
+
+
+def _maj_is_override_heures(ligne) -> bool:
+    # Override MO RÉEL = heures_manuelles ET heures ≠ 0 (cf. fix faux-override à 0).
+    return bool(ligne.get("heures_manuelles")) and float(ligne.get("heures") or 0) != 0
+
+
+def _maj_compute_divergences(ligne, m):
+    """Écarts SIGNALABLES d'une ligne budget vs sa source Ad TYP (déjà mappée par
+    _map_typ_to_budget_cols). V1 = signaux NON ambigus : description, unité,
+    coût unitaire (MAT, override-aware) et sous-traitant (ST). Respecte l'override
+    volontaire prix_unitaire_override (coût non signalé). Ne présume pas la cause
+    d'un écart description/unité — on l'expose tel quel, l'user décide.
+
+    ⚠️ MO / taux EXCLU de V1 (comme MAT) : le taux MO d'une ligne a une DOUBLE
+    source — le catalogue Ad TYP (assemblages avec rendement) OU le défaut projet
+    appliqué (col 17 ACQ « Appliquer les taux par défaut »). Comparer le taux
+    génèrerait de faux écarts DESTRUCTEURS (ligne au défaut 84,64 vs catalogue 0
+    → « accepter » remettrait le MO à 0) et contredirait la règle de PRÉSERVATION
+    du taux (resync auto ne réaligne jamais le taux ; seul le ⟳ explicite le fait).
+    À rebrancher en phase 2 avec un drapeau de provenance du taux."""
+    divs = []
+    if _maj_str_diff(ligne["description"], m["description"]):
+        divs.append({"champ": "description", "label": "Description",
+                     "valeur_ligne": ligne["description"], "valeur_base": m["description"]})
+    if _maj_str_diff(ligne["unite"], m["unite"]):
+        divs.append({"champ": "unite", "label": "Unité",
+                     "valeur_ligne": ligne["unite"], "valeur_base": m["unite"]})
+    if not ligne.get("prix_unitaire_override") and _maj_money_diff(ligne["prix_unitaire"], m["prix_unitaire"]):
+        divs.append({"champ": "prix_unitaire", "label": "Coût unitaire",
+                     "valeur_ligne": round(float(ligne["prix_unitaire"] or 0), 2),
+                     "valeur_base": round(float(m["prix_unitaire"] or 0), 2)})
+    if _maj_money_diff(ligne["sous_traitant_montant"], m["sous_traitant_montant"]):
+        divs.append({"champ": "sous_traitant_montant", "label": "Sous-traitant",
+                     "valeur_ligne": round(float(ligne["sous_traitant_montant"] or 0), 2),
+                     "valeur_base": round(float(m["sous_traitant_montant"] or 0), 2)})
+    return divs
 
 
 # Unité « heures de MO » : la quantité représente des heures → heures = qté par défaut.
@@ -3769,6 +3829,128 @@ def register_ad_budget_routes(get_conn):
             cur.close(); conn.close()
         _mark_budget_dirty_if_emitted(projet_id)  # re-tarif Ad TYP -> snapshot
         return {"status": "refreshed", "ligne": row, "mo_flat": m["mo_flat"]}
+
+    # ─── Onglet « MAJ » : détection + application groupée des MAJ Ad TYP ───
+    # Remplace le ⟳ ligne-par-ligne par une vue d'ensemble. V1 = Ad TYP seul
+    # (TIM remonte via TYP ; MAT = phase 2, non câblé). Forme « par module » pour
+    # accueillir d'autres sources plus tard sans refonte. Helpers purs + colonnes
+    # = niveau module (_maj_*, _MAJ_LINE_COLS) pour testabilité.
+
+    @router.get("/projets/{projet_id}/maj-typ")
+    def detect_maj_typ(projet_id: int,
+                       authorization: Optional[str] = Header(None),
+                       user=Depends(jwt_user)):
+        """Détecte EN LOT les lignes Ad TYP divergentes de leur source (1 seul appel
+        cross-service via typ_service.get_batch, anti-N+1 — un budget compte ~100
+        codes). Lecture seule. INACTIF hors statut 'brouillon' (= « En cours ») :
+        cohérent avec la garde 409 du ⟳ ; renvoie alors modules=[] (pas d'onglet)."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        jwt_token = _extract_bearer(authorization, None)
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute("SELECT statut FROM ad_budget.projets WHERE id = %s", (projet_id,))
+            prow = cur.fetchone()
+            statut = prow["statut"] if prow else None
+            if statut != "brouillon":
+                return {"statut": statut, "actif": False, "modules": [], "total": 0}
+            cur.execute(f"SELECT {_MAJ_LINE_COLS} FROM ad_budget.budget_lignes "
+                        "WHERE projet_id = %s AND source_typ_code IS NOT NULL "
+                        "AND actif IS NOT FALSE", (projet_id,))
+            lignes = cur.fetchall()
+        finally:
+            cur.close(); conn.close()
+        if not lignes:
+            return {"statut": statut, "actif": True, "modules": [], "total": 0}
+        codes = sorted({l["source_typ_code"] for l in lignes if l["source_typ_code"]})
+        try:
+            srcmap = typ_service.get_batch(jwt_token, codes)
+        except typ_service.TypServiceError as e:
+            raise _typ_err(e)
+        updates = []
+        for l in lignes:
+            src = srcmap.get(l["source_typ_code"])
+            if not src:
+                continue  # source introuvable (inactive/supprimée) → pas « divergente »
+            m = _map_typ_to_budget_cols(src, l["qte"])
+            divs = _maj_compute_divergences(l, m)
+            if divs:
+                updates.append({
+                    "ligne_id": l["id"],
+                    "code": l["source_typ_code"],
+                    "description": l["description"],
+                    "qte": float(l["qte"] or 0),
+                    "divergences": divs,
+                })
+        updates.sort(key=lambda u: u["code"])
+        modules = ([{"module": "typ", "label": "Ad TYP", "updates": updates}]
+                   if updates else [])
+        return {"statut": statut, "actif": True, "modules": modules, "total": len(updates)}
+
+    @router.post("/projets/{projet_id}/maj-typ/apply")
+    def apply_maj_typ(projet_id: int, data: dict,
+                      authorization: Optional[str] = Header(None),
+                      user=Depends(jwt_user)):
+        """Applique les MAJ Ad TYP sur les lignes COCHÉES (ligne_ids) : refresh
+        depuis la source (même mapping que le ⟳) MAIS override-aware — ne touche
+        PAS un champ en override volontaire (prix_unitaire_override → coût préservé ;
+        heures_manuelles réel → heures/taux préservés). N'altère pas les flags
+        d'override (≠ ⟳ qui les remet à FALSE). Bloqué 409 hors 'brouillon'."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        jwt_token = _extract_bearer(authorization, None)
+        ids = data.get("ligne_ids") if isinstance(data, dict) else None
+        if not isinstance(ids, list) or not ids:
+            raise HTTPException(status_code=400, detail="ligne_ids (liste non vide) requis")
+        try:
+            ids = [int(x) for x in ids]
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="ligne_ids doivent être des entiers")
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        updated = []
+        try:
+            cur.execute("SELECT statut FROM ad_budget.projets WHERE id = %s", (projet_id,))
+            prow = cur.fetchone()
+            if (prow["statut"] if prow else None) != "brouillon":
+                raise HTTPException(status_code=409,
+                                    detail="MAJ Ad TYP bloquée : le budget n'est pas « En cours » (gelé).")
+            cur.execute(f"SELECT {_MAJ_LINE_COLS} FROM ad_budget.budget_lignes "
+                        "WHERE projet_id = %s AND id = ANY(%s) "
+                        "AND source_typ_code IS NOT NULL AND actif IS NOT FALSE",
+                        (projet_id, ids))
+            lignes = cur.fetchall()
+            if not lignes:
+                raise HTTPException(status_code=404, detail="Aucune ligne Ad TYP à mettre à jour")
+            codes = sorted({l["source_typ_code"] for l in lignes if l["source_typ_code"]})
+            try:
+                srcmap = typ_service.get_batch(jwt_token, codes)
+            except typ_service.TypServiceError as e:
+                raise _typ_err(e)
+            for l in lignes:
+                src = srcmap.get(l["source_typ_code"])
+                if not src:
+                    continue
+                m = _map_typ_to_budget_cols(src, l["qte"])
+                ovr_p = bool(l.get("prix_unitaire_override"))
+                new_prix = l["prix_unitaire"] if ovr_p else m["prix_unitaire"]
+                # V1 : on NE touche PAS heures/taux (MO). Le MO du projet (défaut col 17
+                # ACQ ou saisie) est PRÉSERVÉ — cohérent avec l'exclusion MO de la
+                # détection (taux à double source). Seuls desc/unité/coût(MAT)/ST descendent.
+                cur.execute("""
+                    UPDATE ad_budget.budget_lignes SET
+                      section=%s, description=%s, unite=%s, prix_unitaire=%s,
+                      sous_traitant_montant=%s, source_typ_snapshot_at=NOW(), updated_at=NOW()
+                    WHERE id=%s AND projet_id=%s RETURNING *
+                """, (m["section"], m["description"], m["unite"], new_prix,
+                      m["sous_traitant_montant"], l["id"], projet_id))
+                updated.append(cur.fetchone())
+            conn.commit()
+        except HTTPException:
+            conn.rollback(); raise
+        finally:
+            cur.close(); conn.close()
+        _mark_budget_dirty_if_emitted(projet_id)
+        return {"status": "applied", "count": len(updated), "lignes": updated}
 
     @router.post("/projets/{projet_id}/lignes/{ligne_id}/apply-typ")
     def apply_typ_to_ligne(projet_id: int, ligne_id: int, data: dict,
