@@ -65,7 +65,7 @@ def search_catalogue(jwt_token: str, *, q=None, division=None, section=None, lim
     return r.json()
 
 
-def get_batch(jwt_token: str, codes) -> dict:
+def get_batch(jwt_token: str, codes, org=None) -> dict:
     """Résolution CLIENT-FIRST EN LOT de plusieurs codes Ad TYP (anti-N+1 pour
     l'onglet « MAJ » d'Ad BUD). UN appel cross-service au lieu de N get_ligne.
 
@@ -77,9 +77,12 @@ def get_batch(jwt_token: str, codes) -> dict:
     if not codes:
         return {}
     url = f"{TYP_API_URL}/typ/catalogue/batch"
+    body = {"codes": list(codes)}
+    if org:
+        body["org"] = org   # org du PROJET (isolation cross-org) — cf. get_ligne
     try:
         with httpx.Client(timeout=TYP_TIMEOUT_S) as client:
-            r = client.post(url, headers=_headers(jwt_token), json={"codes": list(codes)})
+            r = client.post(url, headers=_headers(jwt_token), json=body)
     except httpx.HTTPError as e:
         logger.warning("typ_service get_batch réseau: %s -> %s", url, e)
         raise TypServiceError(502, f"Ad TYP injoignable ({type(e).__name__})")
@@ -89,12 +92,17 @@ def get_batch(jwt_token: str, codes) -> dict:
     return {it["code"]: it for it in items if it.get("code")}
 
 
-def get_ligne(jwt_token: str, code: str) -> dict:
-    """Détail d'une ligne Ad TYP validée + ses composants (pour le mapping)."""
+def get_ligne(jwt_token: str, code: str, org=None) -> dict:
+    """Détail d'une ligne Ad TYP validée + ses composants (pour le mapping).
+
+    `org` = organization_id DU PROJET (isolation cross-org) : transmis pour que la
+    résolution overlay côté adision_dig se fasse sur l'org du PROJET, pas du JWT.
+    Honoré uniquement pour un super_admin côté adision_dig ; ignoré sinon (= org JWT)."""
     url = f"{TYP_API_URL}/typ/catalogue/{urllib.parse.quote(code, safe='')}"
+    params = {"org": org} if org else None
     try:
         with httpx.Client(timeout=TYP_TIMEOUT_S) as client:
-            r = client.get(url, headers=_headers(jwt_token))
+            r = client.get(url, headers=_headers(jwt_token), params=params)
     except httpx.HTTPError as e:
         logger.warning("typ_service get_ligne réseau: %s -> %s", url, e)
         raise TypServiceError(502, f"Ad TYP injoignable ({type(e).__name__})")

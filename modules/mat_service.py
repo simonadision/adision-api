@@ -41,10 +41,13 @@ def _headers(jwt_token: str) -> dict:
     return {"Authorization": f"Bearer {jwt_token}"}
 
 
-def get_batch(jwt_token: str, refs) -> dict:
+def get_batch(jwt_token: str, refs, org=None) -> dict:
     """Résolution EN LOT du prix courant de plusieurs items Ad MAT (anti-N+1).
 
     `refs` = itérable de couples (id, scope) — scope ∈ {'master','client'}.
+    `org` = organization_id DU PROJET (isolation cross-org) : transmis pour que la
+    résolution client (items_client) se fasse sur l'org du PROJET, pas du JWT.
+    Honoré uniquement pour un super_admin côté adision_dig ; ignoré sinon (= org JWT).
     Renvoie {(id, scope): {description, unite, prix_courant}}. Items absents
     (inactifs / cross-org / supprimés) = simplement omis (le caller traite alors
     la ligne comme « source introuvable », pas comme divergente). Le scope est
@@ -60,6 +63,8 @@ def get_batch(jwt_token: str, refs) -> dict:
     if not pairs:
         return {}
     body = {"items": [{"id": i, "scope": s} for (i, s) in pairs]}
+    if org:
+        body["org"] = org
     url = f"{MAT_API_URL}/api/mat/items/batch"
     try:
         with httpx.Client(timeout=MAT_TIMEOUT_S) as client:

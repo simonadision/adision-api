@@ -592,6 +592,10 @@ def _load_and_authorize_projet(get_conn, projet_id, user, mode):
     finally:
         conn.close()
     _authorize_projet(projet, user, mode)
+    # Retourne le projet autorisé (user_id, organization_id) — les chemins qui
+    # résolvent un catalogue cross-service DOIVENT utiliser projet.organization_id
+    # (org du PROJET) et non l'org du JWT, sinon contamination cross-org (Loi 25).
+    return projet
 
 
 def _map_typ_to_budget_cols(typ: dict, qte) -> dict:
@@ -3779,7 +3783,8 @@ def register_ad_budget_routes(get_conn):
                                      user=Depends(jwt_user)):
         """Pioche une ligne Ad TYP (par code) → crée une budget_ligne SNAPSHOT
         (aplatie MAT/MO/ST) + lien source_typ_code pour re-tarif ultérieure."""
-        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        projet = _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        proj_org = projet.get("organization_id") if projet else None   # org du PROJET (isolation cross-org)
         code = (data.get("code") or "").strip()
         if not code:
             raise HTTPException(status_code=400, detail="code Ad TYP requis")
@@ -3788,7 +3793,7 @@ def register_ad_budget_routes(get_conn):
         qte = data.get("qte", 0)
         jwt_token = _extract_bearer(authorization, None)
         try:
-            typ = typ_service.get_ligne(jwt_token, code)
+            typ = typ_service.get_ligne(jwt_token, code, org=proj_org)
         except typ_service.TypServiceError as e:
             raise _typ_err(e)
         m = _map_typ_to_budget_cols(typ, qte)
@@ -3824,9 +3829,10 @@ def register_ad_budget_routes(get_conn):
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         try:
-            cur.execute("SELECT statut FROM ad_budget.projets WHERE id = %s", (projet_id,))
+            cur.execute("SELECT statut, organization_id FROM ad_budget.projets WHERE id = %s", (projet_id,))
             prow = cur.fetchone()
             statut = prow["statut"] if prow else None
+            proj_org = prow["organization_id"] if prow else None   # org du PROJET (isolation cross-org)
             if statut != "brouillon":
                 raise HTTPException(status_code=409,
                                     detail="Re-tarif Ad TYP bloquée : le budget n'est pas « En cours » (gelé).")
@@ -3838,7 +3844,7 @@ def register_ad_budget_routes(get_conn):
             if not ligne["source_typ_code"]:
                 raise HTTPException(status_code=400, detail="Ligne non liée à Ad TYP (pas de re-tarif)")
             try:
-                typ = typ_service.get_ligne(jwt_token, ligne["source_typ_code"])
+                typ = typ_service.get_ligne(jwt_token, ligne["source_typ_code"], org=proj_org)
             except typ_service.TypServiceError as e:
                 raise _typ_err(e)
             m = _map_typ_to_budget_cols(typ, ligne["qte"])   # re-mappe à la qté courante
@@ -3882,9 +3888,12 @@ def register_ad_budget_routes(get_conn):
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         try:
-            cur.execute("SELECT statut FROM ad_budget.projets WHERE id = %s", (projet_id,))
+            cur.execute("SELECT statut, organization_id FROM ad_budget.projets WHERE id = %s", (projet_id,))
             prow = cur.fetchone()
             statut = prow["statut"] if prow else None
+            # Org du PROJET (isolation cross-org Loi 25) : la résolution catalogue DOIT
+            # se faire sur l'org du projet, pas du JWT (un super_admin ne contamine pas).
+            proj_org = prow["organization_id"] if prow else None
             if statut != "brouillon":
                 return {"statut": statut, "actif": False, "modules": [], "total": 0}
             cur.execute(f"SELECT {_MAJ_LINE_COLS} FROM ad_budget.budget_lignes "
@@ -3902,7 +3911,7 @@ def register_ad_budget_routes(get_conn):
         if typ_lignes:
             codes = sorted({l["source_typ_code"] for l in typ_lignes if l["source_typ_code"]})
             try:
-                srcmap = typ_service.get_batch(jwt_token, codes)
+                srcmap = typ_service.get_batch(jwt_token, codes, org=proj_org)
             except typ_service.TypServiceError as e:
                 raise _typ_err(e)
             tu = []
@@ -3924,7 +3933,7 @@ def register_ad_budget_routes(get_conn):
             refs = sorted({(l["item_id_ad_mat"], l["item_ad_mat_scope"] or "master")
                            for l in mat_lignes})
             try:
-                matmap = mat_service.get_batch(jwt_token, refs)
+                matmap = mat_service.get_batch(jwt_token, refs, org=proj_org)
             except mat_service.MatServiceError as e:
                 raise HTTPException(status_code=502 if e.status_code is None else e.status_code,
                                     detail=f"Ad MAT indisponible : {e.detail}")
@@ -3966,8 +3975,9 @@ def register_ad_budget_routes(get_conn):
         cur = conn.cursor(row_factory=dict_row)
         updated = []
         try:
-            cur.execute("SELECT statut FROM ad_budget.projets WHERE id = %s", (projet_id,))
+            cur.execute("SELECT statut, organization_id FROM ad_budget.projets WHERE id = %s", (projet_id,))
             prow = cur.fetchone()
+            proj_org = prow["organization_id"] if prow else None   # org du PROJET (isolation cross-org)
             if (prow["statut"] if prow else None) != "brouillon":
                 raise HTTPException(status_code=409,
                                     detail="MAJ Ad TYP bloquée : le budget n'est pas « En cours » (gelé).")
@@ -3980,7 +3990,7 @@ def register_ad_budget_routes(get_conn):
                 raise HTTPException(status_code=404, detail="Aucune ligne Ad TYP à mettre à jour")
             codes = sorted({l["source_typ_code"] for l in lignes if l["source_typ_code"]})
             try:
-                srcmap = typ_service.get_batch(jwt_token, codes)
+                srcmap = typ_service.get_batch(jwt_token, codes, org=proj_org)
             except typ_service.TypServiceError as e:
                 raise _typ_err(e)
             for l in lignes:
@@ -4032,8 +4042,9 @@ def register_ad_budget_routes(get_conn):
         cur = conn.cursor(row_factory=dict_row)
         updated = []
         try:
-            cur.execute("SELECT statut FROM ad_budget.projets WHERE id = %s", (projet_id,))
+            cur.execute("SELECT statut, organization_id FROM ad_budget.projets WHERE id = %s", (projet_id,))
             prow = cur.fetchone()
+            proj_org = prow["organization_id"] if prow else None   # org du PROJET (isolation cross-org)
             if (prow["statut"] if prow else None) != "brouillon":
                 raise HTTPException(status_code=409,
                                     detail="MAJ Ad MAT bloquée : le budget n'est pas « En cours » (gelé).")
@@ -4046,7 +4057,7 @@ def register_ad_budget_routes(get_conn):
                 raise HTTPException(status_code=404, detail="Aucune ligne Ad MAT à mettre à jour")
             refs = sorted({(l["item_id_ad_mat"], l["item_ad_mat_scope"] or "master") for l in lignes})
             try:
-                matmap = mat_service.get_batch(jwt_token, refs)
+                matmap = mat_service.get_batch(jwt_token, refs, org=proj_org)
             except mat_service.MatServiceError as e:
                 raise HTTPException(status_code=502 if e.status_code is None else e.status_code,
                                     detail=f"Ad MAT indisponible : {e.detail}")
@@ -4096,7 +4107,8 @@ def register_ad_budget_routes(get_conn):
         _map_typ_to_budget_cols), donc heures est calculée à cette qté et stockée
         avec elle pour rester cohérent.
         """
-        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        projet = _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        proj_org = projet.get("organization_id") if projet else None   # org du PROJET (isolation cross-org)
         code = (data.get("code") or "").strip()
         if not code:
             raise HTTPException(status_code=400, detail="code Ad TYP requis")
@@ -4129,7 +4141,7 @@ def register_ad_budget_routes(get_conn):
             else:
                 qte = 0
             try:
-                typ = typ_service.get_ligne(jwt_token, code)
+                typ = typ_service.get_ligne(jwt_token, code, org=proj_org)
             except typ_service.TypServiceError as e:
                 raise _typ_err(e)
             m = _map_typ_to_budget_cols(typ, qte)
