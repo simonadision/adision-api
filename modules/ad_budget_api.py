@@ -658,12 +658,15 @@ def _is_heure_unit(unite) -> bool:
 
 
 def _heures_effectives(unite, heures, heures_manuelles, qte) -> float:
-    """Heures utilisées dans le calcul MO. Ligne unité hr SANS saisie manuelle
-    (heures_manuelles ≠ True) → heures effectives = qté ; sinon = heures saisies
-    (override — la saisie prime). Miroir EXACT de getRow côté front."""
-    if _is_heure_unit(unite) and not heures_manuelles:
+    """Heures utilisées dans le calcul MO. Ligne unité hr → heures effectives = qté
+    SAUF override RÉEL (heures_manuelles ET heures ≠ 0). Un « override » à 0 est un
+    FAUX override (ex. apply-typ d'un assemblage SANS rendement, ou flag posé par
+    erreur) → on retombe sur le défaut qté (0 h sur une ligne facturée à l'heure n'a
+    pas de sens). Miroir EXACT de getRow côté front."""
+    h = float(heures or 0)
+    if _is_heure_unit(unite) and not (heures_manuelles and h != 0):
         return float(qte or 0)
-    return float(heures or 0)
+    return h
 
 
 def register_ad_budget_routes(get_conn):
@@ -3811,17 +3814,22 @@ def register_ad_budget_routes(get_conn):
             _taux_ov = data.get("taux_horaire")
             taux_auto = (float(_taux_ov) if _taux_ov not in (None, "")
                          else float(ligne["taux_horaire"] or 0))
+            # heures_manuelles posé TRUE UNIQUEMENT si l'assemblage Ad TYP a de vraies
+            # heures (> 0, ex. rendement) → catalogue autoritaire. Un assemblage SANS
+            # rendement (heures=0, ex. Mobilisation) ne doit PAS créer un faux override
+            # à 0 sur une ligne hr (sinon MO=0 au lieu du défaut qté).
+            _hm = bool((m["heures"] or 0) > 0)
             if auto and "prix_unitaire" in data:
                 # Saisie de coût en cours (overlay non encore sauvé) au moment du
                 # changement de qté : on la persiste + pose l'override pour la
                 # protéger (sinon elle serait perdue à la purge de l'overlay).
                 cur.execute("""
                     UPDATE ad_budget.budget_lignes SET
-                      qte=%s, heures=%s, heures_manuelles=TRUE, taux_horaire=%s, sous_traitant_montant=%s,
+                      qte=%s, heures=%s, heures_manuelles=%s, taux_horaire=%s, sous_traitant_montant=%s,
                       prix_unitaire=%s, prix_unitaire_override=%s,
                       source_typ_snapshot_at=NOW(), updated_at=NOW()
                     WHERE id=%s AND projet_id=%s RETURNING *
-                """, (qte, m["heures"], taux_auto, m["sous_traitant_montant"],
+                """, (qte, m["heures"], _hm, taux_auto, m["sous_traitant_montant"],
                       float(data.get("prix_unitaire") or 0),
                       bool(data.get("prix_unitaire_override", True)),
                       ligne_id, projet_id))
@@ -3830,10 +3838,10 @@ def register_ad_budget_routes(get_conn):
                 # description / unité ; ne touche que heures / taux / ST.
                 cur.execute("""
                     UPDATE ad_budget.budget_lignes SET
-                      qte=%s, heures=%s, heures_manuelles=TRUE, taux_horaire=%s, sous_traitant_montant=%s,
+                      qte=%s, heures=%s, heures_manuelles=%s, taux_horaire=%s, sous_traitant_montant=%s,
                       source_typ_snapshot_at=NOW(), updated_at=NOW()
                     WHERE id=%s AND projet_id=%s RETURNING *
-                """, (qte, m["heures"], taux_auto, m["sous_traitant_montant"],
+                """, (qte, m["heures"], _hm, taux_auto, m["sous_traitant_montant"],
                       ligne_id, projet_id))
             else:
                 # Pioche EXPLICITE (autocomplete) : re-pull complet depuis Ad TYP ;
@@ -3841,12 +3849,12 @@ def register_ad_budget_routes(get_conn):
                 cur.execute("""
                     UPDATE ad_budget.budget_lignes SET
                       section=%s, description=%s, unite=%s, prix_unitaire=%s,
-                      qte=%s, heures=%s, heures_manuelles=TRUE, taux_horaire=%s, sous_traitant_montant=%s,
+                      qte=%s, heures=%s, heures_manuelles=%s, taux_horaire=%s, sous_traitant_montant=%s,
                       source_typ_code=%s, source_typ_snapshot_at=NOW(),
                       item_id_ad_mat=NULL, prix_unitaire_override=FALSE, updated_at=NOW()
                     WHERE id=%s AND projet_id=%s RETURNING *
                 """, (m["section"], m["description"], m["unite"], m["prix_unitaire"],
-                      qte, m["heures"], m["taux_horaire"], m["sous_traitant_montant"],
+                      qte, m["heures"], _hm, m["taux_horaire"], m["sous_traitant_montant"],
                       code, ligne_id, projet_id))
             row = cur.fetchone()
             conn.commit()
