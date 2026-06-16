@@ -648,6 +648,24 @@ def _map_typ_to_budget_cols(typ: dict, qte) -> dict:
     }
 
 
+# Unité « heures de MO » : la quantité représente des heures → heures = qté par défaut.
+# Couvre la vraie unité prod « hr » + variantes. PAS « sem. » / « jours » (temps ≠ heures).
+_HEURE_UNITS = {"hr", "hre", "heure", "heures", "h"}
+
+
+def _is_heure_unit(unite) -> bool:
+    return str(unite or "").strip().lower() in _HEURE_UNITS
+
+
+def _heures_effectives(unite, heures, heures_manuelles, qte) -> float:
+    """Heures utilisées dans le calcul MO. Ligne unité hr SANS saisie manuelle
+    (heures_manuelles ≠ True) → heures effectives = qté ; sinon = heures saisies
+    (override — la saisie prime). Miroir EXACT de getRow côté front."""
+    if _is_heure_unit(unite) and not heures_manuelles:
+        return float(qte or 0)
+    return float(heures or 0)
+
+
 def register_ad_budget_routes(get_conn):
 
     jwt_user, jwt_user_or_token, jwt_admin, _ = make_jwt_deps(get_conn)
@@ -2332,7 +2350,7 @@ def register_ad_budget_routes(get_conn):
         cur.execute("""
             SELECT section, description, unite, qte, prix_unitaire,
                    ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
-                   heures, taux_horaire,
+                   heures, heures_manuelles, taux_horaire,
                    sous_traitant_type, sous_traitant_montant, sous_traitant_nom,
                    note
             FROM ad_budget.budget_lignes
@@ -2363,7 +2381,8 @@ def register_ad_budget_routes(get_conn):
             qte = float(l["qte"] or 0)
             prix = float(l["prix_unitaire"] or 0)
             ajm = float(l["ajust_materiaux"] or 0)
-            heures = float(l["heures"] or 0)
+            # Heures effectives : unité hr sans saisie manuelle → heures = qté.
+            heures = _heures_effectives(l["unite"], l["heures"], l.get("heures_manuelles"), qte)
             taux = float(l["taux_horaire"] or 0)
             ajmo = float(l["ajust_main_oeuvre"] or 0)
             st_montant = float(l["sous_traitant_montant"] or 0)
@@ -2522,7 +2541,7 @@ def register_ad_budget_routes(get_conn):
         cur.execute(
             f"""
             SELECT section, description, unite, qte, prix_unitaire, ajustement_pct,
-                   heures, taux_horaire, cout_sous_traitant, sous_traitant_nom,
+                   heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
                    ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
                    sous_traitant_type, sous_traitant_montant,
                    sous_total, total, note
@@ -2968,7 +2987,8 @@ def register_ad_budget_routes(get_conn):
                 # Avec la refonte 3 sections, une ligne peut être active sans
                 # qte > 0 (ex. ligne pure sous-traitant). On garde le filtre
                 # qte > 0 historique mais on l'élargit aux lignes M-O / S-T.
-                heures = float(l["heures"] or 0)
+                # Heures effectives : unité hr sans saisie manuelle → heures = qté.
+                heures = _heures_effectives(l["unite"], l["heures"], l.get("heures_manuelles"), qte)
                 taux = float(l["taux_horaire"] or 0)
                 ajmo = float(l["ajust_main_oeuvre"] or 0)
                 st_montant = float(l["sous_traitant_montant"] or 0)
@@ -3797,7 +3817,7 @@ def register_ad_budget_routes(get_conn):
                 # protéger (sinon elle serait perdue à la purge de l'overlay).
                 cur.execute("""
                     UPDATE ad_budget.budget_lignes SET
-                      qte=%s, heures=%s, taux_horaire=%s, sous_traitant_montant=%s,
+                      qte=%s, heures=%s, heures_manuelles=TRUE, taux_horaire=%s, sous_traitant_montant=%s,
                       prix_unitaire=%s, prix_unitaire_override=%s,
                       source_typ_snapshot_at=NOW(), updated_at=NOW()
                     WHERE id=%s AND projet_id=%s RETURNING *
@@ -3810,7 +3830,7 @@ def register_ad_budget_routes(get_conn):
                 # description / unité ; ne touche que heures / taux / ST.
                 cur.execute("""
                     UPDATE ad_budget.budget_lignes SET
-                      qte=%s, heures=%s, taux_horaire=%s, sous_traitant_montant=%s,
+                      qte=%s, heures=%s, heures_manuelles=TRUE, taux_horaire=%s, sous_traitant_montant=%s,
                       source_typ_snapshot_at=NOW(), updated_at=NOW()
                     WHERE id=%s AND projet_id=%s RETURNING *
                 """, (qte, m["heures"], taux_auto, m["sous_traitant_montant"],
@@ -3821,7 +3841,7 @@ def register_ad_budget_routes(get_conn):
                 cur.execute("""
                     UPDATE ad_budget.budget_lignes SET
                       section=%s, description=%s, unite=%s, prix_unitaire=%s,
-                      qte=%s, heures=%s, taux_horaire=%s, sous_traitant_montant=%s,
+                      qte=%s, heures=%s, heures_manuelles=TRUE, taux_horaire=%s, sous_traitant_montant=%s,
                       source_typ_code=%s, source_typ_snapshot_at=NOW(),
                       item_id_ad_mat=NULL, prix_unitaire_override=FALSE, updated_at=NOW()
                     WHERE id=%s AND projet_id=%s RETURNING *
@@ -3942,6 +3962,9 @@ def register_ad_budget_routes(get_conn):
             # Flag override coût manuel : posé par le front quand l'user édite le
             # coût à la main -> protège prix_unitaire contre le resync Ad TYP AUTO.
             "prix_unitaire_override",
+            # Flag override HEURES : posé quand l'user saisit des heures à la main ->
+            # la saisie prime sur le défaut « heures=qté » des lignes unité hr.
+            "heures_manuelles",
         ]:
             if field in data:
                 val = data[field]
@@ -3949,7 +3972,7 @@ def register_ad_budget_routes(get_conn):
                 # cast "" → uuid qui planterait). Délier = renvoyer null.
                 if field == "sous_traitant_contact_id":
                     val = val or None
-                elif field == "prix_unitaire_override":
+                elif field in ("prix_unitaire_override", "heures_manuelles"):
                     val = bool(val)
                 fields.append(f"{field} = %s")
                 values.append(val)
