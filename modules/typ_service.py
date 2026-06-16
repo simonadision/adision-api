@@ -79,7 +79,7 @@ def get_batch(jwt_token: str, codes, org=None) -> dict:
     url = f"{TYP_API_URL}/typ/catalogue/batch"
     body = {"codes": list(codes)}
     if org:
-        body["org"] = org   # org du PROJET (isolation cross-org) — cf. get_ligne
+        body["org"] = str(org)   # org du PROJET (UUID → str, JSON) — isolation cross-org
     try:
         with httpx.Client(timeout=TYP_TIMEOUT_S) as client:
             r = client.post(url, headers=_headers(jwt_token), json=body)
@@ -99,7 +99,7 @@ def get_ligne(jwt_token: str, code: str, org=None) -> dict:
     résolution overlay côté adision_dig se fasse sur l'org du PROJET, pas du JWT.
     Honoré uniquement pour un super_admin côté adision_dig ; ignoré sinon (= org JWT)."""
     url = f"{TYP_API_URL}/typ/catalogue/{urllib.parse.quote(code, safe='')}"
-    params = {"org": org} if org else None
+    params = {"org": str(org)} if org else None   # org peut être un UUID → str pour la query
     try:
         with httpx.Client(timeout=TYP_TIMEOUT_S) as client:
             r = client.get(url, headers=_headers(jwt_token), params=params)

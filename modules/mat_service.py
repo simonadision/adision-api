@@ -64,7 +64,7 @@ def get_batch(jwt_token: str, refs, org=None) -> dict:
         return {}
     body = {"items": [{"id": i, "scope": s} for (i, s) in pairs]}
     if org:
-        body["org"] = org
+        body["org"] = str(org)   # org du PROJET (UUID → str, JSON) — isolation cross-org
     url = f"{MAT_API_URL}/api/mat/items/batch"
     try:
         with httpx.Client(timeout=MAT_TIMEOUT_S) as client:
