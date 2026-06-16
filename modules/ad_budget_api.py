@@ -3003,6 +3003,14 @@ def register_ad_budget_routes(get_conn):
                 # Total de ligne arrondi (mode arrondi) : accumulé dans les
                 # sous-totaux ET affiché, pour que Σ lignes affichées = sous-total.
                 tot_disp = R(tot)
+                # RAPPORT — masquer une ligne d'ITEM dont le TOTAL affiché est 0
+                # (ex. qté=1 sans prix unitaire → total 0 légitime, mais inutile au
+                # rapport). Uniquement quand les prix sont affichés (un rapport sans
+                # prix est structurel, on ne masque rien). N'affecte NI l'éditeur
+                # (GET /lignes, autre chemin) NI les lignes de structure (titres /
+                # groupes / sous-totaux), générées hors de cette boucle.
+                if avec_prix and tot_disp == 0:
+                    continue
                 sec_total += tot_disp
                 if gkey is not None:
                     group_subtotals[gkey] += R(tot_real)
@@ -3739,7 +3747,7 @@ def register_ad_budget_routes(get_conn):
         cur = conn.cursor(row_factory=dict_row)
         try:
             cur.execute(
-                "SELECT id, qte FROM ad_budget.budget_lignes "
+                "SELECT id, qte, taux_horaire FROM ad_budget.budget_lignes "
                 "WHERE id = %s AND projet_id = %s",
                 (ligne_id, projet_id),
             )
@@ -3774,6 +3782,15 @@ def register_ad_budget_routes(get_conn):
             # stockés en total). Préserve prix_unitaire + override (Fix A+B :
             # jamais écraser une saisie manuelle sans acceptation explicite).
             auto = bool(data.get("auto"))
+            # TAUX MO préservé sur resync AUTO (qté) : on ne le recalcule JAMAIS
+            # depuis le catalogue Ad TYP (un assemblage SANS MO renvoyait taux=0 →
+            # écrasait le taux posé par « Appliquer taux »/manuel). On garde le taux
+            # EXISTANT — ou la saisie en cours (overlay `taux_horaire` du body) si
+            # fournie. Seul le re-pull EXPLICITE (else, ⟳) réaligne sur Ad TYP.
+            # (Symétrie avec prix_unitaire/override : pas d'écrasement sans clic.)
+            _taux_ov = data.get("taux_horaire")
+            taux_auto = (float(_taux_ov) if _taux_ov not in (None, "")
+                         else float(ligne["taux_horaire"] or 0))
             if auto and "prix_unitaire" in data:
                 # Saisie de coût en cours (overlay non encore sauvé) au moment du
                 # changement de qté : on la persiste + pose l'override pour la
@@ -3784,7 +3801,7 @@ def register_ad_budget_routes(get_conn):
                       prix_unitaire=%s, prix_unitaire_override=%s,
                       source_typ_snapshot_at=NOW(), updated_at=NOW()
                     WHERE id=%s AND projet_id=%s RETURNING *
-                """, (qte, m["heures"], m["taux_horaire"], m["sous_traitant_montant"],
+                """, (qte, m["heures"], taux_auto, m["sous_traitant_montant"],
                       float(data.get("prix_unitaire") or 0),
                       bool(data.get("prix_unitaire_override", True)),
                       ligne_id, projet_id))
@@ -3796,7 +3813,7 @@ def register_ad_budget_routes(get_conn):
                       qte=%s, heures=%s, taux_horaire=%s, sous_traitant_montant=%s,
                       source_typ_snapshot_at=NOW(), updated_at=NOW()
                     WHERE id=%s AND projet_id=%s RETURNING *
-                """, (qte, m["heures"], m["taux_horaire"], m["sous_traitant_montant"],
+                """, (qte, m["heures"], taux_auto, m["sous_traitant_montant"],
                       ligne_id, projet_id))
             else:
                 # Pioche EXPLICITE (autocomplete) : re-pull complet depuis Ad TYP ;
