@@ -16,7 +16,7 @@ from psycopg.errors import UniqueViolation
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
-from modules import con_service, hub_service, typ_service
+from modules import con_service, hub_service, mat_service, typ_service
 from modules.ad_budget_constants import AD_VIU_BLINDSPOT_DIVISIONS
 from modules.aggregates import adapt_budget_lines, compute_aggregates, _js_round
 from modules.auth_jwt import _extract_bearer, make_jwt_deps
@@ -705,6 +705,38 @@ def _maj_compute_divergences(ligne, m):
         divs.append({"champ": "sous_traitant_montant", "label": "Sous-traitant",
                      "valeur_ligne": round(float(ligne["sous_traitant_montant"] or 0), 2),
                      "valeur_base": round(float(m["sous_traitant_montant"] or 0), 2)})
+    return divs
+
+
+# ─── Onglet « MAJ » phase 2 — détection de divergence ligne ↔ item Ad MAT ───
+# Colonnes lues pour la détection MAT (item lié + scope + snapshot-prix dédié).
+_MAJ_MAT_LINE_COLS = ("id, section, qte, item_id_ad_mat, item_ad_mat_scope, "
+                      "description, unite, prix_unitaire, source_mat_prix_snapshot")
+
+
+def _maj_compute_mat_divergences(ligne, src):
+    """Écarts SIGNALABLES d'une ligne MAT vs son item Ad MAT COURANT (`src` = sortie
+    du batch : {description, unite, prix_courant}).
+
+    PRIX : comparé au SNAPSHOT DÉDIÉ `source_mat_prix_snapshot` (PAS au prix affiché —
+    le flag prix_unitaire_override est inutilisable pour MAT, cf. recon). On ne compare
+    que si snapshot ET prix_courant existent tous les deux → exclut NULL↔NULL (et toute
+    moitié-NULL : item master sans prix_items, ligne legacy sans snapshot). Toute
+    variation non nulle est signalée (pas de seuil en V1).
+    DESC/UNITÉ : ligne courante vs MAT courant (cohérent avec TYP)."""
+    divs = []
+    snap = ligne.get("source_mat_prix_snapshot")
+    cur = src.get("prix_courant") if src else None
+    if snap is not None and cur is not None and _maj_money_diff(snap, cur):
+        divs.append({"champ": "prix_unitaire", "label": "Coût unitaire",
+                     "valeur_ligne": round(float(snap), 2),
+                     "valeur_base": round(float(cur), 2)})
+    if src is not None and _maj_str_diff(ligne.get("description"), src.get("description")):
+        divs.append({"champ": "description", "label": "Description",
+                     "valeur_ligne": ligne.get("description"), "valeur_base": src.get("description")})
+    if src is not None and _maj_str_diff(ligne.get("unite"), src.get("unite")):
+        divs.append({"champ": "unite", "label": "Unité",
+                     "valeur_ligne": ligne.get("unite"), "valeur_base": src.get("unite")})
     return divs
 
 
@@ -3840,10 +3872,11 @@ def register_ad_budget_routes(get_conn):
     def detect_maj_typ(projet_id: int,
                        authorization: Optional[str] = Header(None),
                        user=Depends(jwt_user)):
-        """Détecte EN LOT les lignes Ad TYP divergentes de leur source (1 seul appel
-        cross-service via typ_service.get_batch, anti-N+1 — un budget compte ~100
-        codes). Lecture seule. INACTIF hors statut 'brouillon' (= « En cours ») :
-        cohérent avec la garde 409 du ⟳ ; renvoie alors modules=[] (pas d'onglet)."""
+        """Détecte EN LOT les lignes divergentes de leur source, PAR MODULE : Ad TYP
+        (via typ_service) ET Ad MAT (via mat_service), 1 appel cross-service chacun
+        (anti-N+1). Lecture seule. INACTIF hors 'brouillon' → modules=[] (pas d'onglet,
+        cohérent avec la garde 409 du ⟳). Une ligne est soit TYP soit MAT (exclusivité)
+        → aucun double comptage."""
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
         jwt_token = _extract_bearer(authorization, None)
         conn = get_conn()
@@ -3857,35 +3890,59 @@ def register_ad_budget_routes(get_conn):
             cur.execute(f"SELECT {_MAJ_LINE_COLS} FROM ad_budget.budget_lignes "
                         "WHERE projet_id = %s AND source_typ_code IS NOT NULL "
                         "AND actif IS NOT FALSE", (projet_id,))
-            lignes = cur.fetchall()
+            typ_lignes = cur.fetchall()
+            cur.execute(f"SELECT {_MAJ_MAT_LINE_COLS} FROM ad_budget.budget_lignes "
+                        "WHERE projet_id = %s AND item_id_ad_mat IS NOT NULL "
+                        "AND actif IS NOT FALSE", (projet_id,))
+            mat_lignes = cur.fetchall()
         finally:
             cur.close(); conn.close()
-        if not lignes:
-            return {"statut": statut, "actif": True, "modules": [], "total": 0}
-        codes = sorted({l["source_typ_code"] for l in lignes if l["source_typ_code"]})
-        try:
-            srcmap = typ_service.get_batch(jwt_token, codes)
-        except typ_service.TypServiceError as e:
-            raise _typ_err(e)
-        updates = []
-        for l in lignes:
-            src = srcmap.get(l["source_typ_code"])
-            if not src:
-                continue  # source introuvable (inactive/supprimée) → pas « divergente »
-            m = _map_typ_to_budget_cols(src, l["qte"])
-            divs = _maj_compute_divergences(l, m)
-            if divs:
-                updates.append({
-                    "ligne_id": l["id"],
-                    "code": l["source_typ_code"],
-                    "description": l["description"],
-                    "qte": float(l["qte"] or 0),
-                    "divergences": divs,
-                })
-        updates.sort(key=lambda u: u["code"])
-        modules = ([{"module": "typ", "label": "Ad TYP", "updates": updates}]
-                   if updates else [])
-        return {"statut": statut, "actif": True, "modules": modules, "total": len(updates)}
+        modules = []
+        # ── Module Ad TYP ──
+        if typ_lignes:
+            codes = sorted({l["source_typ_code"] for l in typ_lignes if l["source_typ_code"]})
+            try:
+                srcmap = typ_service.get_batch(jwt_token, codes)
+            except typ_service.TypServiceError as e:
+                raise _typ_err(e)
+            tu = []
+            for l in typ_lignes:
+                src = srcmap.get(l["source_typ_code"])
+                if not src:
+                    continue  # source introuvable → pas « divergente »
+                m = _map_typ_to_budget_cols(src, l["qte"])
+                divs = _maj_compute_divergences(l, m)
+                if divs:
+                    tu.append({"ligne_id": l["id"], "code": l["source_typ_code"],
+                               "description": l["description"], "qte": float(l["qte"] or 0),
+                               "divergences": divs})
+            tu.sort(key=lambda u: u["code"])
+            if tu:
+                modules.append({"module": "typ", "label": "Ad TYP", "updates": tu})
+        # ── Module Ad MAT (phase 2) — résolution par (id, scope) ──
+        if mat_lignes:
+            refs = sorted({(l["item_id_ad_mat"], l["item_ad_mat_scope"] or "master")
+                           for l in mat_lignes})
+            try:
+                matmap = mat_service.get_batch(jwt_token, refs)
+            except mat_service.MatServiceError as e:
+                raise HTTPException(status_code=502 if e.status_code is None else e.status_code,
+                                    detail=f"Ad MAT indisponible : {e.detail}")
+            mu = []
+            for l in mat_lignes:
+                src = matmap.get((l["item_id_ad_mat"], l["item_ad_mat_scope"] or "master"))
+                if not src:
+                    continue
+                divs = _maj_compute_mat_divergences(l, src)
+                if divs:
+                    mu.append({"ligne_id": l["id"], "code": l["section"] or "",
+                               "description": l["description"], "qte": float(l["qte"] or 0),
+                               "divergences": divs})
+            mu.sort(key=lambda u: (u["code"] or "", u["ligne_id"]))
+            if mu:
+                modules.append({"module": "mat", "label": "Ad MAT", "updates": mu})
+        total = sum(len(m["updates"]) for m in modules)
+        return {"statut": statut, "actif": True, "modules": modules, "total": total}
 
     @router.post("/projets/{projet_id}/maj-typ/apply")
     def apply_maj_typ(projet_id: int, data: dict,
@@ -3943,6 +4000,78 @@ def register_ad_budget_routes(get_conn):
                     WHERE id=%s AND projet_id=%s RETURNING *
                 """, (m["section"], m["description"], m["unite"], new_prix,
                       m["sous_traitant_montant"], l["id"], projet_id))
+                updated.append(cur.fetchone())
+            conn.commit()
+        except HTTPException:
+            conn.rollback(); raise
+        finally:
+            cur.close(); conn.close()
+        _mark_budget_dirty_if_emitted(projet_id)
+        return {"status": "applied", "count": len(updated), "lignes": updated}
+
+    @router.post("/projets/{projet_id}/maj-mat/apply")
+    def apply_maj_mat(projet_id: int, data: dict,
+                      authorization: Optional[str] = Header(None),
+                      user=Depends(jwt_user)):
+        """Applique les MAJ Ad MAT sur les lignes COCHÉES (ligne_ids) : descend le PRIX
+        COURANT de l'item (+ description/unité) et RÉÉCRIT le snapshot dédié
+        (source_mat_prix_snapshot + snapshot_at) → la ligne n'est plus divergente, et
+        une future édition manuelle ne re-déclenchera pas le MAJ (le snapshot reste la
+        référence catalogue). Le flag prix_unitaire_override n'est PAS un signal MAT
+        (snapshot dédié) → non touché. Bloqué 409 hors 'brouillon'. Indépendant d'Ad TYP."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        jwt_token = _extract_bearer(authorization, None)
+        ids = data.get("ligne_ids") if isinstance(data, dict) else None
+        if not isinstance(ids, list) or not ids:
+            raise HTTPException(status_code=400, detail="ligne_ids (liste non vide) requis")
+        try:
+            ids = [int(x) for x in ids]
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="ligne_ids doivent être des entiers")
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        updated = []
+        try:
+            cur.execute("SELECT statut FROM ad_budget.projets WHERE id = %s", (projet_id,))
+            prow = cur.fetchone()
+            if (prow["statut"] if prow else None) != "brouillon":
+                raise HTTPException(status_code=409,
+                                    detail="MAJ Ad MAT bloquée : le budget n'est pas « En cours » (gelé).")
+            cur.execute(f"SELECT {_MAJ_MAT_LINE_COLS} FROM ad_budget.budget_lignes "
+                        "WHERE projet_id = %s AND id = ANY(%s) "
+                        "AND item_id_ad_mat IS NOT NULL AND actif IS NOT FALSE",
+                        (projet_id, ids))
+            lignes = cur.fetchall()
+            if not lignes:
+                raise HTTPException(status_code=404, detail="Aucune ligne Ad MAT à mettre à jour")
+            refs = sorted({(l["item_id_ad_mat"], l["item_ad_mat_scope"] or "master") for l in lignes})
+            try:
+                matmap = mat_service.get_batch(jwt_token, refs)
+            except mat_service.MatServiceError as e:
+                raise HTTPException(status_code=502 if e.status_code is None else e.status_code,
+                                    detail=f"Ad MAT indisponible : {e.detail}")
+            for l in lignes:
+                src = matmap.get((l["item_id_ad_mat"], l["item_ad_mat_scope"] or "master"))
+                if not src:
+                    continue
+                cur_prix = src.get("prix_courant")
+                new_desc = src.get("description") if src.get("description") is not None else l["description"]
+                new_unite = src.get("unite") if src.get("unite") is not None else l["unite"]
+                if cur_prix is not None:
+                    # Descend le prix courant + réécrit le snapshot (= nouvelle référence).
+                    cur.execute("""
+                        UPDATE ad_budget.budget_lignes SET
+                          description=%s, unite=%s, prix_unitaire=%s,
+                          source_mat_prix_snapshot=%s, source_mat_snapshot_at=NOW(), updated_at=NOW()
+                        WHERE id=%s AND projet_id=%s RETURNING *
+                    """, (new_desc, new_unite, cur_prix, cur_prix, l["id"], projet_id))
+                else:
+                    # Prix courant NULL : on n'écrase pas le prix ; desc/unité seulement.
+                    cur.execute("""
+                        UPDATE ad_budget.budget_lignes SET
+                          description=%s, unite=%s, source_mat_snapshot_at=NOW(), updated_at=NOW()
+                        WHERE id=%s AND projet_id=%s RETURNING *
+                    """, (new_desc, new_unite, l["id"], projet_id))
                 updated.append(cur.fetchone())
             conn.commit()
         except HTTPException:
@@ -4165,6 +4294,11 @@ def register_ad_budget_routes(get_conn):
             "sous_traitant_type", "sous_traitant_montant",
             # Sprint 1.5 : liens logiques vers Ad MAT (cross-DB, pas de FK physique).
             "item_id_ad_mat", "ad_hub_pending_id",
+            # Onglet MAJ phase 2 : scope (master|client, lève l'ambiguïté d'id) +
+            # prix snapshoté à la pioche (référence de détection de dérive). Posés par
+            # le front à la pioche MAT (appliquerMatSurLigne). snapshot_at = NOW()
+            # serveur quand le snapshot-prix est fourni (cf. bloc après la boucle).
+            "item_ad_mat_scope", "source_mat_prix_snapshot",
             # Provenance Ad TYP : exposée en écriture pour pouvoir l'EFFACER
             # (null) quand la ligne bascule sur une source Ad MAT — garantit
             # qu'une ligne ne porte jamais les deux provenances. (La pose d'une
@@ -4190,6 +4324,9 @@ def register_ad_budget_routes(get_conn):
                     val = bool(val)
                 fields.append(f"{field} = %s")
                 values.append(val)
+        # Snapshot-prix MAT fourni → horodate côté serveur (source de vérité).
+        if "source_mat_prix_snapshot" in data:
+            fields.append("source_mat_snapshot_at = NOW()")
         fields.append("updated_at = NOW()")
         if not fields:
             return {"error": "No fields to update"}
