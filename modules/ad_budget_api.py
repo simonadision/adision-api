@@ -3650,12 +3650,36 @@ def register_ad_budget_routes(get_conn):
                             authorization: Optional[str] = Header(None),
                             user=Depends(jwt_user)):
         """Proxy lecture seule du catalogue Ad TYP (cross-service) pour
-        l'autocomplete « + depuis Ad TYP ». Ad BUD LIT Ad TYP ; n'écrit jamais."""
+        l'autocomplete « + depuis Ad TYP ». Ad BUD LIT Ad TYP ; n'écrit jamais.
+
+        DÉ-DUPLICATION CLIENT-FIRST : adision_dig renvoie l'UNION master + overlay
+        client de l'org ; à code égal on ne garde QUE l'overlay client (la valeur
+        EFFECTIVE de l'org) — cohérent avec la résolution client-first de
+        /typ/catalogue/{code} (snapshot/pioche/⟳). L'autocomplete affiche donc UNE
+        seule entrée par code, plus le doublon « master 0,00 + client 15,00 ».
+        On déduplique ICI (proxy EXCLUSIF d'Ad BUD) et NON dans adision_dig : la vue
+        de curation « Catalogue Adision » (ad-typ) et Ad ADM interrogent adision_dig
+        en direct et doivent garder l'union master complète."""
         jwt_token = _extract_bearer(authorization, None)
         try:
-            return typ_service.search_catalogue(jwt_token, q=q, division=division, section=section, limit=limit)
+            data = typ_service.search_catalogue(jwt_token, q=q, division=division, section=section, limit=limit)
         except typ_service.TypServiceError as e:
             raise _typ_err(e)
+        items = data.get("items") or []
+        by_code: dict = {}
+        for it in items:                       # master listé d'abord, client ensuite
+            code = it.get("code")
+            prev = by_code.get(code)
+            # client écrase master ; à source identique on garde le premier (stable)
+            if prev is None or (prev.get("source") == "master" and it.get("source") == "client"):
+                by_code[code] = it
+        deduped = sorted(by_code.values(), key=lambda x: (x.get("code") or ""))
+        total = data.get("total")
+        if isinstance(total, int):
+            total = max(total - (len(items) - len(deduped)), len(deduped))
+        else:
+            total = len(deduped)
+        return {"total": total, "items": deduped}
 
     @router.post("/projets/{projet_id}/lignes/from-typ")
     def create_budget_ligne_from_typ(projet_id: int, data: dict,
