@@ -2324,6 +2324,10 @@ def register_ad_budget_routes(get_conn):
                 "status": projet.get("statut"),
                 "type_batiment": projet.get("type_batiment"),
                 "region": projet.get("region"),
+                # Lien Ad HUB (INTEGER → app_hub.projects.id, nullable). Exposé pour
+                # qu'Ad CON rattache le projet au hub directement (brique 3). LECTURE
+                # SEULE : on remonte la valeur déjà présente sur le projet BUD.
+                "ad_hub_project_id": projet.get("ad_hub_project_id"),
                 "date_adjudication": (
                     projet["date_adjudication"].isoformat()
                     if projet.get("date_adjudication") else None
