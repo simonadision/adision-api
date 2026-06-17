@@ -140,6 +140,15 @@ def patch_snapshot(jwt_token: str, hub_project_id: int, module: str, fields: dic
     return _hub_request("PATCH", path, jwt_token, json_body=fields or {})
 
 
+def patch_disciplines(jwt_token: str, hub_project_id: int, disciplines: list) -> Optional[dict]:
+    """Pousse la ventilation par discipline (CSI division) sur la fiche hub (itération 2) :
+    PATCH /api/projects/{id}/snapshot/disciplines. Le hub upsert + supprime les disciplines
+    retirées + recalcule les %. Lève HubServiceError sur non-2xx — le CALLER gère le
+    FIRE-AND-FORGET (la ventilation ENRICHIT, ne bloque jamais le budget)."""
+    path = f"/api/projects/{int(hub_project_id)}/snapshot/disciplines"
+    return _hub_request("PATCH", path, jwt_token, json_body={"disciplines": disciplines or []})
+
+
 def soft_delete_project(jwt_token: str, project_id: int) -> None:
     """Soft-delete un projet Ad HUB via DELETE /api/projects/{id}.
 

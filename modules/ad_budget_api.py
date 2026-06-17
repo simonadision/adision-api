@@ -345,6 +345,29 @@ def _push_budget_snapshot(get_conn, projet_id, authorization):
         }
         hub_service.patch_snapshot(jwt_token, hub_id, "ad_bud", fields)
         print(f"[ad_bud snapshot] push OK projet={projet_id} hub={hub_id} total={fields['budget_estime_total']}", flush=True)
+
+        # Ventilation par discipline (CSI division) — itération 2. by_section_csi est
+        # DÉJÀ calculé par compute_aggregates ; on compte les lignes/division ici (non
+        # porté par l'agrégat) et on marque le lot « ST » s'il est majoritairement ST.
+        nb_by_div = {}
+        for r in eff:
+            raw = str(r.get("section") or "").strip()
+            code = raw[:2] if len(raw) >= 2 else "00"
+            nb_by_div[code] = nb_by_div.get(code, 0) + 1
+        disciplines = []
+        for sec in agg.get("by_section_csi", []):
+            mat = float(sec.get("materiaux") or 0); mo = float(sec.get("main_oeuvre") or 0)
+            st = float(sec.get("sous_traitance") or 0)
+            disciplines.append({
+                "discipline_nom": sec.get("nom"),
+                "code_csi_division": sec.get("code"),
+                "budget_estime": sec.get("total"),
+                "budget_estime_pct": sec.get("pct_general"),
+                "nb_lignes_budget": nb_by_div.get(sec.get("code"), 0),
+                "est_sous_traitance": bool(st > (mat + mo)),
+            })
+        hub_service.patch_disciplines(jwt_token, hub_id, disciplines)
+        print(f"[ad_bud snapshot] disciplines push OK projet={projet_id} hub={hub_id} n={len(disciplines)}", flush=True)
     except Exception as e:  # fire-and-forget : on n'interrompt jamais le flux budget
         print(f"[ad_bud snapshot] push échoué (ignoré) projet={projet_id} : {type(e).__name__} {e}", flush=True)
 
