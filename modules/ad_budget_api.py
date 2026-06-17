@@ -303,6 +303,52 @@ def _effective_qte(ligne, mobilisation, surface_plancher, surface_mur, surface_g
     return float(ligne.get("qte") or 0)
 
 
+def _push_budget_snapshot(get_conn, projet_id, authorization):
+    """FIRE-AND-FORGET (pipeline Ad ANA brique 4) : recalcule les totaux du budget et les
+    pousse sur la fiche hub via hub_service.patch_snapshot, SI le projet a un
+    ad_hub_project_id ET un JWT exploitable. N'ÉLÈVE JAMAIS — log + return en cas d'échec
+    (le push enrichit la fiche hub, il ne doit jamais faire planter la sauvegarde du budget)."""
+    try:
+        jwt_token = None
+        if authorization and authorization.lower().startswith("bearer "):
+            jwt_token = authorization.split(" ", 1)[1].strip()
+        if not jwt_token:
+            return
+        conn = get_conn(); cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute("SELECT * FROM ad_budget.projets WHERE id = %s", (projet_id,))
+            projet = cur.fetchone()
+            if not projet or projet.get("ad_hub_project_id") is None:
+                return
+            hub_id = projet["ad_hub_project_id"]
+            cur.execute("SELECT * FROM ad_budget.budget_lignes WHERE projet_id = %s AND actif = TRUE", (projet_id,))
+            rows = [dict(r) for r in cur.fetchall()]
+        finally:
+            cur.close(); conn.close()
+        mob = float(projet.get("mobilisation") or 0); sp = float(projet.get("surface_plancher") or 0)
+        hc = float(projet.get("hauteur_cloisons") or 0); lc = float(projet.get("longueur_cloisons") or 0)
+        surface_mur = hc * lc; surface_gypse = surface_mur * 2
+        eff = []
+        for r in rows:
+            rc = dict(r); rc["qte"] = _effective_qte(r, mob, sp, surface_mur, surface_gypse); eff.append(rc)
+        sup = projet.get("superficie_m2")
+        agg = compute_aggregates(adapt_budget_lines(eff),
+                                 {"superficie_m2": float(sup) if sup is not None else None})
+        t = agg.get("totals", {}); c = agg.get("counts", {})
+        fields = {
+            "budget_estime_total": t.get("general"),
+            "budget_mat": t.get("materiaux"),
+            "budget_mo": t.get("main_oeuvre"),
+            "budget_st": t.get("sous_traitance"),
+            "nb_lignes_budget": c.get("nb_lignes"),
+            "nb_sections_csi": c.get("nb_sections_csi"),
+        }
+        hub_service.patch_snapshot(jwt_token, hub_id, "ad_bud", fields)
+        print(f"[ad_bud snapshot] push OK projet={projet_id} hub={hub_id} total={fields['budget_estime_total']}", flush=True)
+    except Exception as e:  # fire-and-forget : on n'interrompt jamais le flux budget
+        print(f"[ad_bud snapshot] push échoué (ignoré) projet={projet_id} : {type(e).__name__} {e}", flush=True)
+
+
 def _section_prefix_n(s: str):
     s = (s or "").strip()
     m = re.match(r"^(\d+)", s)
@@ -3716,7 +3762,9 @@ def register_ad_budget_routes(get_conn):
         return rows
 
     @router.post("/projets/{projet_id}/lignes")
-    def create_budget_ligne(projet_id: int, data: dict, user=Depends(jwt_user)):
+    def create_budget_ligne(projet_id: int, data: dict,
+                            authorization: Optional[str] = Header(None),
+                            user=Depends(jwt_user)):
         """
         Ajoute un item au budget d'un projet.
         Si source_item_id est fourni, copie les données de la base principale.
@@ -3785,6 +3833,7 @@ def register_ad_budget_routes(get_conn):
         cur.close()
         conn.close()
         _mark_budget_dirty_if_emitted(projet_id)  # ajout de ligne -> snapshot
+        _push_budget_snapshot(get_conn, projet_id, authorization)  # pipeline Ad ANA (fire-and-forget)
         return {"status": "created", "ligne": row}
 
     # ─── Pont Ad TYP → Ad BUD (étape 1) — lecture cross-service + snapshot ───
@@ -3867,6 +3916,7 @@ def register_ad_budget_routes(get_conn):
         finally:
             cur.close(); conn.close()
         _mark_budget_dirty_if_emitted(projet_id)  # ajout depuis Ad TYP -> snapshot
+        _push_budget_snapshot(get_conn, projet_id, authorization)  # pipeline Ad ANA (fire-and-forget)
         return {"status": "created", "ligne": row, "mo_flat": m["mo_flat"]}
 
     @router.post("/projets/{projet_id}/lignes/{ligne_id}/refresh-typ")
@@ -3918,6 +3968,7 @@ def register_ad_budget_routes(get_conn):
         finally:
             cur.close(); conn.close()
         _mark_budget_dirty_if_emitted(projet_id)  # re-tarif Ad TYP -> snapshot
+        _push_budget_snapshot(get_conn, projet_id, authorization)  # pipeline Ad ANA (fire-and-forget)
         return {"status": "refreshed", "ligne": row, "mo_flat": m["mo_flat"]}
 
     # ─── Onglet « MAJ » : détection + application groupée des MAJ Ad TYP ───
@@ -4262,10 +4313,13 @@ def register_ad_budget_routes(get_conn):
         finally:
             cur.close(); conn.close()
         _mark_budget_dirty_if_emitted(projet_id)  # apply Ad TYP sur ligne -> snapshot
+        _push_budget_snapshot(get_conn, projet_id, authorization)  # pipeline Ad ANA (fire-and-forget)
         return {"status": "applied", "ligne": row, "mo_flat": m["mo_flat"]}
 
     @router.post("/projets/{projet_id}/lignes/import")
-    def import_items_to_projet(projet_id: int, data: dict, user=Depends(jwt_user)):
+    def import_items_to_projet(projet_id: int, data: dict,
+                               authorization: Optional[str] = Header(None),
+                               user=Depends(jwt_user)):
         """
         Importe plusieurs items de la base principale vers un projet.
         data = { "item_ids": [1, 2, 3, ...] }
@@ -4318,6 +4372,7 @@ def register_ad_budget_routes(get_conn):
         conn.close()
         if inserted:
             _mark_budget_dirty_if_emitted(projet_id)  # import de lignes -> snapshot
+            _push_budget_snapshot(get_conn, projet_id, authorization)  # pipeline Ad ANA (fire-and-forget)
         return {"status": "imported", "count": inserted}
 
     # Valeurs autorisées pour sous_traitant_type. None / "" = vide.
@@ -4325,7 +4380,8 @@ def register_ad_budget_routes(get_conn):
 
     @router.put("/projets/{projet_id}/lignes/{ligne_id}")
     def update_budget_ligne(projet_id: int, ligne_id: int, data: dict,
-                            user=Depends(jwt_user)):
+                            user=Depends(jwt_user),
+                            authorization: Optional[str] = Header(None)):
         # PHASE 3A — authentification + autorisation (écriture) sur le projet
         # PARENT. La mutation ci-dessous reste scopée WHERE id=%s AND
         # projet_id=%s : un ligne_id appartenant à un autre projet ne matche
@@ -4405,14 +4461,16 @@ def register_ad_budget_routes(get_conn):
         cur.close()
         conn.close()
         _mark_budget_dirty_if_emitted(projet_id)  # mutation de ligne -> snapshot
+        _push_budget_snapshot(get_conn, projet_id, authorization)  # pipeline Ad ANA (fire-and-forget)
         return {"status": "updated"}
 
     @router.patch("/projets/{projet_id}/lignes/{ligne_id}")
     def patch_budget_ligne(projet_id: int, ligne_id: int, data: dict,
-                           user=Depends(jwt_user)):
+                           user=Depends(jwt_user),
+                           authorization: Optional[str] = Header(None)):
         # Alias PATCH du PUT — même comportement, même whitelist de champs.
         # L'autorisation est faite par update_budget_ligne (on lui transmet user).
-        return update_budget_ligne(projet_id, ligne_id, data, user)
+        return update_budget_ligne(projet_id, ligne_id, data, user, authorization)
 
     @router.get("/sous-traitants/suggestions")
     def get_sous_traitants_suggestions(user=Depends(jwt_user)):
@@ -4458,7 +4516,8 @@ def register_ad_budget_routes(get_conn):
 
     @router.delete("/projets/{projet_id}/lignes/{ligne_id}")
     def delete_budget_ligne(projet_id: int, ligne_id: int,
-                            user=Depends(jwt_user)):
+                            user=Depends(jwt_user),
+                            authorization: Optional[str] = Header(None)):
         # PHASE 3A — authentification + autorisation (écriture) sur le projet
         # PARENT. Le DELETE reste scopé WHERE id=%s AND projet_id=%s : un
         # ligne_id d'un autre projet ne matche rien.
@@ -4473,6 +4532,7 @@ def register_ad_budget_routes(get_conn):
         cur.close()
         conn.close()
         _mark_budget_dirty_if_emitted(projet_id)  # suppression de ligne -> snapshot
+        _push_budget_snapshot(get_conn, projet_id, authorization)  # pipeline Ad ANA (fire-and-forget)
         return {"status": "deleted"}
 
     @router.get("/projets/{projet_id}/total")

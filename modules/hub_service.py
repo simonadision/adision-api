@@ -131,6 +131,15 @@ def create_project(jwt_token: str, payload: dict) -> dict:
     return data
 
 
+def patch_snapshot(jwt_token: str, hub_project_id: int, module: str, fields: dict) -> Optional[dict]:
+    """Pousse le snapshot d'un module sur la fiche hub (pipeline Ad ANA, brique 4) :
+    PATCH /api/projects/{id}/snapshot?module=ad_bud|ad_est|ad_con|ad_res. Le hub valide le
+    périmètre du module + calcule les dérivés. Lève HubServiceError sur non-2xx — le CALLER
+    gère le FIRE-AND-FORGET (log + continue ; le push ENRICHIT, ne bloque jamais le module)."""
+    path = f"/api/projects/{int(hub_project_id)}/snapshot?module={module}"
+    return _hub_request("PATCH", path, jwt_token, json_body=fields or {})
+
+
 def soft_delete_project(jwt_token: str, project_id: int) -> None:
     """Soft-delete un projet Ad HUB via DELETE /api/projects/{id}.
 
