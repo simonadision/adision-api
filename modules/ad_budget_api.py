@@ -2652,13 +2652,13 @@ def register_ad_budget_routes(get_conn):
                 """
                 INSERT INTO ad_budget.budget_lignes
                   (projet_id, source_item_id, section, description, unite, prix_unitaire,
-                   qte, ajustement_pct, note, actif,
-                   heures, taux_horaire, cout_sous_traitant, sous_traitant_nom,
+                   qte, ajustement_pct, note, actif, prix_unitaire_override,
+                   heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
                    ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
                    sous_traitant_type, sous_traitant_montant)
                 SELECT %s, source_item_id, section, description, unite, prix_unitaire,
-                       qte, ajustement_pct, note, actif,
-                       heures, taux_horaire, cout_sous_traitant, sous_traitant_nom,
+                       qte, ajustement_pct, note, actif, prix_unitaire_override,
+                       heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
                        ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
                        sous_traitant_type, sous_traitant_montant
                 FROM ad_budget.budget_lignes WHERE projet_id = %s
