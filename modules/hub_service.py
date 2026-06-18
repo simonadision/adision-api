@@ -140,6 +140,21 @@ def patch_snapshot(jwt_token: str, hub_project_id: int, module: str, fields: dic
     return _hub_request("PATCH", path, jwt_token, json_body=fields or {})
 
 
+def reviser_project(jwt_token: str, hub_project_id: int, raison: Optional[str]) -> Optional[dict]:
+    """Crée une RÉVISION du projet hub (nouvelle version, devient active) :
+    POST /api/projects/{id}/reviser. Retourne {revision: {...}}. Lève HubServiceError
+    sur non-2xx (le caller Ad BUD rollback le budget en cas d'échec aval)."""
+    path = f"/api/projects/{int(hub_project_id)}/reviser"
+    return _hub_request("POST", path, jwt_token, json_body={"raison_revision": raison})
+
+
+def activer_revision(jwt_token: str, hub_project_id: int) -> Optional[dict]:
+    """Bascule la version active de la famille sur ce projet hub :
+    PATCH /api/projects/{id}/activer-revision. Best-effort côté caller (rollback)."""
+    path = f"/api/projects/{int(hub_project_id)}/activer-revision"
+    return _hub_request("PATCH", path, jwt_token)
+
+
 def patch_disciplines(jwt_token: str, hub_project_id: int, disciplines: list) -> Optional[dict]:
     """Pousse la ventilation par discipline (CSI division) sur la fiche hub (itération 2) :
     PATCH /api/projects/{id}/snapshot/disciplines. Le hub upsert + supprime les disciplines

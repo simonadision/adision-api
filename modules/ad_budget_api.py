@@ -2555,6 +2555,110 @@ def register_ad_budget_routes(get_conn):
         conn.close()
         return {"status": "duplicated", "projet": new_projet, "nb_lignes_copiees": nb_lignes}
 
+    # ─────────────────────────────────────────────────────────────────
+    # POST /budget/projets/{id}/reviser-projet
+    # RÉVISION DE PROJET (nouvelle version hub) — distincte de la révision de
+    # RAPPORT (revision_no, intouchée). Crée la révision hub (POST /reviser) PUIS
+    # un budget COPIÉ (lignes) lié à cette révision (ad_hub_project_id = révision).
+    # Ferme le symptôme « rapports révisés orphelins ».
+    # ─────────────────────────────────────────────────────────────────
+    @router.post("/projets/{projet_id}/reviser-projet")
+    def reviser_projet_version(
+        projet_id: int, data: dict, user=Depends(jwt_user),
+        authorization: Optional[str] = Header(None),
+    ):
+        raison = ((data or {}).get("raison_revision") or (data or {}).get("raison") or "").strip() or None
+        # Source : on LIT le budget courant (write : on en crée un nouveau).
+        proj = _load_and_authorize_projet(get_conn, projet_id, user, "write", check_lock=False)
+        hub_id = proj.get("ad_hub_project_id")
+        if hub_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Ce budget n'est pas lié à un projet Ad HUB — révision de projet impossible.")
+        jwt_token = _extract_bearer(authorization, None)
+        if not jwt_token:
+            raise HTTPException(status_code=401, detail="Bearer JWT requis")
+
+        # 1. Crée la révision hub (devient active, désactive la famille).
+        try:
+            rev = hub_service.reviser_project(jwt_token, int(hub_id), raison)
+        except hub_service.HubServiceError as e:
+            raise HTTPException(
+                status_code=502 if e.status_code is None else e.status_code,
+                detail=f"Ad HUB (révision) : {e.detail}")
+        new_hub_id = ((rev or {}).get("revision") or {}).get("id")
+        if not new_hub_id:
+            raise HTTPException(status_code=502, detail="Ad HUB n'a pas retourné la révision créée")
+
+        # 2. Duplique le budget (projet + lignes) lié à la nouvelle révision.
+        #    nom inchangé (même projet) ; ad_hub_project_id = la révision ;
+        #    revision_no NON copié -> repart à 0 (compteur de RAPPORTS de la version).
+        conn = get_conn(); cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute(
+                """
+                INSERT INTO ad_budget.projets
+                  (user_id, organization_id, nom, client, adresse, description, statut, notes,
+                   nom_client, contact_client, email_client, telephone_client,
+                   numero_projet, date_debut, date_fin,
+                   contact_entrepreneur, email_entrepreneur, telephone_entrepreneur,
+                   logo_base64,
+                   pct_admin_conditions, pct_admin_architecture,
+                   pct_admin_mecanique, pct_admin_excavation,
+                   ad_hub_project_id)
+                SELECT %s, %s, nom, client, adresse, description, statut, notes,
+                       nom_client, contact_client, email_client, telephone_client,
+                       numero_projet, date_debut, date_fin,
+                       contact_entrepreneur, email_entrepreneur, telephone_entrepreneur,
+                       logo_base64,
+                       pct_admin_conditions, pct_admin_architecture,
+                       pct_admin_mecanique, pct_admin_excavation,
+                       %s
+                FROM ad_budget.projets WHERE id = %s
+                RETURNING *
+                """,
+                (user["id"], user["organization_id"], int(new_hub_id), projet_id))
+            new_projet = cur.fetchone()
+            new_id = new_projet["id"]
+            cur.execute(
+                """
+                INSERT INTO ad_budget.budget_lignes
+                  (projet_id, source_item_id, section, description, unite, prix_unitaire,
+                   qte, ajustement_pct, note, actif,
+                   heures, taux_horaire, cout_sous_traitant, sous_traitant_nom,
+                   ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
+                   sous_traitant_type, sous_traitant_montant)
+                SELECT %s, source_item_id, section, description, unite, prix_unitaire,
+                       qte, ajustement_pct, note, actif,
+                       heures, taux_horaire, cout_sous_traitant, sous_traitant_nom,
+                       ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
+                       sous_traitant_type, sous_traitant_montant
+                FROM ad_budget.budget_lignes WHERE projet_id = %s
+                """,
+                (new_id, projet_id))
+            nb_lignes = cur.rowcount
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            # Best-effort : pas de budget pour la révision -> réactiver la source
+            # (restaure l'invariant 1-active) et soft-delete la révision orpheline.
+            try:
+                hub_service.activer_revision(jwt_token, int(hub_id))
+            except Exception:
+                pass
+            try:
+                hub_service.soft_delete_project(jwt_token, int(new_hub_id))
+            except Exception:
+                pass
+            raise HTTPException(status_code=500, detail=f"Échec de la copie du budget : {e}")
+        finally:
+            cur.close(); conn.close()
+
+        # 3. Push snapshot du nouveau budget -> alimente la version active.
+        _push_budget_snapshot(get_conn, new_id, authorization)
+        return {"status": "revised", "projet": new_projet, "nb_lignes_copiees": nb_lignes,
+                "revision_hub": (rev or {}).get("revision")}
+
     @router.get("/projets/{projet_id}/export")
     def export_projet_excel(projet_id: int, user=Depends(jwt_user)):
         # PHASE 3A — authentification + autorisation (lecture : export = lecture).
