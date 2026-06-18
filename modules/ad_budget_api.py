@@ -2569,8 +2569,15 @@ def register_ad_budget_routes(get_conn):
     ):
         raison = ((data or {}).get("raison_revision") or (data or {}).get("raison") or "").strip() or None
         # Source : on LIT le budget courant (write : on en crée un nouveau).
-        proj = _load_and_authorize_projet(get_conn, projet_id, user, "write", check_lock=False)
-        hub_id = proj.get("ad_hub_project_id")
+        _load_and_authorize_projet(get_conn, projet_id, user, "write", check_lock=False)
+        # _load_and_authorize_projet ne renvoie pas ad_hub_project_id -> on le lit ici.
+        _c = get_conn(); _cur = _c.cursor(row_factory=dict_row)
+        try:
+            _cur.execute("SELECT ad_hub_project_id FROM ad_budget.projets WHERE id=%s", (projet_id,))
+            _row = _cur.fetchone()
+        finally:
+            _cur.close(); _c.close()
+        hub_id = _row.get("ad_hub_project_id") if _row else None
         if hub_id is None:
             raise HTTPException(
                 status_code=400,
