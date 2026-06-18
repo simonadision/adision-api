@@ -140,6 +140,21 @@ def patch_snapshot(jwt_token: str, hub_project_id: int, module: str, fields: dic
     return _hub_request("PATCH", path, jwt_token, json_body=fields or {})
 
 
+def fetch_revision_meta(jwt_token: str, hub_ids: list) -> dict:
+    """Méta révision en BATCH pour des projets hub : GET /api/projects/revision-meta.
+    Retourne {str(id): {numero_revision, est_revision_active, nb_revisions, racine_id, name}}.
+    Best-effort : {} si le hub est indisponible (la liste Ad BUD ne doit pas planter)."""
+    ids = [int(i) for i in (hub_ids or []) if i is not None]
+    if not ids:
+        return {}
+    path = "/api/projects/revision-meta?ids=" + ",".join(str(i) for i in ids)
+    try:
+        resp = _hub_request("GET", path, jwt_token)
+        return (resp or {}).get("meta", {}) or {}
+    except HubServiceError:
+        return {}
+
+
 def reviser_project(jwt_token: str, hub_project_id: int, raison: Optional[str]) -> Optional[dict]:
     """Crée une RÉVISION du projet hub (nouvelle version, devient active) :
     POST /api/projects/{id}/reviser. Retourne {revision: {...}}. Lève HubServiceError

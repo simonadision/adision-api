@@ -1165,6 +1165,7 @@ def register_ad_budget_routes(get_conn):
         region: Optional[str] = None,
         client_nom: Optional[str] = None,
         include_archived: bool = False,
+        authorization: Optional[str] = Header(None),
     ):
         # Toujours filtrer sur le user du JWT — l'éventuel ?user_id= en query
         # est ignoré (un user ne voit que ses propres projets).
@@ -1222,6 +1223,26 @@ def register_ad_budget_routes(get_conn):
         rows = cur.fetchall()
         cur.close()
         conn.close()
+
+        # Enrichissement RÉVISION (batch hub) : pour chaque budget lié à un projet
+        # hub, on récupère numero_revision / est_revision_active / nb_revisions afin
+        # que Ad BUD n'affiche qu'1 carte par famille (la version active). Best-effort :
+        # si le hub est down, on marque tout actif (la liste ne plante jamais).
+        jwt_token = _extract_bearer(authorization, None)
+        hub_ids = [r.get("ad_hub_project_id") for r in rows if r.get("ad_hub_project_id") is not None]
+        meta = hub_service.fetch_revision_meta(jwt_token, hub_ids) if jwt_token else {}
+        for r in rows:
+            hid = r.get("ad_hub_project_id")
+            m = meta.get(str(hid)) if hid is not None else None
+            if m:
+                r["revision_numero"] = m.get("numero_revision") or 0
+                r["revision_active"] = m.get("est_revision_active")
+                r["nb_revisions"] = m.get("nb_revisions") or 1
+            else:
+                # Pas de lien hub OU hub indisponible -> traité comme standalone actif.
+                r["revision_numero"] = 0
+                r["revision_active"] = True
+                r["nb_revisions"] = 1
         return rows
 
     # ══════════════════════════════════════════════════════════
