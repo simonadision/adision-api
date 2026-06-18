@@ -2750,6 +2750,63 @@ def register_ad_budget_routes(get_conn):
                 r["coutant"] = coutant_by_hub.get(r.get("id"))
         return data
 
+    # ─────────────────────────────────────────────────────────────────
+    # POST /budget/projets/{id}/refresh-family-snapshots — RE-PUSH des snapshots
+    # hub pour TOUTES les versions de la famille (corrige les snapshots périmés
+    # côté Ad HUB / Ad ANA après le fix de la base MO). Action ponctuelle gated
+    # super_admin : le snapshot reste la source des agrégats/benchmarks, on le
+    # recalcule (agrégat corrigé) et on le re-pousse pour chaque version.
+    # ─────────────────────────────────────────────────────────────────
+    @router.post("/projets/{projet_id}/refresh-family-snapshots")
+    def refresh_family_snapshots(
+        projet_id: int, user=Depends(jwt_user),
+        authorization: Optional[str] = Header(None),
+    ):
+        if user.get("platform_role") != "super_admin":
+            raise HTTPException(status_code=403, detail="Action réservée à un super_admin.")
+        # write/check_lock=False : on ne modifie pas le budget, on re-pousse le snapshot.
+        _load_and_authorize_projet(get_conn, projet_id, user, "write", check_lock=False)
+        _c = get_conn(); _cur = _c.cursor(row_factory=dict_row)
+        try:
+            _cur.execute("SELECT ad_hub_project_id FROM ad_budget.projets WHERE id=%s", (projet_id,))
+            _row = _cur.fetchone()
+        finally:
+            _cur.close(); _c.close()
+        hub_id = _row.get("ad_hub_project_id") if _row else None
+        if hub_id is None:
+            raise HTTPException(status_code=400, detail="Budget non lié à un projet Ad HUB.")
+        jwt_token = _extract_bearer(authorization, None)
+        if not jwt_token:
+            raise HTTPException(status_code=401, detail="Bearer JWT requis")
+        try:
+            data = hub_service.fetch_revisions(jwt_token, int(hub_id))
+        except hub_service.HubServiceError as e:
+            raise HTTPException(status_code=502 if e.status_code is None else e.status_code,
+                                detail=f"Ad HUB (révisions) : {e.detail}")
+        rev_hub_ids = [r.get("id") for r in (data or {}).get("revisions", []) if r.get("id") is not None]
+        if not rev_hub_ids:
+            rev_hub_ids = [int(hub_id)]
+        conn = get_conn(); cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute("SELECT id, ad_hub_project_id FROM ad_budget.projets "
+                        "WHERE ad_hub_project_id = ANY(%s) AND statut <> 'archive'", (rev_hub_ids,))
+            bud_rows = cur.fetchall()
+        finally:
+            cur.close(); conn.close()
+        refreshed = []
+        for b in bud_rows:
+            # Re-pousse le snapshot (recalcul agrégat corrigé) — fire-and-forget interne.
+            _push_budget_snapshot(get_conn, b["id"], authorization)
+            c2 = get_conn(); cu2 = c2.cursor(row_factory=dict_row)
+            try:
+                cu2.execute("SELECT * FROM ad_budget.budget_lignes WHERE projet_id=%s AND actif=TRUE", (b["id"],))
+                lines = [dict(x) for x in cu2.fetchall()]
+            finally:
+                cu2.close(); c2.close()
+            general = (compute_aggregates(adapt_budget_lines(lines)).get("totals") or {}).get("general")
+            refreshed.append({"hub_id": b["ad_hub_project_id"], "projet_id": b["id"], "coutant": general})
+        return {"refreshed": refreshed, "nb": len(refreshed)}
+
     @router.get("/projets/{projet_id}/export")
     def export_projet_excel(projet_id: int, user=Depends(jwt_user)):
         # PHASE 3A — authentification + autorisation (lecture : export = lecture).
