@@ -54,6 +54,15 @@ _TYPE_ST_MAP = {
     "Allocation": "allocation",
 }
 
+# Unités « heures de MO » : la qté représente des heures -> heures = qté par défaut
+# (miroir EXACT de getRow App.jsx + adaptBudgetLines.js). Sans ça, l'agrégat (snapshot
+# hub + Ad ANA) divergeait du « Coûtant total » affiché dans le récap Ad BUD.
+_HEURE_UNITS = {"hr", "hre", "heure", "heures", "h"}
+
+
+def _is_heure_unit(unite) -> bool:
+    return str(unite or "").strip().lower() in _HEURE_UNITS
+
 
 def adapt_budget_lines(raw_lines) -> list:
     """Adapte les rows BD (shape flat) au format ligne attendu par
@@ -75,6 +84,12 @@ def adapt_budget_lines(raw_lines) -> list:
         montant_st = ln.get("sous_traitant_montant")
         if montant_st is None:
             montant_st = ln.get("cout_sous_traitant") or 0
+        # MO — base heures alignée sur le récap : ligne « hr » SANS heures saisies
+        # manuellement -> heures = qté ; sinon heures saisies (override réel).
+        qte_v = float(ln.get("qte") or 0)
+        heures_raw = float(ln.get("heures") or 0)
+        override_reel = (ln.get("heures_manuelles") is True) and abs(heures_raw) > 1e-9
+        heures_eff = qte_v if (_is_heure_unit(ln.get("unite")) and not override_reel) else heures_raw
         result.append({
             "id": ln.get("id"),
             "section": ln.get("section"),
@@ -83,11 +98,11 @@ def adapt_budget_lines(raw_lines) -> list:
             "type_st": type_st,
             "mat": {
                 "cout": float(ln.get("prix_unitaire") or 0),
-                "qte": float(ln.get("qte") or 0),
+                "qte": qte_v,
                 "ajust_pct": float(ln.get("ajust_materiaux") or 0),
             },
             "mo": {
-                "heures": float(ln.get("heures") or 0),
+                "heures": heures_eff,
                 "taux": float(ln.get("taux_horaire") or 0),
                 "ajust_pct": float(ln.get("ajust_main_oeuvre") or 0),
             },

@@ -2558,13 +2558,13 @@ def register_ad_budget_routes(get_conn):
         cur.execute("""
             INSERT INTO ad_budget.budget_lignes
               (projet_id, source_item_id, section, description, unite, prix_unitaire,
-               qte, ajustement_pct, note, actif,
-               heures, taux_horaire, cout_sous_traitant, sous_traitant_nom,
+               qte, ajustement_pct, note, actif, prix_unitaire_override,
+               heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
                ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
                sous_traitant_type, sous_traitant_montant)
             SELECT %s, source_item_id, section, description, unite, prix_unitaire,
-                   qte, ajustement_pct, note, actif,
-                   heures, taux_horaire, cout_sous_traitant, sous_traitant_nom,
+                   qte, ajustement_pct, note, actif, prix_unitaire_override,
+                   heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
                    ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
                    sous_traitant_type, sous_traitant_montant
             FROM ad_budget.budget_lignes
@@ -2721,7 +2721,34 @@ def register_ad_budget_routes(get_conn):
         except hub_service.HubServiceError as e:
             return {"revisions": [], "nb_revisions": 1, "racine_id": None,
                     "active_numero": None, "hub_error": e.detail}
-        return data or {"revisions": [], "nb_revisions": 1}
+        data = data or {"revisions": [], "nb_revisions": 1}
+
+        # ENRICHISSEMENT « coutant » : pour CHAQUE version, on calcule en DIRECT le
+        # Coûtant total de SON budget Ad BUD (compute_aggregates.general), au lieu de
+        # se fier au snapshot hub `budget_estime_total` qui peut être périmé ou sur
+        # une autre base MO. Le popover affiche `coutant` -> il correspond EXACTEMENT
+        # au « Coûtant total » du budget qui s'ouvre. (Voir fix divergence MO hr.)
+        revs = data.get("revisions") or []
+        rev_hub_ids = [r.get("id") for r in revs if r.get("id") is not None]
+        if rev_hub_ids:
+            conn = get_conn(); cur = conn.cursor(row_factory=dict_row)
+            try:
+                cur.execute(
+                    "SELECT id, ad_hub_project_id FROM ad_budget.projets "
+                    "WHERE ad_hub_project_id = ANY(%s) AND statut <> 'archive'", (rev_hub_ids,))
+                bud_rows = cur.fetchall()
+                coutant_by_hub = {}
+                for b in bud_rows:
+                    cur.execute("SELECT * FROM ad_budget.budget_lignes WHERE projet_id=%s AND actif=TRUE", (b["id"],))
+                    lines = [dict(x) for x in cur.fetchall()]
+                    agg = compute_aggregates(adapt_budget_lines(lines))
+                    coutant_by_hub[b["ad_hub_project_id"]] = (agg.get("totals") or {}).get("general")
+            finally:
+                cur.close(); conn.close()
+            for r in revs:
+                # None si aucune contrepartie budget (le front retombe sur budget_estime_total).
+                r["coutant"] = coutant_by_hub.get(r.get("id"))
+        return data
 
     @router.get("/projets/{projet_id}/export")
     def export_projet_excel(projet_id: int, user=Depends(jwt_user)):
