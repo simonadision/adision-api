@@ -170,6 +170,15 @@ def activer_revision(jwt_token: str, hub_project_id: int) -> Optional[dict]:
     return _hub_request("PATCH", path, jwt_token)
 
 
+def fetch_revisions(jwt_token: str, hub_project_id: int) -> Optional[dict]:
+    """Famille de versions (révisions) d'un projet hub : GET /api/projects/{id}/revisions.
+    Retourne le payload hub {racine_id, nb_revisions, active_numero, budget_*, revisions:[
+    {id, numero_revision, raison_revision, est_revision_active, budget_estime_total, …}]}.
+    Lève HubServiceError sur non-2xx (le caller Ad BUD décide du fallback best-effort —
+    le sélecteur de version ne doit jamais planter la liste)."""
+    return _hub_request("GET", f"/api/projects/{int(hub_project_id)}/revisions", jwt_token)
+
+
 def patch_disciplines(jwt_token: str, hub_project_id: int, disciplines: list) -> Optional[dict]:
     """Pousse la ventilation par discipline (CSI division) sur la fiche hub (itération 2) :
     PATCH /api/projects/{id}/snapshot/disciplines. Le hub upsert + supprime les disciplines

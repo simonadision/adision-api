@@ -2687,6 +2687,42 @@ def register_ad_budget_routes(get_conn):
         return {"status": "revised", "projet": new_projet, "nb_lignes_copiees": nb_lignes,
                 "revision_hub": (rev or {}).get("revision")}
 
+    # ─────────────────────────────────────────────────────────────────
+    # GET /budget/projets/{id}/revisions — famille de VERSIONS du projet hub
+    # lié à CE budget (sélecteur de version Ad BUD : le badge « N versions »
+    # devient cliquable). Proxy lecture vers Ad HUB ; le front mappe chaque
+    # version (id hub) -> le budget Ad BUD correspondant (ad_hub_project_id)
+    # pour « Ouvrir ». L'ACTIVATION reste une action Ad HUB (décision projet).
+    # ─────────────────────────────────────────────────────────────────
+    @router.get("/projets/{projet_id}/revisions")
+    def get_projet_revisions(
+        projet_id: int, user=Depends(jwt_user),
+        authorization: Optional[str] = Header(None),
+    ):
+        # Lecture : autorise comme un read normal (périmètre user/org/super_admin).
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        _c = get_conn(); _cur = _c.cursor(row_factory=dict_row)
+        try:
+            _cur.execute("SELECT ad_hub_project_id FROM ad_budget.projets WHERE id=%s", (projet_id,))
+            _row = _cur.fetchone()
+        finally:
+            _cur.close(); _c.close()
+        hub_id = _row.get("ad_hub_project_id") if _row else None
+        # Budget non lié au hub -> pas de famille (badge ne s'affiche pas côté front).
+        if hub_id is None:
+            return {"revisions": [], "nb_revisions": 1, "racine_id": None, "active_numero": None}
+        jwt_token = _extract_bearer(authorization, None)
+        if not jwt_token:
+            raise HTTPException(status_code=401, detail="Bearer JWT requis")
+        # Best-effort : si le hub est indisponible, on renvoie une famille vide
+        # (le sélecteur reste fonctionnel mais sans liste — il ne plante jamais).
+        try:
+            data = hub_service.fetch_revisions(jwt_token, int(hub_id))
+        except hub_service.HubServiceError as e:
+            return {"revisions": [], "nb_revisions": 1, "racine_id": None,
+                    "active_numero": None, "hub_error": e.detail}
+        return data or {"revisions": [], "nb_revisions": 1}
+
     @router.get("/projets/{projet_id}/export")
     def export_projet_excel(projet_id: int, user=Depends(jwt_user)):
         # PHASE 3A — authentification + autorisation (lecture : export = lecture).
