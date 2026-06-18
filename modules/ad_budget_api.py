@@ -336,7 +336,10 @@ def _push_budget_snapshot(get_conn, projet_id, authorization):
                                  {"superficie_m2": float(sup) if sup is not None else None})
         t = agg.get("totals", {}); c = agg.get("counts", {})
         fields = {
-            "budget_estime_total": t.get("general"),
+            # budget_estime_total = PRIX DE VENTE (coûtant + A&P), l'info contractuelle
+            # affichée partout (panneau Révisions, dashboards, Ad ANA, benchmarks).
+            # Les ratios/structure restent sur le coûtant (budget_mat/mo/st ci-dessous).
+            "budget_estime_total": _prix_vente_total(projet, eff),
             "budget_mat": t.get("materiaux"),
             "budget_mo": t.get("main_oeuvre"),
             "budget_st": t.get("sous_traitance"),
@@ -385,6 +388,35 @@ def _group_key_for(n):
         if matches(n):
             return key
     return None
+
+
+def _prix_vente_total(projet, raw_lines):
+    """PRIX DE VENTE total = coûtant (général) + administration & profit par
+    regroupement CSI (= « Sous-total avant taxes » du récap, hors taxes).
+
+    Réutilise adapt_budget_lines (base MO alignée sur le récap : heures=qté pour
+    les lignes « hr ») + _group_admin_profit (A&P par discipline / catégorie,
+    mêmes nombres que le PDF et le front). Sans arrondi (valeur canonique, comme
+    le coûtant). C'est l'info CONTRACTUELLE poussée au hub (budget_estime_total)
+    et affichée partout ; les ratios Mat/MO/ST restent sur le coûtant (budget_*)."""
+    adapted = adapt_budget_lines(raw_lines)
+    pct_field_by_key = {k: pf for k, _, pf, _ in BUDGET_GROUPS_PDF}
+    grp = {k: {"sub": 0.0, "mat": 0.0, "mo": 0.0, "st": 0.0} for k, _, _, _ in BUDGET_GROUPS_PDF}
+    general = 0.0
+    for ln in adapted:
+        mat = (ln["mat"].get("cout") or 0) * (ln["mat"].get("qte") or 0) * (1 + (ln["mat"].get("ajust_pct") or 0) / 100.0)
+        mo = (ln["mo"].get("heures") or 0) * (ln["mo"].get("taux") or 0) * (1 + (ln["mo"].get("ajust_pct") or 0) / 100.0)
+        st = (ln["st"].get("montant") or 0) * (1 + (ln["st"].get("ajust_pct") or 0) / 100.0)
+        total = mat + mo + st
+        general += total
+        gkey = _group_key_for(_section_prefix_n(ln.get("csi_code") or ln.get("section")))
+        if gkey:
+            g = grp[gkey]; g["sub"] += total; g["mat"] += mat; g["mo"] += mo; g["st"] += st
+    ap_total = 0.0
+    for k, g in grp.items():
+        if g["sub"]:
+            ap_total += _group_admin_profit(projet, pct_field_by_key[k], g["sub"], g["mat"], g["mo"], g["st"])
+    return round(general + ap_total, 2)
 
 
 # Mapping notation Ad VIU v2 (ASCII plain, decision produit J7
@@ -2723,31 +2755,32 @@ def register_ad_budget_routes(get_conn):
                     "active_numero": None, "hub_error": e.detail}
         data = data or {"revisions": [], "nb_revisions": 1}
 
-        # ENRICHISSEMENT « coutant » : pour CHAQUE version, on calcule en DIRECT le
-        # Coûtant total de SON budget Ad BUD (compute_aggregates.general), au lieu de
-        # se fier au snapshot hub `budget_estime_total` qui peut être périmé ou sur
-        # une autre base MO. Le popover affiche `coutant` -> il correspond EXACTEMENT
-        # au « Coûtant total » du budget qui s'ouvre. (Voir fix divergence MO hr.)
+        # ENRICHISSEMENT « prix_vente » : pour CHAQUE version, on calcule en DIRECT le
+        # PRIX DE VENTE de SON budget Ad BUD (coûtant + A&P), au lieu de se fier au
+        # snapshot hub `budget_estime_total` qui peut être périmé. Le popover affiche
+        # `prix_vente` -> il correspond au « Sous-total avant taxes » du budget ouvert.
+        # `coutant` est conservé (info structure / fallback).
         revs = data.get("revisions") or []
         rev_hub_ids = [r.get("id") for r in revs if r.get("id") is not None]
         if rev_hub_ids:
             conn = get_conn(); cur = conn.cursor(row_factory=dict_row)
             try:
                 cur.execute(
-                    "SELECT id, ad_hub_project_id FROM ad_budget.projets "
+                    "SELECT * FROM ad_budget.projets "
                     "WHERE ad_hub_project_id = ANY(%s) AND statut <> 'archive'", (rev_hub_ids,))
                 bud_rows = cur.fetchall()
-                coutant_by_hub = {}
+                by_hub = {}
                 for b in bud_rows:
                     cur.execute("SELECT * FROM ad_budget.budget_lignes WHERE projet_id=%s AND actif=TRUE", (b["id"],))
                     lines = [dict(x) for x in cur.fetchall()]
-                    agg = compute_aggregates(adapt_budget_lines(lines))
-                    coutant_by_hub[b["ad_hub_project_id"]] = (agg.get("totals") or {}).get("general")
+                    coutant = (compute_aggregates(adapt_budget_lines(lines)).get("totals") or {}).get("general")
+                    by_hub[b["ad_hub_project_id"]] = {"coutant": coutant, "prix_vente": _prix_vente_total(b, lines)}
             finally:
                 cur.close(); conn.close()
             for r in revs:
-                # None si aucune contrepartie budget (le front retombe sur budget_estime_total).
-                r["coutant"] = coutant_by_hub.get(r.get("id"))
+                m = by_hub.get(r.get("id")) or {}
+                r["coutant"] = m.get("coutant")       # structure (coûtant)
+                r["prix_vente"] = m.get("prix_vente")  # contractuel (affiché)
         return data
 
     # ─────────────────────────────────────────────────────────────────
@@ -2795,16 +2828,19 @@ def register_ad_budget_routes(get_conn):
             cur.close(); conn.close()
         refreshed = []
         for b in bud_rows:
-            # Re-pousse le snapshot (recalcul agrégat corrigé) — fire-and-forget interne.
+            # Re-pousse le snapshot (budget_estime_total = PRIX DE VENTE) — fire-and-forget interne.
             _push_budget_snapshot(get_conn, b["id"], authorization)
             c2 = get_conn(); cu2 = c2.cursor(row_factory=dict_row)
             try:
+                cu2.execute("SELECT * FROM ad_budget.projets WHERE id=%s", (b["id"],))
+                proj = cu2.fetchone()
                 cu2.execute("SELECT * FROM ad_budget.budget_lignes WHERE projet_id=%s AND actif=TRUE", (b["id"],))
                 lines = [dict(x) for x in cu2.fetchall()]
             finally:
                 cu2.close(); c2.close()
-            general = (compute_aggregates(adapt_budget_lines(lines)).get("totals") or {}).get("general")
-            refreshed.append({"hub_id": b["ad_hub_project_id"], "projet_id": b["id"], "coutant": general})
+            coutant = (compute_aggregates(adapt_budget_lines(lines)).get("totals") or {}).get("general")
+            refreshed.append({"hub_id": b["ad_hub_project_id"], "projet_id": b["id"],
+                              "coutant": coutant, "prix_vente": _prix_vente_total(proj, lines)})
         return {"refreshed": refreshed, "nb": len(refreshed)}
 
     @router.get("/projets/{projet_id}/export")
