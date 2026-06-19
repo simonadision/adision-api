@@ -1395,6 +1395,15 @@ def register_ad_budget_routes(get_conn):
         try:
             template_lines_added = 0
             if mode == "new":
+                # Phase 6 Deploy 3 — création de projet depuis Ad VIU GELÉE (410) :
+                # le projet créé n'était PAS lié au hub → sans source d'identité
+                # (identité centralisée Ad HUB). 0 usage prod. Créer le projet dans
+                # Ad HUB d'abord, puis importer en mode=existing. mode=existing intact.
+                raise HTTPException(
+                    status_code=410,
+                    detail=("Créer le projet d'abord dans Ad HUB, puis importer les lignes "
+                            "Ad VIU dans le budget existant (mode=existing)."),
+                )
                 project_name = (data.get("project_name") or "").strip()
                 if not project_name:
                     raise HTTPException(
@@ -1583,6 +1592,15 @@ def register_ad_budget_routes(get_conn):
         try:
             template_lines_added = 0
             if mode == "new":
+                # Phase 6 Deploy 3 — création de projet depuis Ad VIU GELÉE (410) :
+                # le projet créé n'était PAS lié au hub → sans source d'identité
+                # (identité centralisée Ad HUB). 0 usage prod. Créer le projet dans
+                # Ad HUB d'abord, puis importer en mode=existing. mode=existing intact.
+                raise HTTPException(
+                    status_code=410,
+                    detail=("Créer le projet d'abord dans Ad HUB, puis importer les lignes "
+                            "Ad VIU dans le budget existant (mode=existing)."),
+                )
                 project_name = (data.get("project_name") or "").strip()
                 if not project_name:
                     raise HTTPException(
@@ -1993,54 +2011,30 @@ def register_ad_budget_routes(get_conn):
                             "existing_budget_id": _exist["id"],
                         },
                     )
+            # Phase 6 Deploy 3 — l'identité projet vit dans Ad HUB (source unique) :
+            # plus AUCUNE écriture locale d'identité ici (les 19 colonnes d'identité
+            # sont omises -> NULL ou DEFAULT ''). On n'insère que les champs PROPRES
+            # Ad BUD (statut, A&P) + les liens (ad_hub_project_id, client_id) + user/org.
+            # En mode B, l'identité a DÉJÀ été poussée au HUB via hub_service.create_project
+            # (cf. hub_payload plus haut) — seule l'écriture LOCALE disparaît.
             cur.execute("""
                 INSERT INTO ad_budget.projets
-                  (user_id, organization_id, nom, client, adresse, description, statut,
-                   nom_client, contact_client, email_client, telephone_client,
-                   numero_projet, date_debut, date_fin,
-                   contact_entrepreneur, email_entrepreneur, telephone_entrepreneur,
-                   logo_base64,
+                  (user_id, organization_id, statut,
                    pct_admin_conditions, pct_admin_architecture,
                    pct_admin_mecanique, pct_admin_excavation,
-                   type_batiment, region, date_adjudication, superficie_m2,
                    ad_hub_project_id, client_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s,
-                        %s, %s, %s,
-                        %s, %s, %s,
-                        %s,
-                        %s, %s, %s, %s,
+                VALUES (%s, %s, %s,
                         %s, %s, %s, %s,
                         %s, %s)
                 RETURNING *
             """, (
                 data["user_id"],
                 user["organization_id"],
-                data["nom"],
-                data.get("client", ""),
-                data.get("adresse", ""),
-                data.get("description", ""),
                 data.get("statut", "brouillon"),
-                data.get("nom_client", ""),
-                data.get("contact_client", ""),
-                data.get("email_client", ""),
-                data.get("telephone_client", ""),
-                data.get("numero_projet", ""),
-                _date(data.get("date_debut")),
-                _date(data.get("date_fin")),
-                data.get("contact_entrepreneur", ""),
-                data.get("email_entrepreneur", ""),
-                data.get("telephone_entrepreneur", ""),
-                data.get("logo_base64", ""),
                 _pct(data.get("pct_admin_conditions")),
                 _pct(data.get("pct_admin_architecture")),
                 _pct(data.get("pct_admin_mecanique")),
                 _pct(data.get("pct_admin_excavation")),
-                # Sprint A — tous nullables.
-                _opt(data.get("type_batiment")),
-                _opt(data.get("region")),
-                _date(data.get("date_adjudication")),
-                _opt(data.get("superficie_m2")),
                 # Sprint C1 — lien Ad HUB (None si ni mode A ni mode B).
                 ad_hub_project_id,
                 # Sprint DT-56 D1 — lien app_central.clients.id (None si
@@ -2650,6 +2644,17 @@ def register_ad_budget_routes(get_conn):
 
     @router.post("/projets/{projet_id}/duplicate")
     def duplicate_projet(projet_id: int, user=Depends(jwt_user)):
+        # Phase 6 Deploy 3 — DUPLICATION GELÉE (410 Gone). La copie locale n'était
+        # PAS liée au hub (garde anti-double-budget interdit 2 budgets actifs sur le
+        # même projet hub) → incompatible avec l'identité centralisée (source unique
+        # Ad HUB) : une copie sans lien hub n'aurait plus aucune source d'identité.
+        # 0 usage historique en prod. Le corps ci-dessous est CONSERVÉ INERTE
+        # (rollback facile = retirer ce raise) mais ne s'exécute jamais.
+        raise HTTPException(
+            status_code=410,
+            detail=("La duplication a été retirée. Utilisez « Réviser le projet » pour "
+                    "une nouvelle version, ou « Nouveau projet » pour un projet distinct."),
+        )
         # PHASE 3A — authentification + autorisation (écriture : dupliquer le
         # projet d'un autre user est refusé, même à un superviseur d'org).
         # check_lock=False : la duplication LIT la source et CRÉE un nouveau projet
@@ -2753,22 +2758,18 @@ def register_ad_budget_routes(get_conn):
         #    revision_no NON copié -> repart à 0 (compteur de RAPPORTS de la version).
         conn = get_conn(); cur = conn.cursor(row_factory=dict_row)
         try:
+            # Phase 6 Deploy 3 — la révision NE COPIE PLUS l'identité localement : elle
+            # est liée à la nouvelle révision hub (ad_hub_project_id = new_hub_id) et lit
+            # son identité depuis Ad HUB (le hub la copie du parent au /reviser). On ne
+            # copie que les champs PROPRES (statut, notes, A&P) + le lien hub.
             cur.execute(
                 """
                 INSERT INTO ad_budget.projets
-                  (user_id, organization_id, nom, client, adresse, description, statut, notes,
-                   nom_client, contact_client, email_client, telephone_client,
-                   numero_projet, date_debut, date_fin,
-                   contact_entrepreneur, email_entrepreneur, telephone_entrepreneur,
-                   logo_base64,
+                  (user_id, organization_id, statut, notes,
                    pct_admin_conditions, pct_admin_architecture,
                    pct_admin_mecanique, pct_admin_excavation,
                    ad_hub_project_id)
-                SELECT %s, %s, nom, client, adresse, description, statut, notes,
-                       nom_client, contact_client, email_client, telephone_client,
-                       numero_projet, date_debut, date_fin,
-                       contact_entrepreneur, email_entrepreneur, telephone_entrepreneur,
-                       logo_base64,
+                SELECT %s, %s, statut, notes,
                        pct_admin_conditions, pct_admin_architecture,
                        pct_admin_mecanique, pct_admin_excavation,
                        %s
