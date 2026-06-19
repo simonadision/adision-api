@@ -532,6 +532,21 @@ def _apply_master_template(
     return cur.rowcount
 
 
+def _hub_project_name(projet_row, authorization):
+    """Phase 7A — nom du projet depuis Ad HUB (source unique), BEST-EFFORT : 1
+    appel (fetch_revision_meta renvoie `name`). None si projet non lié ou hub
+    indisponible. Pour les libellés COSMÉTIQUES (réponses import VIU, noms de
+    fichiers d'export) — jamais fail-closed (ne casse pas l'action principale)."""
+    hid = (projet_row or {}).get("ad_hub_project_id")
+    if not hid:
+        return None
+    jwt_token = _extract_bearer(authorization, None)
+    if not jwt_token:
+        return None
+    meta = hub_service.fetch_revision_meta(jwt_token, [hid])
+    return (meta.get(str(hid)) or {}).get("name")
+
+
 def _fetch_logo_b64_from_url(url):
     """Phase 6 — récupère les bytes d'un logo depuis son URL R2 (hub logo_url) et
     les encode en base64 pour build_pdf_logo. Best-effort : retourne "" en cas
@@ -1331,17 +1346,18 @@ def register_ad_budget_routes(get_conn):
     # ══════════════════════════════════════════════════════════
 
     @router.get("/projects/mine")
-    def projects_mine(user=Depends(jwt_user)):
+    def projects_mine(user=Depends(jwt_user), authorization: Optional[str] = Header(None)):
         """Liste légère des projets du user — utilisée par le modal "Pousser
         vers Ad BUD" d'Ad VIU. nb_sections = nombre de valeurs section
-        distinctes (codes CSI) déjà présentes dans le projet."""
+        distinctes (codes CSI) déjà présentes dans le projet.
+        Phase 7A — le `nom` vient d'Ad HUB (source unique, batch 1 appel)."""
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         cur.execute(
             """
             SELECT
                 p.id,
-                p.nom,
+                p.ad_hub_project_id,
                 p.updated_at AS date_creation,
                 COALESCE(
                     COUNT(DISTINCT bl.section)
@@ -1351,7 +1367,7 @@ def register_ad_budget_routes(get_conn):
             FROM ad_budget.projets p
             LEFT JOIN ad_budget.budget_lignes bl ON bl.projet_id = p.id
             WHERE p.user_id = %s
-            GROUP BY p.id, p.nom, p.updated_at
+            GROUP BY p.id, p.ad_hub_project_id, p.updated_at
             ORDER BY p.updated_at DESC
             """,
             (user["id"],),
@@ -1359,10 +1375,21 @@ def register_ad_budget_routes(get_conn):
         rows = cur.fetchall()
         cur.close()
         conn.close()
+        # Phase 7A — noms projet depuis Ad HUB (source unique), résolus en BATCH
+        # (1 appel hub : fetch_revision_meta renvoie `name`). Best-effort : noms
+        # None si hub indispo (la liste ne plante jamais — pas de fail-closed sur
+        # une liste de navigation). Le champ `nom` de la réponse vient du hub.
+        jwt_token = _extract_bearer(authorization, None)
+        hub_ids = [r["ad_hub_project_id"] for r in rows if r.get("ad_hub_project_id")]
+        meta = hub_service.fetch_revision_meta(jwt_token, hub_ids) if (jwt_token and hub_ids) else {}
+        for r in rows:
+            hid = r.get("ad_hub_project_id")
+            r["nom"] = (meta.get(str(hid)) or {}).get("name") if hid else None
         return rows
 
     @router.post("/projects/from-viu")
-    def projects_from_viu(data: dict, user=Depends(jwt_user)):
+    def projects_from_viu(data: dict, user=Depends(jwt_user),
+                          authorization: Optional[str] = Header(None)):
         """Crée un projet (mode=new) ou ajoute des lignes à un projet existant
         (mode=existing) à partir des sections CSI détectées par Ad VIU.
 
@@ -1433,7 +1460,7 @@ def register_ad_budget_routes(get_conn):
                         detail="project_id requis pour mode=existing",
                     )
                 cur.execute(
-                    "SELECT id, nom, user_id FROM ad_budget.projets WHERE id = %s",
+                    "SELECT id, user_id, ad_hub_project_id FROM ad_budget.projets WHERE id = %s",
                     (project_id_in,),
                 )
                 proj = cur.fetchone()
@@ -1534,7 +1561,7 @@ def register_ad_budget_routes(get_conn):
             conn.commit()
             return {
                 "project_id": project_id,
-                "project_name": proj["nom"],
+                "project_name": _hub_project_name(proj, authorization),
                 "sections_added": new_sections_count,
                 "lines_added": lines_added,
                 # Nombre de lignes du squelette standard ajoutées si le projet
@@ -1555,7 +1582,8 @@ def register_ad_budget_routes(get_conn):
     # Ad VIU v2 - Push d'une analyse vers Ad BUD (Jalon 4)
     # ════════════════════════════════════════════════════════════════════
     @router.post("/projects/from-viu-v2")
-    def projects_from_viu_v2(data: dict, user=Depends(jwt_user)):
+    def projects_from_viu_v2(data: dict, user=Depends(jwt_user),
+                             authorization: Optional[str] = Header(None)):
         """Cree un projet (mode=new) ou ajoute des lignes a un projet existant
         (mode=existing) a partir des items detectes/valides par Ad VIU v2.
 
@@ -1632,7 +1660,7 @@ def register_ad_budget_routes(get_conn):
                         detail="project_id requis pour mode=existing",
                     )
                 cur.execute(
-                    "SELECT id, nom, user_id FROM ad_budget.projets WHERE id = %s",
+                    "SELECT id, user_id, ad_hub_project_id FROM ad_budget.projets WHERE id = %s",
                     (project_id_in,),
                 )
                 proj = cur.fetchone()
@@ -1855,7 +1883,7 @@ def register_ad_budget_routes(get_conn):
             conn.commit()
             return {
                 "project_id": project_id,
-                "project_name": proj["nom"],
+                "project_name": _hub_project_name(proj, authorization),
                 # Nouvelle structure (Phase 2 — 2026-05-12) : REPLACE
                 # behavior. deleted_count = squelette architectural + items
                 # Ad VIU precedents vires ; inserted_count = nouveaux items
@@ -2943,12 +2971,14 @@ def register_ad_budget_routes(get_conn):
         return {"refreshed": refreshed, "nb": len(refreshed)}
 
     @router.get("/projets/{projet_id}/export")
-    def export_projet_excel(projet_id: int, user=Depends(jwt_user)):
+    def export_projet_excel(projet_id: int, user=Depends(jwt_user),
+                            authorization: Optional[str] = Header(None)):
         # PHASE 3A — authentification + autorisation (lecture : export = lecture).
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
-        cur.execute("SELECT nom FROM ad_budget.projets WHERE id = %s", (projet_id,))
+        # Phase 7A — identité depuis le hub : on ne lit plus le nom local.
+        cur.execute("SELECT ad_hub_project_id FROM ad_budget.projets WHERE id = %s", (projet_id,))
         projet = cur.fetchone()
         if not projet:
             cur.close()
@@ -3028,7 +3058,8 @@ def register_ad_budget_routes(get_conn):
         wb.save(buf)
         buf.seek(0)
 
-        safe_nom = "".join(c if c.isalnum() or c in "-_ " else "_" for c in (projet["nom"] or "projet")).strip() or "projet"
+        # Phase 7A — nom de fichier depuis le hub (best-effort -> "projet" si indispo).
+        safe_nom = "".join(c if c.isalnum() or c in "-_ " else "_" for c in (_hub_project_name(projet, authorization) or "projet")).strip() or "projet"
         filename = f"{safe_nom}.xlsx"
         return StreamingResponse(
             buf,

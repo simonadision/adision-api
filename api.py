@@ -136,37 +136,12 @@ def _ensure_schema():
             "ALTER TABLE ad_budget.projets ADD CONSTRAINT projet_statut_check "
             "CHECK (statut IN ('brouillon', 'adjuge', 'complet', 'perdu', 'archive'))"
         )
-        # 3. type_batiment + CHECK.
-        cur.execute(
-            "ALTER TABLE ad_budget.projets ADD COLUMN IF NOT EXISTS type_batiment VARCHAR(20)"
-        )
-        cur.execute(
-            "ALTER TABLE ad_budget.projets DROP CONSTRAINT IF EXISTS projet_type_batiment_check"
-        )
-        cur.execute(
-            "ALTER TABLE ad_budget.projets ADD CONSTRAINT projet_type_batiment_check "
-            "CHECK (type_batiment IS NULL OR type_batiment IN ("
-            "'residentiel', 'commercial', 'institutionnel', 'industriel', 'mixte'))"
-        )
-        # 4. region (validation côté backend, pas de CHECK SQL pour rester souple).
-        cur.execute(
-            "ALTER TABLE ad_budget.projets ADD COLUMN IF NOT EXISTS region VARCHAR(50)"
-        )
-        # 5. date_adjudication.
-        cur.execute(
-            "ALTER TABLE ad_budget.projets ADD COLUMN IF NOT EXISTS date_adjudication DATE"
-        )
-        # 6. superficie_m2 + CHECK > 0.
-        cur.execute(
-            "ALTER TABLE ad_budget.projets ADD COLUMN IF NOT EXISTS superficie_m2 NUMERIC(10,2)"
-        )
-        cur.execute(
-            "ALTER TABLE ad_budget.projets DROP CONSTRAINT IF EXISTS projet_superficie_m2_check"
-        )
-        cur.execute(
-            "ALTER TABLE ad_budget.projets ADD CONSTRAINT projet_superficie_m2_check "
-            "CHECK (superficie_m2 IS NULL OR superficie_m2 > 0)"
-        )
+        # 3-6. Phase 7A — colonnes d'IDENTITÉ (type_batiment / region /
+        # date_adjudication / superficie_m2) NE SONT PLUS recréées au boot :
+        # l'identité projet vit dans Ad HUB (source unique). Les ADD COLUMN IF NOT
+        # EXISTS + leurs CHECK ont été RETIRÉS ici pour que le DROP de Phase 7B ne
+        # soit pas annulé au prochain démarrage (les CHECK partent avec le DROP
+        # COLUMN ; le re-pointage des lectures est fait en Phase 7A).
         # 7. dernier_snapshot_id (préparation Sprint B, pas utilisé maintenant).
         cur.execute(
             "ALTER TABLE ad_budget.projets ADD COLUMN IF NOT EXISTS dernier_snapshot_id INTEGER"
