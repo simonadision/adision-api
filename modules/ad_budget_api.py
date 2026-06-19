@@ -195,13 +195,19 @@ def _json_dumps_with_default(obj):
     return json.dumps(obj, default=str)
 
 
-def _create_snapshot(cur, projet_row, trigger_event: str) -> int:
+def _create_snapshot(cur, projet_row, trigger_event: str, ident: dict) -> int:
     """Crée un snapshot du projet dans app_ana.project_snapshots et le marque
     is_latest=TRUE. Marque les anciens snapshots du même projet à FALSE et
     met à jour ad_budget.projets.dernier_snapshot_id.
 
     `cur` est un curseur (row_factory=dict_row) déjà ouvert sur la transaction
     en cours. NE COMMIT PAS — l'appelant gère la transaction.
+
+    Phase 6 — `ident` = identité projet DÉJÀ RÉSOLUE depuis Ad HUB (source unique,
+    via hub_service.resolve_hub_identity), passée par l'appelant. Les champs
+    IDENTITÉ du snapshot (nom/client/type/region/date_adj/superficie) viennent de
+    `ident` ; `projet_row` reste la source des champs PROPRES (statut, params de
+    quantités). La fonction est agnostique de la PROVENANCE de `ident`.
     Retourne l'id du snapshot créé.
     """
     projet_id = projet_row["id"]
@@ -247,7 +253,7 @@ def _create_snapshot(cur, projet_row, trigger_event: str) -> int:
 
     # 3. Adapter au format aggregate (mat/mo/st nested) puis calculer
     aggregate_lines = adapt_budget_lines(rows_with_eff_qte)
-    superficie = projet_row.get("superficie_m2")
+    superficie = ident.get("superficie_m2")
     aggregates = compute_aggregates(
         aggregate_lines,
         {
@@ -279,13 +285,13 @@ def _create_snapshot(cur, projet_row, trigger_event: str) -> int:
         """,
         (
             projet_id,
-            projet_row.get("nom"),
-            projet_row.get("nom_client") or projet_row.get("client"),
+            ident.get("nom"),
+            ident.get("nom_client"),
             projet_row["statut"],
-            projet_row.get("type_batiment"),
-            projet_row.get("region"),
-            projet_row.get("date_adjudication"),
-            projet_row.get("superficie_m2"),
+            ident.get("type_batiment"),
+            ident.get("region"),
+            ident.get("date_adjudication"),
+            ident.get("superficie_m2"),
             Json(budget_lines_raw, dumps=_json_dumps_with_default),
             Json(aggregates, dumps=_json_dumps_with_default),
             trigger_event,
@@ -2161,7 +2167,8 @@ def register_ad_budget_routes(get_conn):
         return result
 
     @router.put("/projets/{projet_id}")
-    def update_projet(projet_id: int, data: dict, user=Depends(jwt_user)):
+    def update_projet(projet_id: int, data: dict, user=Depends(jwt_user),
+                      authorization: Optional[str] = Header(None)):
         # PHASE 3A — authentification + autorisation (écriture).
         _load_and_authorize_projet(get_conn, projet_id, user, "write")
         # Brief 5a — identité projet = source unique Ad HUB. Refus 403 explicite.
@@ -2272,8 +2279,19 @@ def register_ad_budget_routes(get_conn):
             old_statut not in DEFINITIVE_STATUSES
             and new_statut in DEFINITIVE_STATUSES
         ):
+            # Phase 6 — identité du snapshot Ad ANA = Ad HUB (source unique).
+            # Résolue ici (1 fetch) et passée à _create_snapshot. Fail-closed :
+            # hub en erreur -> rollback de la transition + 502 (le statut reste
+            # inchangé ; pas de snapshot avec une identité locale figée/fausse).
+            _jwt = _extract_bearer(authorization, None)
+            try:
+                _ident = (hub_service.resolve_hub_identity(updated, _jwt, {})
+                          if _jwt else {})
+            except hub_service.HubServiceError as e:
+                conn.rollback(); cur.close(); conn.close()
+                raise HTTPException(status_code=502, detail=f"Ad HUB indisponible : {e.detail}")
             snapshot_id = _create_snapshot(
-                cur, updated, f"statut_change_to_{new_statut}"
+                cur, updated, f"statut_change_to_{new_statut}", _ident
             )
             updated["dernier_snapshot_id"] = snapshot_id
 
