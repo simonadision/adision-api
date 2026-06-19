@@ -129,6 +129,16 @@ def register_ad_devis_routes(get_conn):
             cur.close()
             conn.close()
         jwt_token = _extract_bearer(authorization, None)
+        # Phase 6 — identité CLIENT depuis le hub (source unique). Fail-closed :
+        # hub en erreur -> 502 (pas de fallback sur le local figé).
+        _hubc = {}
+        if jwt_token:
+            try:
+                _ident = hub_service.resolve_hub_identity(projet, jwt_token, _hubc)
+            except hub_service.HubServiceError as e:
+                raise HTTPException(status_code=502, detail=f"Ad HUB indisponible : {e.detail}")
+        else:
+            _ident = {}
         # Entreprise (fiche org HUB) — non bloquant.
         entreprise = {}
         try:
@@ -154,10 +164,10 @@ def register_ad_devis_routes(get_conn):
                 "telephone": entreprise.get("telephone"),
             },
             "client": {
-                "nom": projet.get("nom_client") or projet.get("client"),
-                "contact": projet.get("contact_client"),
-                "courriel": projet.get("email_client"),
-                "telephone": projet.get("telephone_client"),
+                "nom": _ident.get("nom_client"),
+                "contact": _ident.get("contact_client"),
+                "courriel": _ident.get("email_client"),
+                "telephone": _ident.get("telephone_client"),
             },
             "user": {"nom": user.get("nom"), "email": user.get("email")},
             "documents": documents,
@@ -346,6 +356,17 @@ def register_ad_devis_routes(get_conn):
         except Exception as e:  # noqa: BLE001
             print(f"[devis] fetch_organization échec (pdf): {e}", flush=True)
 
+        # Phase 6 — identité CLIENT depuis le hub (source unique). Fail-closed :
+        # hub en erreur -> 502 (pas de fallback sur le local figé du devis).
+        _hubc = {}
+        if jwt_token:
+            try:
+                _ident = hub_service.resolve_hub_identity(projet, jwt_token, _hubc)
+            except hub_service.HubServiceError as e:
+                raise HTTPException(status_code=502, detail=f"Ad HUB indisponible : {e.detail}")
+        else:
+            _ident = {}
+
         nb = (couleur == "nb")
         ACCENT = colors.HexColor("#111827") if nb else colors.HexColor("#1e3a8a")
         MUTED = colors.HexColor("#374151") if nb else colors.HexColor("#475569")
@@ -368,7 +389,7 @@ def register_ad_devis_routes(get_conn):
         doc = SimpleDocTemplate(buf, pagesize=letter,
                                 rightMargin=margin, leftMargin=margin,
                                 topMargin=margin, bottomMargin=2.2 * cm,
-                                title=f"Devis — {projet.get('nom') or projet_id}")
+                                title=f"Devis — {_ident.get('nom') or projet_id}")
         story = []
 
         # 1. EN-TÊTE : logo entreprise (gauche) + titre (droite). Colonnes
@@ -388,7 +409,7 @@ def register_ad_devis_routes(get_conn):
         # droite, alignée au bloc CLIENT) -> AUCUN chevauchement avec le logo
         # gauche. ACCENT = noir en N&B, bleu marque en couleur. Nom vide ->
         # sous-titre seul (jamais de titre vide).
-        _nom_projet = esc((projet.get("nom") or "").strip().upper())
+        _nom_projet = esc((_ident.get("nom") or "").strip().upper())
         titre_proj_style = ParagraphStyle(
             "tp", parent=ss["Normal"], fontSize=18, leading=21, alignment=0,
             textColor=ACCENT, fontName="Helvetica-Bold")
@@ -428,10 +449,10 @@ def register_ad_devis_routes(get_conn):
             ("Téléphone :", entreprise.get("telephone") or "—"),
         ])
         client = block("CLIENT", [
-            ("", projet.get("nom_client") or projet.get("client") or "—"),
-            ("Contact :", projet.get("contact_client") or "—"),
-            ("Courriel :", projet.get("email_client") or "—"),
-            ("Téléphone :", projet.get("telephone_client") or "—"),
+            ("", _ident.get("nom_client") or "—"),
+            ("Contact :", _ident.get("contact_client") or "—"),
+            ("Courriel :", _ident.get("email_client") or "—"),
+            ("Téléphone :", _ident.get("telephone_client") or "—"),
         ])
         two = Table([[entr, client]], colWidths=[doc.width / 2.0, doc.width / 2.0])
         two.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -569,7 +590,7 @@ def register_ad_devis_routes(get_conn):
             "schema_version": 1,
             "report_type": "proposition_devis",
             "project": {"central_project_id": projet.get("ad_hub_project_id"),
-                        "nom": projet.get("nom")},
+                        "nom": _ident.get("nom")},
             "revision": {"no": projet.get("revision_no", 0),
                          "label": projet.get("revision_label") or "Originale"},
             "options": {"arrondi_dollar": bool(projet.get("arrondi_dollar"))},
@@ -583,7 +604,7 @@ def register_ad_devis_routes(get_conn):
             "admin_profit": {"mode": None, "details": []},
             "regroupements_csi": [],
             "devis": {
-                "destinataire_contact": projet.get("contact_client"),
+                "destinataire_contact": _ident.get("contact_client"),
                 "travaux_inclus": _lines(devis.get("travaux_inclus")),
                 "travaux_non_inclus": _lines(devis.get("travaux_non_inclus")),
             },

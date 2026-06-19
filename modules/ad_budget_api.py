@@ -343,7 +343,13 @@ def _push_budget_snapshot(get_conn, projet_id, authorization):
         eff = []
         for r in rows:
             rc = dict(r); rc["qte"] = _effective_qte(r, mob, sp, surface_mur, surface_gypse); eff.append(rc)
-        sup = projet.get("superficie_m2")
+        # Phase 6 — superficie depuis le hub (source unique). BEST-EFFORT ici (push
+        # FIRE-AND-FORGET) : si le hub flanche, sup=None et le snapshot financier
+        # est poussé quand même (le coût/m² sera juste absent).
+        try:
+            sup = hub_service.resolve_hub_identity(projet, jwt_token, {}).get("superficie_m2")
+        except hub_service.HubServiceError:
+            sup = None
         agg = compute_aggregates(adapt_budget_lines(eff),
                                  {"superficie_m2": float(sup) if sup is not None else None})
         t = agg.get("totals", {}); c = agg.get("counts", {})
@@ -518,6 +524,23 @@ def _apply_master_template(
         params.append(list(default_divisions))
     cur.execute(sql, params)
     return cur.rowcount
+
+
+def _fetch_logo_b64_from_url(url):
+    """Phase 6 — récupère les bytes d'un logo depuis son URL R2 (hub logo_url) et
+    les encode en base64 pour build_pdf_logo. Best-effort : retourne "" en cas
+    d'échec (URL absente, réseau, non-200) → le PDF retombe sur le rang suivant
+    (logo org / neutre). Ne lève JAMAIS (le logo ne doit pas casser l'export)."""
+    if not url:
+        return ""
+    try:
+        with httpx.Client(timeout=8.0) as cli:
+            r = cli.get(url)
+        if r.status_code == 200 and r.content:
+            return base64.b64encode(r.content).decode("ascii")
+    except Exception as e:  # noqa: BLE001
+        print(f"[ad-bud PDF] fetch logo_url échec ({url}): {e}", flush=True)
+    return ""
 
 
 def build_pdf_logo(logo_base64: str, max_width: float = 180):
@@ -2303,7 +2326,8 @@ def register_ad_budget_routes(get_conn):
         return {"status": "deleted"}
 
     @router.get("/projets/{projet_id}/export-for-con")
-    def export_projet_for_con(projet_id: int, user=Depends(jwt_user)):
+    def export_projet_for_con(projet_id: int, user=Depends(jwt_user),
+                              authorization: Optional[str] = Header(None)):
         """Sprint 1.A Ad CON — Export du projet+lignes pour Ad CON.
 
         Architecture PULL : Ad CON viendra appeler cet endpoint au Sprint 1.B
@@ -2364,6 +2388,18 @@ def register_ad_budget_routes(get_conn):
             projet = cur.fetchone()
             if projet is None:
                 raise HTTPException(status_code=404, detail="Projet introuvable")
+
+            # Phase 6 — IDENTITÉ projet = Ad HUB (source unique). Fail-closed : hub
+            # en erreur -> 502 (pas de fallback sur le local figé envoyé à Ad CON).
+            _jwt = _extract_bearer(authorization, None)
+            _hubc = {}
+            if _jwt:
+                try:
+                    _ident = hub_service.resolve_hub_identity(projet, _jwt, _hubc)
+                except hub_service.HubServiceError as e:
+                    raise HTTPException(status_code=502, detail=f"Ad HUB indisponible : {e.detail}")
+            else:
+                _ident = {}
 
             # Defense in depth — UI n'affiche pas le bouton hors 'adjuge' mais
             # un user qui tape l'URL directement doit être bloqué aussi.
@@ -2476,29 +2512,24 @@ def register_ad_budget_routes(get_conn):
                 "lines_count": len(lines_out),
             },
             "project": {
-                "name": projet.get("nom"),
-                "project_number": projet.get("numero_projet") or None,
-                "client_name": (
-                    projet.get("nom_client") or projet.get("client") or None
-                ),
-                "address": projet.get("adresse"),
+                # Phase 6 — identité depuis le hub (_ident). statut + ad_hub_project_id
+                # restent du projet local (propre / lien).
+                "name": _ident.get("nom"),
+                "project_number": _ident.get("numero_projet") or None,
+                "client_name": _ident.get("nom_client") or None,
+                "address": _ident.get("adresse"),
                 # TODO derive in future sprint when needed (cf. STOP 1.A.1 #4).
                 "city": None,
                 "status": projet.get("statut"),
-                "type_batiment": projet.get("type_batiment"),
-                "region": projet.get("region"),
+                "type_batiment": _ident.get("type_batiment"),
+                "region": _ident.get("region"),
                 # Lien Ad HUB (INTEGER → app_hub.projects.id, nullable). Exposé pour
                 # qu'Ad CON rattache le projet au hub directement (brique 3). LECTURE
                 # SEULE : on remonte la valeur déjà présente sur le projet BUD.
                 "ad_hub_project_id": projet.get("ad_hub_project_id"),
-                "date_adjudication": (
-                    projet["date_adjudication"].isoformat()
-                    if projet.get("date_adjudication") else None
-                ),
-                "superficie_m2": (
-                    float(projet["superficie_m2"])
-                    if projet.get("superficie_m2") is not None else None
-                ),
+                # _ident expose déjà date ISO (str) et superficie float (sérialisés hub).
+                "date_adjudication": _ident.get("date_adjudication"),
+                "superficie_m2": _ident.get("superficie_m2"),
                 "contract_initial_amount": round(contract_total, 2),
                 "organization_id_source": org_source,
             },
@@ -3104,6 +3135,18 @@ def register_ad_budget_routes(get_conn):
         cur.close()
         conn.close()
 
+        # Phase 6 — IDENTITÉ projet = Ad HUB (source unique). Résolue 1 fois (cache
+        # scope-fonction = 1 seul fetch_project). Fail-closed : hub en erreur -> 502
+        # (PAS de fallback sur le local figé). jwt_token absent -> {} (cas-limite).
+        _hub_cache = {}
+        if jwt_token:
+            try:
+                _ident = hub_service.resolve_hub_identity(projet, jwt_token, _hub_cache)
+            except hub_service.HubServiceError as e:
+                raise HTTPException(status_code=502, detail=f"Ad HUB indisponible : {e.detail}")
+        else:
+            _ident = {}
+
         sections_groups = OrderedDict()
         for l in lignes:
             sec = l["section"] or ""
@@ -3120,7 +3163,7 @@ def register_ad_budget_routes(get_conn):
             buf, pagesize=pagesize,
             rightMargin=margin, leftMargin=margin,
             topMargin=margin, bottomMargin=margin,
-            title=f"Rapport budget — {projet['nom']}",
+            title=f"Rapport budget — {_ident.get('nom') or ''}",
         )
         ss = getSampleStyleSheet()
         story = []
@@ -3137,7 +3180,7 @@ def register_ad_budget_routes(get_conn):
             textColor=colors.HexColor("#475569"),
         )
         _rev_lbl = projet.get("revision_label") or "Originale"
-        _nom_projet = (projet.get("nom") or "").strip()
+        _nom_projet = (_ident.get("nom") or "").strip()
         title_cell = []
         if _nom_projet:
             title_cell.append(Paragraph(_nom_projet.upper(), nom_titre_style))
@@ -3156,8 +3199,10 @@ def register_ad_budget_routes(get_conn):
         # on retombe sur le rang suivant plutôt que de casser l'export PDF.
         # jwt_token est fourni par l'appelant (route) ; None -> pas de fetch
         # HUB -> logo neutre (jamais de crash).
-        # rang 2 (défaut) : logo historique du projet.
-        chosen_logo_base64 = projet.get("logo_base64") or ""
+        # rang 2 (défaut) : logo du projet — Phase 6 : depuis le hub (logo_url R2,
+        # source unique) au lieu de la colonne locale logo_base64. Best-effort :
+        # échec -> "" -> on retombe sur rang 3 (org) / neutre (le logo ne crashe jamais).
+        chosen_logo_base64 = _fetch_logo_b64_from_url(_ident.get("logo_url"))
         # rang 1 : logo du client lié — PRIME sur le logo projet.
         if projet.get("client_id") and jwt_token:
             try:
@@ -3209,24 +3254,24 @@ def register_ad_budget_routes(get_conn):
 
         client_html = "<br/>".join([
             "<b><font size='10' color='#1e3a8a'>CLIENT</font></b>",
-            field_line("Nom du projet", projet.get("nom")),
-            field_line("Nom du client", projet.get("nom_client") or projet.get("client")),
-            field_line("Contact", projet.get("contact_client")),
-            field_line("Courriel", projet.get("email_client")),
-            field_line("Téléphone", projet.get("telephone_client")),
+            field_line("Nom du projet", _ident.get("nom")),
+            field_line("Nom du client", _ident.get("nom_client")),
+            field_line("Contact", _ident.get("contact_client")),
+            field_line("Courriel", _ident.get("email_client")),
+            field_line("Téléphone", _ident.get("telephone_client")),
         ])
         # ENTREPRENEUR : titre sur toute la largeur, puis 2 sous-colonnes
         ent_heading_html = "<b><font size='10' color='#1e3a8a'>ENTREPRENEUR</font></b>"
         ent_left_html = "<br/>".join([
             field_line("Date du jour", date.today().strftime("%Y-%m-%d")),
-            field_line("Numéro du projet", projet.get("numero_projet")),
-            field_line("Date début travaux", fmt_date(projet.get("date_debut"))),
-            field_line("Date fin travaux", fmt_date(projet.get("date_fin"))),
+            field_line("Numéro du projet", _ident.get("numero_projet")),
+            field_line("Date début travaux", fmt_date(_ident.get("date_debut"))),
+            field_line("Date fin travaux", fmt_date(_ident.get("date_fin"))),
         ])
         ent_right_html = "<br/>".join([
-            field_line("Contact entrepreneur", projet.get("contact_entrepreneur")),
-            field_line("Courriel", projet.get("email_entrepreneur")),
-            field_line("Téléphone", projet.get("telephone_entrepreneur")),
+            field_line("Contact entrepreneur", _ident.get("contact_entrepreneur")),
+            field_line("Courriel", _ident.get("email_entrepreneur")),
+            field_line("Téléphone", _ident.get("telephone_entrepreneur")),
         ])
 
         client_para = Paragraph(client_html, info_style)
@@ -3812,7 +3857,7 @@ def register_ad_budget_routes(get_conn):
             "report_type": "calcul_quantitatif",
             "project": {
                 "central_project_id": projet.get("ad_hub_project_id"),
-                "nom": projet.get("nom"),
+                "nom": _ident.get("nom"),
             },
             "revision": {
                 "no": projet.get("revision_no", 0),
