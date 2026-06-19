@@ -35,6 +35,30 @@ def _patch_no_network(monkeypatch=None):
     B.hub_service.fetch_organization = lambda *a, **k: {}
     D.hub_service.fetch_organization = lambda *a, **k: {}
 
+    # Phase 6 — neutralise la résolution d'identité hub (réseau) : simule un hub
+    # qui renvoie la MÊME identité que le projet local mock (hub ≡ local), sans
+    # appel réseau. Permet aux tests PDF de garder une identité non vide.
+    def _fake_identity(projet_row, jwt_token, cache):
+        p = projet_row or {}
+        return {
+            "nom": p.get("nom"),
+            "nom_client": p.get("nom_client") or p.get("client"),
+            "adresse": p.get("adresse"), "description": p.get("description"),
+            "numero_projet": p.get("numero_projet"),
+            "contact_client": p.get("contact_client"), "email_client": p.get("email_client"),
+            "telephone_client": p.get("telephone_client"),
+            "contact_entrepreneur": p.get("contact_entrepreneur"),
+            "email_entrepreneur": p.get("email_entrepreneur"),
+            "telephone_entrepreneur": p.get("telephone_entrepreneur"),
+            "type_batiment": p.get("type_batiment"), "region": p.get("region"),
+            "superficie_m2": p.get("superficie_m2"),
+            "date_adjudication": p.get("date_adjudication"),
+            "date_debut": p.get("date_debut"), "date_fin": p.get("date_fin"),
+            "logo_url": None,
+        }
+    B.hub_service.resolve_hub_identity = _fake_identity
+    D.hub_service.resolve_hub_identity = _fake_identity
+
 
 def _build_rapport(get_conn):
     import modules.ad_budget_api as B
