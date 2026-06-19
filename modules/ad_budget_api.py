@@ -2061,6 +2061,28 @@ def register_ad_budget_routes(get_conn):
             conn.close()
         return {"status": "created", "projet": row, "nb_lignes_creees": nb_lignes}
 
+    # ──────────────────────────────────────────────────────────────────
+    # GET /budget/hub-project/{hub_project_id} — proxy LECTURE du projet Ad HUB
+    # (Brief 5a). Alimente <ProjectInfoPanel> : Ad BUD = consommateur du hub pour
+    # l'IDENTITÉ projet. JWT forwardé (le hub valide l'org). Hub down → 502 clair.
+    # Read-only. Path littéral distinct de /projets/{id} (pas de collision).
+    # ──────────────────────────────────────────────────────────────────
+    @router.get("/hub-project/{hub_project_id}")
+    def get_hub_project(
+        hub_project_id: int,
+        authorization: Optional[str] = Header(None),
+    ):
+        jwt_token = _extract_bearer(authorization, None)
+        try:
+            data = hub_service.fetch_project(jwt_token, hub_project_id)
+        except hub_service.HubServiceError as e:
+            sc = e.status_code or 502
+            status = sc if sc in (401, 403) else 502
+            raise HTTPException(status_code=status, detail=f"Ad HUB : {e.detail}")
+        if data is None:
+            raise HTTPException(status_code=404, detail="Projet Ad HUB introuvable")
+        return data  # {"project": {...}} — <ProjectInfoPanel> déballe
+
     @router.get("/projets/{projet_id}")
     def get_projet(
         projet_id: int,
