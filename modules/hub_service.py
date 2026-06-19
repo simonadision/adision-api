@@ -237,6 +237,93 @@ def fetch_project(jwt_token: str, project_id: int) -> Optional[dict]:
         raise
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Phase 6 — résolution d'IDENTITÉ projet depuis Ad HUB (source unique).
+# ──────────────────────────────────────────────────────────────────────
+# Table région : code hub (snake_case) → libellé FR (convention Ad BUD).
+# Miroir backend de REGION_LABELS (@adision/ui) — le hub stocke un code, le
+# PDF/devis/export Ad BUD affichent le libellé FR.
+_REGION_CODE_TO_LABEL = {
+    "bas_saint_laurent": "Bas-Saint-Laurent",
+    "saguenay_lac_saint_jean": "Saguenay–Lac-Saint-Jean",
+    "capitale_nationale": "Capitale-Nationale",
+    "mauricie": "Mauricie",
+    "estrie": "Estrie",
+    "montreal": "Montréal",
+    "outaouais": "Outaouais",
+    "abitibi_temiscamingue": "Abitibi-Témiscamingue",
+    "cote_nord": "Côte-Nord",
+    "nord_du_quebec": "Nord-du-Québec",
+    "gaspesie_iles_de_la_madeleine": "Gaspésie–Îles-de-la-Madeleine",
+    "chaudiere_appalaches": "Chaudière-Appalaches",
+    "laval": "Laval",
+    "lanaudiere": "Lanaudière",
+    "laurentides": "Laurentides",
+    "monteregie": "Montérégie",
+    "centre_du_quebec": "Centre-du-Québec",
+}
+
+# Mapping colonne identité LOCALE Ad BUD → champ du projet hub sérialisé
+# (noms exacts migration 108 + base app_hub.projects). `region` est traité à
+# part (conversion code→libellé) ; `logo_url` est exposé tel quel (le PDF
+# récupère les bytes depuis l'URL R2).
+_HUB_IDENTITY_MAP = {
+    "nom": "name",
+    "nom_client": "client_nom",
+    "adresse": "adresse",
+    "description": "description",
+    "numero_projet": "numero_projet_externe",
+    "contact_client": "client_contact_nom",
+    "email_client": "client_email",
+    "telephone_client": "client_telephone",
+    "contact_entrepreneur": "entrepreneur_nom",
+    "email_entrepreneur": "entrepreneur_email",
+    "telephone_entrepreneur": "entrepreneur_telephone",
+    "type_batiment": "type_batiment",
+    "superficie_m2": "superficie_m2",
+    "date_adjudication": "date_adjudication",
+    "date_debut": "date_debut_construction",
+    "date_fin": "date_livraison_prevue",
+    "logo_url": "logo_url",
+}
+
+
+def resolve_hub_identity(projet_row, jwt_token, cache) -> dict:
+    """Phase 6 — IDENTITÉ projet depuis Ad HUB (source unique), mappée aux clés
+    conventionnelles Ad BUD. `cache` (dict, scope requête) mémoïse par
+    ad_hub_project_id → 1 fetch_project MAX par requête HTTP.
+
+    - projet local non lié (ad_hub_project_id NULL/0) → {} + warning (cas-limite
+      legacy ; en pratique 0 projet non lié).
+    - projet hub 404 (supprimé/inaccessible) → {} (cache négatif).
+    - hub injoignable / 401 / 403 / 5xx → PROPAGE HubServiceError (fail-closed :
+      le caller transforme en 502 clair, PAS de fallback local).
+
+    Conversions : `region` code→libellé FR ; `logo_url` = URL R2 (bytes côté
+    consommateur). Dates/superficie : telles que sérialisées par le hub."""
+    if cache is None:
+        cache = {}
+    hub_id = (projet_row or {}).get("ad_hub_project_id")
+    if not hub_id:
+        logger.warning(
+            "resolve_hub_identity: projet local sans ad_hub_project_id (id=%s) "
+            "— identité hub indisponible", (projet_row or {}).get("id"))
+        return {}
+    if hub_id in cache:
+        return cache[hub_id]
+    data = fetch_project(jwt_token, hub_id)  # {"project": {...}} | None ; lève si 401/403/5xx/réseau
+    p = data.get("project") if isinstance(data, dict) else None
+    if not isinstance(p, dict):
+        logger.warning("resolve_hub_identity: projet hub %s introuvable (404)", hub_id)
+        cache[hub_id] = {}
+        return {}
+    out = {local: p.get(hub_field) for local, hub_field in _HUB_IDENTITY_MAP.items()}
+    rc = p.get("region")
+    out["region"] = _REGION_CODE_TO_LABEL.get(rc, rc)
+    cache[hub_id] = out
+    return out
+
+
 def fetch_client(jwt_token: str, client_id: int) -> Optional[dict]:
     """Récupère les métadonnées d'un client Ad HUB via
     GET /api/clients/{id} (Sprint DT-56 D1).
