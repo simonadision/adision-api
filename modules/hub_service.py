@@ -263,6 +263,9 @@ _REGION_CODE_TO_LABEL = {
     "centre_du_quebec": "Centre-du-Québec",
 }
 
+# Inverse (libellé FR → code hub), DÉRIVÉ automatiquement pour rester en sync.
+_REGION_LABEL_TO_CODE = {label: code for code, label in _REGION_CODE_TO_LABEL.items()}
+
 # Mapping colonne identité LOCALE Ad BUD → champ du projet hub sérialisé
 # (noms exacts migration 108 + base app_hub.projects). `region` est traité à
 # part (conversion code→libellé) ; `logo_url` est exposé tel quel (le PDF
@@ -322,6 +325,25 @@ def resolve_hub_identity(projet_row, jwt_token, cache) -> dict:
     out["region"] = _REGION_CODE_TO_LABEL.get(rc, rc)
     cache[hub_id] = out
     return out
+
+
+def region_label_to_code(label):
+    """Phase 6 — convertit un libellé région FR (convention Ad BUD, ex.
+    'Capitale-Nationale') en code hub snake_case ('capitale_nationale').
+    None/inconnu -> renvoyé tel quel (le hub validera/rejettera)."""
+    if not label:
+        return None
+    return _REGION_LABEL_TO_CODE.get(label, label)
+
+
+def filter_project_ids(jwt_token, criteres) -> list:
+    """Phase 6 Option C — IDs des projets hub de l'org matchant des critères
+    d'IDENTITÉ (type_batiment / region[CODE] / client / statut) via
+    POST /api/projects/filter (org-scopé par le JWT, NON paginé). Retourne une
+    liste d'entiers. Lève HubServiceError sur 4xx/5xx/réseau (le caller décide
+    du fail-closed -> 502). Le caller convertit la région en code AVANT l'appel."""
+    resp = _hub_request("POST", "/api/projects/filter", jwt_token, json_body=criteres or {})
+    return (resp or {}).get("ids") or []
 
 
 def fetch_client(jwt_token: str, client_id: int) -> Optional[dict]:

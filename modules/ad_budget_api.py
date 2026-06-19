@@ -1260,23 +1260,31 @@ def register_ad_budget_routes(get_conn):
         else:
             where = ["p.user_id = %s"]
             params = [user["id"]]
+        # Statut = PROPRE Ad BUD (cycle de vie local) -> filtre LOCAL, aucun appel hub.
         if statut:
             where.append("p.statut = %s")
             params.append(statut)
         elif not include_archived:
             where.append("p.statut <> 'archive'")
-        if type_batiment:
-            where.append("p.type_batiment = %s")
-            params.append(type_batiment)
-        if region:
-            where.append("p.region = %s")
-            params.append(region)
-        if client_nom:
-            # Recherche sur les deux colonnes (nom_client = champ structuré,
-            # client = champ libre legacy).
-            where.append("(p.nom_client ILIKE %s OR p.client ILIKE %s)")
-            params.append(f"%{client_nom}%")
-            params.append(f"%{client_nom}%")
+        # Phase 6 Option C — filtres d'IDENTITÉ (type/région/client) délégués au hub
+        # (source unique) : on récupère les ids hub matchant puis on restreint la
+        # liste locale (p.ad_hub_project_id IN ids). Aucun WHERE sur des colonnes
+        # d'identité locales. La région (libellé FR Ad BUD) est convertie en code
+        # hub avant l'appel. hub_ids=[] -> ANY('{}') -> liste vide (cohérent).
+        if type_batiment or region or client_nom:
+            jwt_token = _extract_bearer(authorization, None)
+            crit = {
+                "type_batiment": type_batiment,
+                "region": hub_service.region_label_to_code(region),
+                "client": client_nom,
+            }
+            try:
+                hub_ids = (hub_service.filter_project_ids(jwt_token, crit)
+                           if jwt_token else [])
+            except hub_service.HubServiceError as e:
+                raise HTTPException(status_code=502, detail=f"Ad HUB indisponible : {e.detail}")
+            where.append("p.ad_hub_project_id = ANY(%s)")
+            params.append(hub_ids)
         # LEFT JOIN sur ad_budget.users : sans ce LEFT, les projets
         # orphelins (user_id n'a plus de row matching dans users —
         # cf. duplicate users docs/AD_BUD_TECH_DEBT.md #1) etaient
