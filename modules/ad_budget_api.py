@@ -131,6 +131,18 @@ DATE_ADJ_ALLOWED_FOR_STATUTS = {"adjuge", "complet", "perdu"}
 # semantiquement different (figement vs UI date picker), donc constante separee.
 DEFINITIVE_STATUSES = {"adjuge", "complet", "perdu"}
 
+# Brief 5a — IDENTITÉ PROJET = source unique Ad HUB. Ces champs sont REFUSÉS au
+# PATCH Ad BUD (403) : ils se modifient UNIQUEMENT dans Ad HUB. Ils restent lisibles
+# en BD (retirés au Brief 5b). statut + client_id + tous les champs PROPRES (gabarit,
+# A&P pct_admin_*, mobilisation/cloisons, arrondi, revision_label) restent éditables.
+_HUB_OWNED_BUD_FIELDS = {
+    "nom", "client", "nom_client", "type_batiment", "region",
+    "date_adjudication", "superficie_m2", "date_debut", "date_fin",
+    "adresse", "description", "contact_client", "email_client", "telephone_client",
+    "numero_projet", "contact_entrepreneur", "email_entrepreneur", "telephone_entrepreneur",
+    "logo_base64",
+}
+
 
 def _validate_projet_fields(data: dict, current_statut: Optional[str] = None) -> None:
     """Valide les champs Sprint A dans `data`. Lève HTTPException 400 si invalide.
@@ -2107,6 +2119,13 @@ def register_ad_budget_routes(get_conn):
     def update_projet(projet_id: int, data: dict, user=Depends(jwt_user)):
         # PHASE 3A — authentification + autorisation (écriture).
         _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        # Brief 5a — identité projet = source unique Ad HUB. Refus 403 explicite.
+        _forbidden = sorted(set((data or {}).keys()) & _HUB_OWNED_BUD_FIELDS)
+        if _forbidden:
+            raise HTTPException(
+                status_code=403,
+                detail="Ce champ se modifie dans Ad HUB : " + ", ".join(_forbidden),
+            )
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         # Sprint A : récupère le statut actuel pour la cross-field validation
