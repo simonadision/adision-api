@@ -346,6 +346,17 @@ def filter_project_ids(jwt_token, criteres) -> list:
     return (resp or {}).get("ids") or []
 
 
+def patch_project(jwt_token: str, project_id: int, patch: dict) -> Optional[dict]:
+    """Mode édition <ProjectInfoPanel> — PATCH l'identité d'un projet Ad HUB
+    (proxy depuis le satellite). Le hub valide le RÔLE (gestionnaire) et les
+    champs. Retourne la row mise à jour ({"project":{...}} déballé). Lève
+    HubServiceError sur 4xx/5xx/réseau (le caller relaie 403/422/502)."""
+    raw = _hub_request("PATCH", f"/api/projects/{int(project_id)}", jwt_token, json_body=patch or {})
+    if isinstance(raw, dict) and isinstance(raw.get("project"), dict):
+        return raw["project"]
+    return raw
+
+
 def fetch_client(jwt_token: str, client_id: int) -> Optional[dict]:
     """Récupère les métadonnées d'un client Ad HUB via
     GET /api/clients/{id} (Sprint DT-56 D1).

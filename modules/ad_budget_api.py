@@ -2142,6 +2142,24 @@ def register_ad_budget_routes(get_conn):
             raise HTTPException(status_code=404, detail="Projet Ad HUB introuvable")
         return data  # {"project": {...}} — <ProjectInfoPanel> déballe
 
+    # PATCH /budget/hub-project/{id} — proxy ÉDITION de l'identité projet Ad HUB
+    # (mode édition <ProjectInfoPanel>). JWT forwardé ; le hub tranche par RÔLE
+    # (gestionnaire) + valide les champs. Relaie 400/403/404/422 ; réseau/5xx -> 502.
+    @router.patch("/hub-project/{hub_project_id}")
+    def patch_hub_project(
+        hub_project_id: int,
+        data: dict,
+        authorization: Optional[str] = Header(None),
+    ):
+        jwt_token = _extract_bearer(authorization, None)
+        try:
+            updated = hub_service.patch_project(jwt_token, hub_project_id, data or {})
+        except hub_service.HubServiceError as e:
+            sc = e.status_code or 502
+            status = sc if sc in (400, 401, 403, 404, 422) else 502
+            raise HTTPException(status_code=status, detail=f"Ad HUB : {e.detail}")
+        return {"project": updated}
+
     @router.get("/projets/{projet_id}")
     def get_projet(
         projet_id: int,
