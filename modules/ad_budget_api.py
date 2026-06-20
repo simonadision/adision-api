@@ -1331,11 +1331,16 @@ def register_ad_budget_routes(get_conn):
             hid = r.get("ad_hub_project_id")
             m = meta.get(str(hid)) if hid is not None else None
             if m:
+                # Phase 7B — le `nom` local a été DROPpé : l'identité vient du hub
+                # (source unique). Même pattern batch que /projects/mine (fetch_revision_meta
+                # renvoie `name`). Best-effort : None si le hub est indisponible.
+                r["nom"] = m.get("name")
                 r["revision_numero"] = m.get("numero_revision") or 0
                 r["revision_active"] = m.get("est_revision_active")
                 r["nb_revisions"] = m.get("nb_revisions") or 1
             else:
                 # Pas de lien hub OU hub indisponible -> traité comme standalone actif.
+                r["nom"] = None
                 r["revision_numero"] = 0
                 r["revision_active"] = True
                 r["nb_revisions"] = 1
