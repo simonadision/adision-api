@@ -2198,25 +2198,50 @@ def register_ad_budget_routes(get_conn):
         # plutôt que de casser le GET principal si Ad HUB est indispo —
         # le projet BUD reste consultable même si la branche HUB déconne.
         result = dict(row)
-        if include_hub and result.get("ad_hub_project_id") is not None:
+        hub_pid = result.get("ad_hub_project_id")
+        if hub_pid is not None:
+            hub_data = None
             try:
                 jwt_token = _extract_bearer(authorization, None)
-                hub_data = hub_service.fetch_project(
-                    jwt_token, result["ad_hub_project_id"],
-                )
-                result["ad_hub"] = hub_data  # None si 404 (projet HUB supprimé/inaccessible)
+                hub_data = hub_service.fetch_project(jwt_token, hub_pid)  # None si 404
             except hub_service.HubServiceError as e:
-                result["ad_hub"] = None
-                result["ad_hub_fetch_error"] = (
-                    f"Ad HUB {e.status_code}: {e.detail}"
-                )
+                if include_hub:
+                    result["ad_hub"] = None
+                    result["ad_hub_fetch_error"] = f"Ad HUB {e.status_code}: {e.detail}"
             except HTTPException:
-                # _extract_bearer peut lever 401 si pas d'Authorization
-                # côté query (ce qui ne devrait pas arriver puisque
-                # jwt_user a déjà validé le JWT amont — mais ceinture et
-                # bretelles).
-                result["ad_hub"] = None
-                result["ad_hub_fetch_error"] = "JWT token introuvable pour enrichissement"
+                # _extract_bearer peut lever 401 si pas d'Authorization côté query
+                # (improbable : jwt_user a validé amont — ceinture et bretelles).
+                if include_hub:
+                    result["ad_hub"] = None
+                    result["ad_hub_fetch_error"] = "JWT token introuvable pour enrichissement"
+
+            # VERROU PROJET (Vague 2) — REFRESH du MIROIR local depuis le hub (source
+            # unique), au chargement du projet. Best-effort : si le hub a répondu, on
+            # aligne ad_budget.projets.is_verrouille. Les ~32 gates lisent cette colonne
+            # (code INCHANGÉ) ; ceci la tient à jour au montage (équivalent sync Ad EST).
+            hub_proj = (hub_data or {}).get("project") if isinstance(hub_data, dict) else None
+            if hub_proj is not None and "is_verrouille" in hub_proj:
+                hub_lock = bool(hub_proj.get("is_verrouille"))
+                if hub_lock != bool(result.get("is_verrouille")):
+                    try:
+                        _c2 = get_conn(); _cur2 = _c2.cursor()
+                        if hub_lock:
+                            _cur2.execute(
+                                "UPDATE ad_budget.projets SET is_verrouille = TRUE, "
+                                "verrouille_le = COALESCE(verrouille_le, NOW()), updated_at = NOW() "
+                                "WHERE id = %s", (projet_id,))
+                        else:
+                            _cur2.execute(
+                                "UPDATE ad_budget.projets SET is_verrouille = FALSE, "
+                                "verrouille_par = NULL, verrouille_le = NULL, updated_at = NOW() "
+                                "WHERE id = %s", (projet_id,))
+                        _c2.commit(); _cur2.close(); _c2.close()
+                    except Exception:
+                        pass  # best-effort : on garde la valeur locale courante
+                    result["is_verrouille"] = hub_lock
+
+            if include_hub and "ad_hub" not in result:
+                result["ad_hub"] = hub_data  # None si 404 (projet HUB supprimé/inaccessible)
         return result
 
     @router.put("/projets/{projet_id}")
@@ -2660,24 +2685,53 @@ def register_ad_budget_routes(get_conn):
         return {"status": "updated"}
 
     @router.patch("/projets/{projet_id}/verrou")
-    def toggle_projet_verrou(projet_id: int, data: dict, user=Depends(jwt_user)):
-        """Verrouille / déverrouille un projet (lecture seule), INDÉPENDAMMENT du statut
-        de cycle de vie. Accessible à tout user autorisé en ÉCRITURE sur le projet (même
-        autorisation que les autres writes) MAIS bypass le gate de verrou
-        (check_lock=False) — sinon on ne pourrait jamais déverrouiller. Trace
-        verrouille_par (email) + verrouille_le ; les efface au déverrouillage."""
+    def toggle_projet_verrou(projet_id: int, data: dict, user=Depends(jwt_user),
+                             authorization: Optional[str] = Header(None)):
+        """Verrouille / déverrouille un projet (lecture seule), INDÉPENDAMMENT du statut.
+        VAGUE 2 — le verrou est une propriété du PROJET HUB (source unique). Si le budget
+        est lié (ad_hub_project_id), ce toggle PROXIFIE vers le hub (PATCH /verrou, gate
+        gestionnaire) puis MET À JOUR LE MIROIR local immédiatement. Budget autonome (sans
+        lien hub) → fallback verrou local (comportement historique). Clé d'entrée
+        `{verrouille}` conservée (UX inchangée). check_lock=False (déverrouiller doit
+        marcher verrouillé). Les ~32 gates + exceptions duplication/révision INCHANGÉS."""
         _load_and_authorize_projet(get_conn, projet_id, user, "write", check_lock=False)
         verrouille = bool(data.get("verrouille"))
         email = user.get("email") or (str(user.get("id")) if user.get("id") is not None else "inconnu")
+
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
+        cur.execute("SELECT ad_hub_project_id FROM ad_budget.projets WHERE id = %s", (projet_id,))
+        prow = cur.fetchone()
+        if not prow:
+            cur.close(); conn.close()
+            raise HTTPException(status_code=404, detail="Projet not found")
+        hub_pid = prow.get("ad_hub_project_id")
+
+        # PROXY → hub (source unique) si lié. Le hub tranche par RÔLE (gestionnaire).
+        v_le_hub = None
+        if hub_pid is not None:
+            try:
+                jwt_token = _extract_bearer(authorization, None)
+                hub_proj = hub_service.toggle_project_verrou(jwt_token, int(hub_pid), verrouille)
+                v_le_hub = hub_proj.get("verrouille_le")
+            except hub_service.HubServiceError as e:
+                cur.close(); conn.close()
+                sc = e.status_code or 502
+                status = sc if sc in (401, 403, 404, 409) else 502
+                raise HTTPException(status_code=status, detail=f"Ad HUB : {e.detail}")
+            except HTTPException:
+                cur.close(); conn.close()
+                raise
+
+        # MIROIR local (reflet du hub si lié ; verrou local si autonome). verrouille_le
+        # depuis le hub si dispo, sinon NOW(). verrouille_par = email (audit local).
         try:
             if verrouille:
                 cur.execute(
                     "UPDATE ad_budget.projets SET is_verrouille = TRUE, "
-                    "verrouille_par = %s, verrouille_le = NOW(), updated_at = NOW() "
+                    "verrouille_par = %s, verrouille_le = COALESCE(%s, NOW()), updated_at = NOW() "
                     "WHERE id = %s RETURNING is_verrouille, verrouille_par, verrouille_le",
-                    (email, projet_id),
+                    (email, v_le_hub, projet_id),
                 )
             else:
                 cur.execute(

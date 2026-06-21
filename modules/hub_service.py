@@ -188,6 +188,17 @@ def patch_disciplines(jwt_token: str, hub_project_id: int, disciplines: list) ->
     return _hub_request("PATCH", path, jwt_token, json_body={"disciplines": disciplines or []})
 
 
+def toggle_project_verrou(jwt_token: str, hub_project_id: int, lock: bool) -> dict:
+    """Verrou projet (Vague 2) — le hub est la SOURCE UNIQUE : PATCH /api/projects/{id}/verrou.
+    Le hub gate gestionnaire + écrit is_verrouille. Retourne le project hub déballé
+    {id, is_verrouille, verrouille_par, verrouille_le, …}. Lève HubServiceError sur non-2xx
+    (403 gestionnaire, 404, réseau) — le caller propage (PAS fire-and-forget : c'est l'action)."""
+    path = f"/api/projects/{int(hub_project_id)}/verrou"
+    raw = _hub_request("PATCH", path, jwt_token, json_body={"is_verrouille": bool(lock)})
+    data = raw.get("project") if isinstance(raw, dict) and isinstance(raw.get("project"), dict) else raw
+    return data or {}
+
+
 def soft_delete_project(jwt_token: str, project_id: int) -> None:
     """Soft-delete un projet Ad HUB via DELETE /api/projects/{id}.
 
