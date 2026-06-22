@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+from datetime import date
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
@@ -103,6 +104,27 @@ def _logo_flowable_for_org(org, max_width=150):
         except Exception as e:  # noqa: BLE001
             print(f"[devis] logo org fetch échec: {e}", flush=True)
     return build_pdf_logo("", max_width=max_width)
+
+
+# Format date fr-CA SANS dépendance babel (pas dans requirements.txt) ni locale
+# système (risque sur Railway). Table hardcodée des 12 mois — déterministe,
+# portable, zéro surcoût. Utilisée pour la date du devis sur la page de garde.
+_MOIS_FR_CA = ["janvier", "février", "mars", "avril", "mai", "juin",
+               "juillet", "août", "septembre", "octobre", "novembre", "décembre"]
+
+
+def _format_date_fr_ca(iso_d):
+    """ISO 'YYYY-MM-DD' → 'D mois YYYY' fr-CA (mois en minuscule, sans virgule).
+    Fallback today() si entrée absente, vide ou invalide — préserve la rétrocompat
+    des appels qui ne fournissent pas la date (tests existants notamment)."""
+    try:
+        if iso_d:
+            y, m, dd = str(iso_d).split("-")
+            return f"{int(dd)} {_MOIS_FR_CA[int(m) - 1]} {int(y)}"
+    except (ValueError, TypeError, IndexError):
+        pass
+    today = date.today()
+    return f"{today.day} {_MOIS_FR_CA[today.month - 1]} {today.year}"
 
 
 def register_ad_devis_routes(get_conn):
@@ -236,10 +258,11 @@ def register_ad_devis_routes(get_conn):
         token: Optional[str] = Query(None),
         montant: float = 0,
         couleur: str = "adision",
+        date_devis: Optional[str] = None,
     ):
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
         jwt_token = _extract_bearer(authorization, token)
-        buf, _snap = _build_devis(projet_id, montant, couleur, jwt_token)
+        buf, _snap = _build_devis(projet_id, montant, couleur, jwt_token, date_devis)
         safe = "".join(c if c.isalnum() or c in "-_ " else "_"
                        for c in (_snap["project"]["nom"] or "devis")).strip() or "devis"
         return StreamingResponse(
@@ -255,6 +278,7 @@ def register_ad_devis_routes(get_conn):
         montant: float = 0,
         couleur: str = "adision",
         revision_choice: Optional[str] = None,
+        date_devis: Optional[str] = None,
     ):
         """Émet la PROPOSITION/DEVIS vers l'Espace Rapports HUB
         (report_type='proposition_devis', montant_avant_taxes = le quantitatif).
@@ -301,7 +325,7 @@ def register_ad_devis_routes(get_conn):
                 cur.close()
                 conn.close()
 
-        buf, snapshot = _build_devis(projet_id, montant, couleur, jwt_token)
+        buf, snapshot = _build_devis(projet_id, montant, couleur, jwt_token, date_devis)
         pdf_bytes = buf.getvalue()
         fields = {
             "report_type": "proposition_devis",
@@ -336,7 +360,7 @@ def register_ad_devis_routes(get_conn):
             "hub": result,
         }
 
-    def _build_devis(projet_id, montant, couleur, jwt_token):
+    def _build_devis(projet_id, montant, couleur, jwt_token, date_devis=None):
         """Construit le PDF devis ET le snapshot (proposition_devis) ; retourne
         (buf, snapshot). Auth faite par l'appelant (route)."""
         conn = get_conn()
@@ -416,11 +440,21 @@ def register_ad_devis_routes(get_conn):
         sous_titre_style = ParagraphStyle(
             "stp", parent=ss["Normal"], fontSize=11, leading=14, alignment=0,
             textColor=ACCENT)
+        # Date du devis — affichée sur la page de garde sous « Originale ». Format
+        # long fr-CA (ex. « 23 juin 2026 »). date_devis arrive en ISO depuis le
+        # front ; fallback today() si absent (rétrocompat tests + appels legacy).
+        date_devis_style = ParagraphStyle(
+            "ddv", parent=ss["Normal"], fontSize=9, leading=11, alignment=0,
+            textColor=ACCENT, spaceBefore=2)
+        _date_devis_fmt = esc(_format_date_fr_ca(date_devis))
+        date_para = Paragraph(f"<b>Date du devis :</b> {_date_devis_fmt}", date_devis_style)
         if _nom_projet:
             title_cell = [Paragraph(_nom_projet, titre_proj_style),
-                          Paragraph(f"Proposition / Devis <font size='9'>— {_rev_lbl}</font>", sous_titre_style)]
+                          Paragraph(f"Proposition / Devis <font size='9'>— {_rev_lbl}</font>", sous_titre_style),
+                          date_para]
         else:
-            title_cell = [Paragraph(f"PROPOSITION / DEVIS <font size='11'>— {_rev_lbl}</font>", titre_proj_style)]
+            title_cell = [Paragraph(f"PROPOSITION / DEVIS <font size='11'>— {_rev_lbl}</font>", titre_proj_style),
+                          date_para]
         head = Table([[logo or "", title_cell]], colWidths=[doc.width / 2.0, doc.width / 2.0])
         head.setStyle(TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
