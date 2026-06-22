@@ -833,7 +833,8 @@ def _map_typ_to_budget_cols(typ: dict, qte) -> dict:
 # Helpers PURS (testables) partagés par les endpoints detect_maj_typ / apply_maj_typ.
 _MAJ_LINE_COLS = ("id, source_typ_code, qte, section, description, unite, "
                   "prix_unitaire, sous_traitant_montant, heures, taux_horaire, "
-                  "prix_unitaire_override, heures_manuelles")
+                  "prix_unitaire_override, heures_manuelles, "
+                  "sous_traitant_montant_override, prix_unitaire_st_override")
 
 
 def _maj_money_diff(a, b) -> bool:
@@ -874,7 +875,14 @@ def _maj_compute_divergences(ligne, m):
         divs.append({"champ": "prix_unitaire", "label": "Coût unitaire",
                      "valeur_ligne": round(float(ligne["prix_unitaire"] or 0), 2),
                      "valeur_base": round(float(m["prix_unitaire"] or 0), 2)})
-    if _maj_money_diff(ligne["sous_traitant_montant"], m["sous_traitant_montant"]):
+    # Gate override ST : si l'utilisateur a saisi un montant en bloc
+    # (sous_traitant_montant_override) OU un coût unitaire ST (prix_unitaire_st_override),
+    # la saisie utilisateur domine le carnet → on N'AFFICHE PAS de divergence ST
+    # (sinon faux signal « divergent » à chaque saisie). Cohérent avec le gate
+    # prix_unitaire_override ci-dessus (règle saisie > carnet).
+    if (not ligne.get("sous_traitant_montant_override")
+            and not ligne.get("prix_unitaire_st_override")
+            and _maj_money_diff(ligne["sous_traitant_montant"], m["sous_traitant_montant"])):
         divs.append({"champ": "sous_traitant_montant", "label": "Sous-traitant",
                      "valeur_ligne": round(float(ligne["sous_traitant_montant"] or 0), 2),
                      "valeur_base": round(float(m["sous_traitant_montant"] or 0), 2)})
@@ -4629,6 +4637,7 @@ def register_ad_budget_routes(get_conn):
                   taux_horaire_override=FALSE, ajust_materiaux_override=FALSE,
                   ajust_main_oeuvre_override=FALSE, ajust_sous_traitant_override=FALSE,
                   sous_traitant_montant_override=FALSE,
+                  prix_unitaire_st=0, prix_unitaire_st_override=FALSE,
                   updated_at=NOW()
                 WHERE id=%s AND projet_id=%s RETURNING *
             """, (m["section"], m["description"], m["unite"], m["prix_unitaire"],
@@ -4892,7 +4901,8 @@ def register_ad_budget_routes(get_conn):
         cur = conn.cursor(row_factory=dict_row)
         try:
             cur.execute(
-                "SELECT id, qte, taux_horaire FROM ad_budget.budget_lignes "
+                "SELECT id, qte, taux_horaire, prix_unitaire_st, prix_unitaire_st_override "
+                "FROM ad_budget.budget_lignes "
                 "WHERE id = %s AND projet_id = %s",
                 (ligne_id, projet_id),
             )
@@ -4948,6 +4958,19 @@ def register_ad_budget_routes(get_conn):
             # tauxHoraire fourni dans data (= saisie en cours préservée par le
             # client snapshotTyp ; sinon ligne["taux_horaire"] courant reconduit).
             _tov = bool(data.get("taux_horaire") not in (None, ""))
+            # PU_ST (mode COMPUTED) : si le front envoie prix_unitaire_st, on
+            # recalcule sous_traitant_montant = qte × PU_ST au lieu du
+            # prix_st × qte du catalogue Ad TYP (la saisie utilisateur prime).
+            # Si PU_ST déjà overridé en base mais pas dans body, idem (lecture
+            # ligne["prix_unitaire_st"]). Sinon catalogue.
+            _pust_in_body = data.get("prix_unitaire_st") not in (None, "")
+            _pust_val = float(data.get("prix_unitaire_st") or 0) if _pust_in_body else 0.0
+            if _pust_in_body and _pust_val > 0:
+                _st_montant_value = qte * _pust_val
+            elif ligne.get("prix_unitaire_st_override") and float(ligne.get("prix_unitaire_st") or 0) > 0:
+                _st_montant_value = qte * float(ligne["prix_unitaire_st"])
+            else:
+                _st_montant_value = m["sous_traitant_montant"]
             if auto and "prix_unitaire" in data:
                 # Saisie de coût en cours (overlay non encore sauvé) au moment du
                 # changement de qté : on la persiste + pose l'override pour la
@@ -4955,6 +4978,8 @@ def register_ad_budget_routes(get_conn):
                 # OVERRIDES GÉNÉRALISÉS : taux_horaire et sous_traitant_montant
                 # respectés via CASE WHEN — un override existant n'est pas écrasé
                 # par le rescale qté (règle « saisie utilisateur > carnet »).
+                # PU_ST : si fourni dans body → persiste + flag override ;
+                # sinon préserve l'override existant (CASE WHEN).
                 cur.execute("""
                     UPDATE ad_budget.budget_lignes SET
                       qte=%s, qte_override=TRUE,
@@ -4962,10 +4987,13 @@ def register_ad_budget_routes(get_conn):
                       taux_horaire = CASE WHEN taux_horaire_override THEN taux_horaire ELSE %s END,
                       taux_horaire_override = (taux_horaire_override OR %s),
                       sous_traitant_montant = CASE WHEN sous_traitant_montant_override THEN sous_traitant_montant ELSE %s END,
+                      prix_unitaire_st = CASE WHEN prix_unitaire_st_override THEN prix_unitaire_st ELSE COALESCE(%s, prix_unitaire_st) END,
+                      prix_unitaire_st_override = (prix_unitaire_st_override OR %s),
                       prix_unitaire=%s, prix_unitaire_override=%s,
                       source_typ_snapshot_at=NOW(), updated_at=NOW()
                     WHERE id=%s AND projet_id=%s RETURNING *
-                """, (qte, m["heures"], _hm, taux_auto, _tov, m["sous_traitant_montant"],
+                """, (qte, m["heures"], _hm, taux_auto, _tov, _st_montant_value,
+                      _pust_val if _pust_in_body else None, _pust_in_body,
                       float(data.get("prix_unitaire") or 0),
                       bool(data.get("prix_unitaire_override", True)),
                       ligne_id, projet_id))
@@ -4975,7 +5003,8 @@ def register_ad_budget_routes(get_conn):
                 # GÉNÉRALISÉS : taux_horaire et sous_traitant_montant respectent
                 # leur flag override (CASE WHEN) — la saisie manuelle survit au
                 # rescale qté. Le flag heures_manuelles existant tient le rôle
-                # d'override pour heures (couplé à _hm).
+                # d'override pour heures (couplé à _hm). PU_ST idem : si dans body
+                # → persiste, sinon préserve l'override existant.
                 cur.execute("""
                     UPDATE ad_budget.budget_lignes SET
                       qte=%s, qte_override=TRUE,
@@ -4983,9 +5012,12 @@ def register_ad_budget_routes(get_conn):
                       taux_horaire = CASE WHEN taux_horaire_override THEN taux_horaire ELSE %s END,
                       taux_horaire_override = (taux_horaire_override OR %s),
                       sous_traitant_montant = CASE WHEN sous_traitant_montant_override THEN sous_traitant_montant ELSE %s END,
+                      prix_unitaire_st = CASE WHEN prix_unitaire_st_override THEN prix_unitaire_st ELSE COALESCE(%s, prix_unitaire_st) END,
+                      prix_unitaire_st_override = (prix_unitaire_st_override OR %s),
                       source_typ_snapshot_at=NOW(), updated_at=NOW()
                     WHERE id=%s AND projet_id=%s RETURNING *
-                """, (qte, m["heures"], _hm, taux_auto, _tov, m["sous_traitant_montant"],
+                """, (qte, m["heures"], _hm, taux_auto, _tov, _st_montant_value,
+                      _pust_val if _pust_in_body else None, _pust_in_body,
                       ligne_id, projet_id))
             else:
                 # Pioche EXPLICITE (autocomplete) : re-pull complet depuis Ad TYP ;
@@ -5003,6 +5035,7 @@ def register_ad_budget_routes(get_conn):
                       taux_horaire_override=FALSE, ajust_materiaux_override=FALSE,
                       ajust_main_oeuvre_override=FALSE, ajust_sous_traitant_override=FALSE,
                       sous_traitant_montant_override=FALSE,
+                      prix_unitaire_st=0, prix_unitaire_st_override=FALSE,
                       updated_at=NOW()
                     WHERE id=%s AND projet_id=%s RETURNING *
                 """, (m["section"], m["description"], m["unite"], m["prix_unitaire"],
@@ -5145,6 +5178,11 @@ def register_ad_budget_routes(get_conn):
             "ajust_main_oeuvre_override",
             "ajust_sous_traitant_override",
             "sous_traitant_montant_override",
+            # Sprint PU_ST — coût unitaire sous-traitant + flag override. Mode
+            # COMPUTED quand PU_ST > 0 : sous_traitant_montant = qte × PU_ST
+            # (calculé côté front, envoyé tel quel dans le PUT).
+            "prix_unitaire_st",
+            "prix_unitaire_st_override",
         ]:
             if field in data:
                 val = data[field]
@@ -5157,6 +5195,7 @@ def register_ad_budget_routes(get_conn):
                     "qte_override", "taux_horaire_override",
                     "ajust_materiaux_override", "ajust_main_oeuvre_override",
                     "ajust_sous_traitant_override", "sous_traitant_montant_override",
+                    "prix_unitaire_st_override",
                 ):
                     val = bool(val)
                 fields.append(f"{field} = %s")
@@ -5176,6 +5215,7 @@ def register_ad_budget_routes(get_conn):
             "ajust_main_oeuvre": "ajust_main_oeuvre_override",
             "ajust_sous_traitant": "ajust_sous_traitant_override",
             "sous_traitant_montant": "sous_traitant_montant_override",
+            "prix_unitaire_st": "prix_unitaire_st_override",
         }
         for fname, ovcol in _AUTO_OVERRIDE_MAP.items():
             if fname in data and ovcol not in data:
