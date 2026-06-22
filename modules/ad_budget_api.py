@@ -824,6 +824,12 @@ def _map_typ_to_budget_cols(typ: dict, qte) -> dict:
         "heures": heures,
         "taux_horaire": taux,
         "sous_traitant_montant": round(prix_st * qte, 4),
+        # Sprint PU_ST référence Ad TYP — propagation à l'insertion. typ.prix_st
+        # est déjà PAR UNITÉ d'assemblage (cf. _map_typ_to_budget_cols qui le
+        # multiplie par qte pour calculer sous_traitant_montant) → on l'expose
+        # tel quel comme PU_ST de référence. Le mode COMPUTED côté Ad BUD prend
+        # le relais (stMontant = qte × PU_ST) quand > 0.
+        "prix_unitaire_st": prix_st,
         "mo_flat": mo_flat,
         "taux_pondere": taux,
     }
@@ -4575,16 +4581,21 @@ def register_ad_budget_routes(get_conn):
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         try:
+            # Sprint PU_ST référence Ad TYP — pré-remplissage prix_unitaire_st à
+            # la création. override = FALSE (valeur héritée du carnet, pas une
+            # saisie utilisateur). Le mode COMPUTED prend automatiquement le
+            # relais côté Ad BUD quand PU_ST > 0 (stMontant = qte × PU_ST).
             cur.execute("""
                 INSERT INTO ad_budget.budget_lignes
                 (projet_id, section, description, unite, prix_unitaire, qte,
-                 heures, taux_horaire, sous_traitant_montant,
+                 heures, taux_horaire, sous_traitant_montant, prix_unitaire_st,
                  ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant, actif,
                  source_typ_code, source_typ_snapshot_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,0,0,0,TRUE,%s,NOW())
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,0,0,TRUE,%s,NOW())
                 RETURNING *
             """, (projet_id, m["section"], m["description"], m["unite"], m["prix_unitaire"], qte,
-                  m["heures"], m["taux_horaire"], m["sous_traitant_montant"], code))
+                  m["heures"], m["taux_horaire"], m["sous_traitant_montant"],
+                  m["prix_unitaire_st"], code))
             row = cur.fetchone()
             conn.commit()
         finally:
@@ -4628,20 +4639,25 @@ def register_ad_budget_routes(get_conn):
             # remet TOUS les overrides à FALSE (ignore volontairement les flags).
             # Règle métier validée Simon : clic ⟳ = l'utilisateur sait ce qu'il
             # fait, on resync tout. Aligné avec la pioche autocomplete (else AUTO).
+            # Sprint PU_ST référence Ad TYP — ⟳ EXPLICITE = acceptation user :
+            # resync PU_ST sur la valeur catalogue COURANTE (m["prix_unitaire_st"]
+            # = typ.prix_st par unité), override remis à FALSE (règle 1).
             cur.execute("""
                 UPDATE ad_budget.budget_lignes SET
                   section=%s, description=%s, unite=%s, prix_unitaire=%s,
                   heures=%s, taux_horaire=%s, sous_traitant_montant=%s,
+                  prix_unitaire_st=%s,
                   source_typ_snapshot_at=NOW(),
                   prix_unitaire_override=FALSE, qte_override=FALSE,
                   taux_horaire_override=FALSE, ajust_materiaux_override=FALSE,
                   ajust_main_oeuvre_override=FALSE, ajust_sous_traitant_override=FALSE,
                   sous_traitant_montant_override=FALSE,
-                  prix_unitaire_st=0, prix_unitaire_st_override=FALSE,
+                  prix_unitaire_st_override=FALSE,
                   updated_at=NOW()
                 WHERE id=%s AND projet_id=%s RETURNING *
             """, (m["section"], m["description"], m["unite"], m["prix_unitaire"],
-                  m["heures"], m["taux_horaire"], m["sous_traitant_montant"], ligne_id, projet_id))
+                  m["heures"], m["taux_horaire"], m["sous_traitant_montant"],
+                  m["prix_unitaire_st"], ligne_id, projet_id))
             row = cur.fetchone()
             conn.commit()
         except HTTPException:
@@ -5025,21 +5041,27 @@ def register_ad_budget_routes(get_conn):
                 # validée Simon : autocomplete = NOUVELLE LIGNE D'INTENTION → tous
                 # les overrides de l'ancien item perdent leur sens, on les remet à
                 # FALSE en bloc (qté/taux/ajust/ST + prix_unitaire).
+                # Sprint PU_ST référence Ad TYP — autocomplete = NOUVELLE LIGNE
+                # D'INTENTION : on (re-)synchronise tout sur la valeur catalogue
+                # COURANTE. PU_ST hérite de m["prix_unitaire_st"] (= typ.prix_st
+                # par unité), override remis à FALSE (règle 2 d'aujourd'hui).
                 cur.execute("""
                     UPDATE ad_budget.budget_lignes SET
                       section=%s, description=%s, unite=%s, prix_unitaire=%s,
                       qte=%s, heures=%s, heures_manuelles=%s, taux_horaire=%s, sous_traitant_montant=%s,
+                      prix_unitaire_st=%s,
                       source_typ_code=%s, source_typ_snapshot_at=NOW(),
                       item_id_ad_mat=NULL,
                       prix_unitaire_override=FALSE, qte_override=FALSE,
                       taux_horaire_override=FALSE, ajust_materiaux_override=FALSE,
                       ajust_main_oeuvre_override=FALSE, ajust_sous_traitant_override=FALSE,
                       sous_traitant_montant_override=FALSE,
-                      prix_unitaire_st=0, prix_unitaire_st_override=FALSE,
+                      prix_unitaire_st_override=FALSE,
                       updated_at=NOW()
                     WHERE id=%s AND projet_id=%s RETURNING *
                 """, (m["section"], m["description"], m["unite"], m["prix_unitaire"],
                       qte, m["heures"], _hm, m["taux_horaire"], m["sous_traitant_montant"],
+                      m["prix_unitaire_st"],
                       code, ligne_id, projet_id))
             row = cur.fetchone()
             conn.commit()

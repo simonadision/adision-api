@@ -760,18 +760,22 @@ def register_ad_gabarits_routes(get_conn):
                             # des 4 premiers chiffres → le suffixe « .01 » n'altère
                             # pas le rangement. Fallback sec_code si m["section"] vide.
                             line_section = m["section"] or sec_code
+                            # Sprint PU_ST référence Ad TYP — pré-remplissage à
+                            # l'insertion gabarit. override = FALSE (héritage
+                            # carnet). Le mode COMPUTED côté Ad BUD prend le
+                            # relais quand l'user saisira une qté > 0.
                             cur.execute(
                                 """
                                 INSERT INTO ad_budget.budget_lignes
                                 (projet_id, section, description, unite, prix_unitaire, qte,
-                                 heures, taux_horaire, sous_traitant_montant,
+                                 heures, taux_horaire, sous_traitant_montant, prix_unitaire_st,
                                  ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant, actif,
                                  source_typ_code, source_typ_snapshot_at)
-                                VALUES (%s,%s,%s,%s,%s,0,%s,%s,%s,0,0,0,TRUE,%s,NOW())
+                                VALUES (%s,%s,%s,%s,%s,0,%s,%s,%s,%s,0,0,0,TRUE,%s,NOW())
                                 """,
                                 (projet_id, line_section, desc or m["description"], m["unite"],
                                  m["prix_unitaire"], m["heures"], m["taux_horaire"],
-                                 m["sous_traitant_montant"], code),
+                                 m["sous_traitant_montant"], m["prix_unitaire_st"], code),
                             )
                             inserted += 1
                         else:
