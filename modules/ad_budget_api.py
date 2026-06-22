@@ -3786,30 +3786,142 @@ def register_ad_budget_routes(get_conn):
             t = _sec_labels.get(prefix)
             return f"{prefix} 00 — {t}" if t else f"{prefix} 00"
 
+        # ── PRÉ-PASSE — totaux par Division et Sous-section CSI ──────────────
+        # Injectés directement DANS les bandeaux (libellé à gauche, total à droite)
+        # quand afficher_totaux_section / afficher_sous_totaux. Calculés avec les
+        # MÊMES filtres et formules que la boucle de rendu ci-dessous (copie
+        # verbatim des expressions — toute divergence ferait diverger Σ bandeaux
+        # vs grand total). Coût O(N) doublé, négligeable.
+        division_totals = {}     # {"03": 20540.0, ...}
+        subsection_totals = {}   # {"03 11": 2540.0, ...}
+        for _sec, _sec_lignes in sections_groups.items():
+            _div = _csi_division(_sec)
+            _prefix = _csi_prefix(_sec)
+            for _l in _sec_lignes:
+                _qte = _effective_qte(_l, mobilisation, surface_plancher,
+                                      surface_mur_calc, surface_gypse_calc)
+                _heures = _heures_effectives(_l["unite"], _l["heures"],
+                                             _l.get("heures_manuelles"), _qte)
+                _taux = float(_l["taux_horaire"] or 0)
+                _ajmo = float(_l["ajust_main_oeuvre"] or 0)
+                _st_montant = float(_l["sous_traitant_montant"] or 0)
+                _ajst = float(_l["ajust_sous_traitant"] or 0)
+                _has_mo = _heures > 0 and _taux > 0
+                _has_st = _st_montant > 0
+                if _qte <= 0 and not _has_mo and not _has_st:
+                    continue
+                _prix = float(_l["prix_unitaire"] or 0)
+                _ajm = float(_l["ajust_materiaux"] or 0)
+                _adj = float(_l["ajustement_pct"] or 0)
+                _st_mat = _qte * _prix * (1 + _ajm / 100)
+                _st_mo = _heures * _taux * (1 + _ajmo / 100)
+                _st_st = _st_montant * (1 + _ajst / 100)
+                _st = _st_mat + _st_mo + _st_st
+                _tot_real = _st * (1 + _adj / 100)
+                _gkey = _group_key_for(_section_prefix_n(_l["section"]))
+                _factor = group_factors.get(_gkey, 1) if _gkey is not None else 1
+                _tot_disp = R(_tot_real * _factor)
+                if avec_prix and _tot_disp == 0:
+                    continue
+                subsection_totals[_prefix] = subsection_totals.get(_prefix, 0) + _tot_disp
+                division_totals[_div] = division_totals.get(_div, 0) + _tot_disp
+
         # Bandeaux DÉJÀ émis (anti-répétition + anti-orphelin : un bandeau n'est
         # posé qu'au 1er CONTENU réellement rendu de son groupe — jamais sur un
         # groupe vide). Les indices alimentent les styles (SPAN + couleurs).
         hdr_state = {"div": None, "prefix": None}
         div_header_rows = []
         sub_header_rows = []
+        # Sous-ensembles des bandeaux qui PORTENT un total à droite — SPAN partiel
+        # (0..-2) + ALIGN droite sur la dernière col. Les autres conservent le
+        # SPAN plein (0..-1) historique.
+        div_header_rows_with_total = set()
+        sub_header_rows_with_total = set()
+        # Rangées « Total <code> — <libellé>  …  <montant> » insérées en cas de
+        # bandeau décoché + total demandé (fallback pattern). Style sobre.
+        div_fallback_rows = []
+        sub_fallback_rows = []
+
+        def _header_row_with_total(label, total_value):
+            """Construit une rangée bandeau avec total à droite. SPAN partiel sur
+            (0..-2) sera posé en styles ; le total occupe la dernière colonne.
+            Fallback concaténation si <= 1 colonne sélectionnée."""
+            total_str = f"{_frca_num(total_value)} $"
+            if len(selected) > 1:
+                return [label] + [""] * (len(selected) - 2) + [total_str]
+            return [f"{label}  —  {total_str}"]
 
         def _open_group(div, prefix):
             """Pose (au plus 1×) le bandeau Division puis Sous-section à l'entrée d'un
             nouveau groupe. Idempotent : re-appel sur le même groupe = no-op. N'affecte
-            AUCUN calcul (rangées purement visuelles)."""
+            AUCUN calcul (rangées purement visuelles). Le total agrégé du groupe
+            (pré-calculé en pré-passe) est injecté DANS le bandeau quand
+            afficher_totaux_section / afficher_sous_totaux."""
             if afficher_entete_section and hdr_state["div"] != div:
-                table_data.append([_div_header_label(div)] + [""] * (len(selected) - 1))
-                div_header_rows.append(len(table_data) - 1)
+                if afficher_totaux_section:
+                    row = _header_row_with_total(_div_header_label(div),
+                                                 division_totals.get(div, 0))
+                    table_data.append(row)
+                    div_header_rows.append(len(table_data) - 1)
+                    if len(selected) > 1:
+                        div_header_rows_with_total.add(len(table_data) - 1)
+                else:
+                    table_data.append([_div_header_label(div)] + [""] * (len(selected) - 1))
+                    div_header_rows.append(len(table_data) - 1)
                 hdr_state["div"] = div
                 hdr_state["prefix"] = None   # nouvelle division → ré-émettre la sous-section
             if afficher_entete_soussection and hdr_state["prefix"] != prefix:
-                table_data.append([_sub_header_label(prefix)] + [""] * (len(selected) - 1))
-                sub_header_rows.append(len(table_data) - 1)
+                if afficher_sous_totaux:
+                    row = _header_row_with_total(_sub_header_label(prefix),
+                                                 subsection_totals.get(prefix, 0))
+                    table_data.append(row)
+                    sub_header_rows.append(len(table_data) - 1)
+                    if len(selected) > 1:
+                        sub_header_rows_with_total.add(len(table_data) - 1)
+                else:
+                    table_data.append([_sub_header_label(prefix)] + [""] * (len(selected) - 1))
+                    sub_header_rows.append(len(table_data) - 1)
                 hdr_state["prefix"] = prefix
+
+        # Pattern FALLBACK : bandeau décoché + total demandé → rangée dédiée
+        # « Total <code> — <libellé>  …  <montant> » insérée à la SORTIE du
+        # groupe (après son dernier item). No-op si le total est déjà dans le
+        # bandeau, ou si total non demandé, ou si total vide.
+        def _emit_division_fallback(div):
+            if (not afficher_totaux_section) or afficher_entete_section or div is None:
+                return
+            total = division_totals.get(div, 0)
+            if total == 0:
+                return
+            label = f"Total {_div_header_label(div)}"
+            table_data.append(_header_row_with_total(label, total))
+            div_fallback_rows.append(len(table_data) - 1)
+
+        def _emit_subsection_fallback(prefix):
+            if (not afficher_sous_totaux) or afficher_entete_soussection or prefix is None:
+                return
+            total = subsection_totals.get(prefix, 0)
+            if total == 0:
+                return
+            label = f"Total {_sub_header_label(prefix)}"
+            table_data.append(_header_row_with_total(label, total))
+            sub_fallback_rows.append(len(table_data) - 1)
+
+        # Tracking de la fermeture des groupes : sous-section d'abord (interne),
+        # puis division (externe). Maj seulement quand le groupe a effectivement
+        # eu du contenu (anti-orphelin, cohérent avec _open_group).
+        last_div_active = None
+        last_prefix_active = None
 
         for sec, sec_lignes in sections_groups.items():
             sec_div = _csi_division(sec)
             sec_prefix = _csi_prefix(sec)
+            # Changement de groupe → clôture des anciens (fallback si applicable).
+            # Ordre : sous-section puis division (du plus interne au plus externe).
+            if last_prefix_active is not None and last_prefix_active != sec_prefix:
+                _emit_subsection_fallback(last_prefix_active)
+            if last_div_active is not None and last_div_active != sec_div:
+                _emit_division_fallback(last_div_active)
             sec_total = 0.0
             section_has_visible_lines = False
             for l in sec_lignes:
@@ -3882,13 +3994,29 @@ def register_ad_budget_routes(get_conn):
                         for c in selected
                     ])
                 # Vrai dès qu'une ligne CONTRIBUE (même si son détail est masqué) :
-                # le sous-total de sous-section doit pouvoir s'afficher seul.
+                # le bandeau Sous-section/Section avec total doit pouvoir s'afficher
+                # seul (résumé exécutif sans lignes).
                 section_has_visible_lines = True
-            if show_totals_row and section_has_visible_lines and afficher_sous_totaux:
-                # Détail masqué mais sous-total visible → poser quand même les bandeaux.
-                _open_group(sec_div, sec_prefix)
-                table_data.append(make_summary_row(f"Sous-total {sec}", sec_total))
-                subtotal_rows.append(len(table_data) - 1)
+            # Sprint TOTAUX DANS BANDEAUX — la ligne « Sous-total <code ligne CSI> »
+            # par item est SUPPRIMÉE (granularité erronée — c'était la valeur de
+            # l'item lui-même). Le total par Sous-section est désormais affiché
+            # DANS le bandeau Sous-section (via _open_group quand
+            # afficher_sous_totaux), OU en rangée fallback si bandeau décoché
+            # (_emit_subsection_fallback à la clôture du groupe).
+            if section_has_visible_lines:
+                # Détail masqué mais bandeau-avec-total demandé → poser le bandeau.
+                if (not afficher_lignes_detail
+                        and (afficher_sous_totaux or afficher_totaux_section)):
+                    _open_group(sec_div, sec_prefix)
+                last_prefix_active = sec_prefix
+                last_div_active = sec_div
+
+        # Fermeture finale : rangées fallback pour le DERNIER groupe traité
+        # (la boucle ne déclenche les fallbacks qu'aux CHANGEMENTS de groupe).
+        if last_prefix_active is not None:
+            _emit_subsection_fallback(last_prefix_active)
+        if last_div_active is not None:
+            _emit_division_fallback(last_div_active)
 
         # body_start_row = 1re rangée de DONNÉES (après les rangées d'en-tête).
         body_start_row = header_offset
@@ -3921,20 +4049,49 @@ def register_ad_budget_routes(get_conn):
             table_style_cmds.append(("FONTNAME", (0, r), (-1, r), "Helvetica-Bold"))
             table_style_cmds.append(("BACKGROUND", (0, r), (-1, r), colors.HexColor("#dbeafe")))
         # Bandeaux Division (bleu Adision, texte blanc) et Sous-section (gris-bleu
-        # clair, texte bleu) — SPAN pleine largeur, sentence case (libellé déjà
-        # « code — titre »). Ajoutés APRÈS ROWBACKGROUNDS → priment sur l'alternance.
+        # clair, texte bleu) — SPAN pleine largeur OU partiel (0..-2) si un total
+        # occupe la dernière colonne. Sentence case (libellé déjà « code — titre »).
+        # Ajoutés APRÈS ROWBACKGROUNDS → priment sur l'alternance.
         for r in div_header_rows:
-            table_style_cmds.append(("SPAN", (0, r), (-1, r)))
+            has_total = r in div_header_rows_with_total
+            if has_total:
+                # SPAN partiel sur n-1 colonnes ; la dernière porte le total (ALIGN
+                # droite, padding pour respirer). Le BACKGROUND couvre la rangée
+                # entière (cellule total incluse) pour un visuel uniforme.
+                table_style_cmds.append(("SPAN", (0, r), (-2, r)))
+                table_style_cmds.append(("ALIGN", (-1, r), (-1, r), "RIGHT"))
+                table_style_cmds.append(("RIGHTPADDING", (-1, r), (-1, r), 8))
+            else:
+                table_style_cmds.append(("SPAN", (0, r), (-1, r)))
             table_style_cmds.append(("BACKGROUND", (0, r), (-1, r), colors.HexColor("#1e3a8a")))
             table_style_cmds.append(("TEXTCOLOR", (0, r), (-1, r), colors.white))
             table_style_cmds.append(("FONTNAME", (0, r), (-1, r), "Helvetica-Bold"))
-            table_style_cmds.append(("ALIGN", (0, r), (-1, r), "LEFT"))
+            table_style_cmds.append(("ALIGN", (0, r), (0, r), "LEFT"))
         for r in sub_header_rows:
-            table_style_cmds.append(("SPAN", (0, r), (-1, r)))
+            has_total = r in sub_header_rows_with_total
+            if has_total:
+                table_style_cmds.append(("SPAN", (0, r), (-2, r)))
+                table_style_cmds.append(("ALIGN", (-1, r), (-1, r), "RIGHT"))
+                table_style_cmds.append(("RIGHTPADDING", (-1, r), (-1, r), 8))
+            else:
+                table_style_cmds.append(("SPAN", (0, r), (-1, r)))
             table_style_cmds.append(("BACKGROUND", (0, r), (-1, r), colors.HexColor("#e8edf7")))
             table_style_cmds.append(("TEXTCOLOR", (0, r), (-1, r), colors.HexColor("#1e3a8a")))
             table_style_cmds.append(("FONTNAME", (0, r), (-1, r), "Helvetica-Bold"))
-            table_style_cmds.append(("ALIGN", (0, r), (-1, r), "LEFT"))
+            table_style_cmds.append(("ALIGN", (0, r), (0, r), "LEFT"))
+        # Rangées FALLBACK « Total <code> — <libellé>  …  <montant> » : style sobre
+        # (gris très clair, texte bleu Adision) — appliquées quand le bandeau
+        # correspondant est décoché mais le total demandé. SPAN partiel comme
+        # les bandeaux pour aligner le montant à droite.
+        for r in (div_fallback_rows + sub_fallback_rows):
+            if len(selected) > 1:
+                table_style_cmds.append(("SPAN", (0, r), (-2, r)))
+                table_style_cmds.append(("ALIGN", (-1, r), (-1, r), "RIGHT"))
+                table_style_cmds.append(("RIGHTPADDING", (-1, r), (-1, r), 8))
+            table_style_cmds.append(("BACKGROUND", (0, r), (-1, r), colors.HexColor("#f1f5f9")))
+            table_style_cmds.append(("TEXTCOLOR", (0, r), (-1, r), colors.HexColor("#1e3a8a")))
+            table_style_cmds.append(("FONTNAME", (0, r), (-1, r), "Helvetica-Bold"))
+            table_style_cmds.append(("ALIGN", (0, r), (0, r), "LEFT"))
 
         # Si aucune rangée de DONNÉES (détail ET sous-totaux masqués → sommaire
         # exécutif par Division CSI), on n'affiche pas le tableau pour éviter un
