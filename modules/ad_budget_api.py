@@ -414,6 +414,68 @@ def _group_key_for(n):
     return None
 
 
+# Format CSI ligne complet : "XX YY ZZ.NN" — sous-section (8 premiers car.) + .NN.
+# Bug doublon : 2 lignes du même item Ad TYP gardaient le même code natif → on
+# auto-incrémente le suffixe à l'insertion en cherchant le prochain libre dans
+# la sous-section pour CE PROJET.
+_CSI_LINE_RE = re.compile(r"^(\d{2} \d{2} \d{2})\.(\d+)$")
+
+
+def _next_free_csi_suffix(cur, projet_id, code_demande, *, exclude_ligne_id=None,
+                          extra_used=None):
+    """Auto-incrémente le suffixe .NN d'un code CSI déjà occupé pour ce projet.
+
+    Règle (Simon) : incrément À PARTIR du suffixe natif, pas remplissage des trous.
+    - 1er Coffrage (03 11 00.01) → garde .01.
+    - 2e Coffrage (.01 occupé) → .02 si libre, sinon .03, etc.
+    - Item natif .05 inséré quand .04 libre → garde .05 (pas de back-fill).
+    - 2e item natif .05 (.05 occupé) → .06 (pas .04).
+
+    `exclude_ligne_id` : id de la ligne en cours d'UPDATE (apply-typ EXPLICIT) à
+    EXCLURE du set des codes occupés (sinon la ligne se compare à elle-même et
+    s'incrémente inutilement quand elle pioche un item au même code).
+
+    `extra_used` : set de codes déjà attribués dans la transaction courante
+    (insert-gabarit qui boucle sur N lignes du même code → 2e doit voir la
+    1re même si pas encore commitée).
+
+    Fallback safe : si `code_demande` n'a pas le format "XX YY ZZ.NN" (cas
+    section seule, item legacy sans suffixe…), retourne tel quel — pas de
+    modification silencieuse de codes non standard.
+    """
+    if not code_demande:
+        return code_demande
+    m = _CSI_LINE_RE.match(code_demande.strip())
+    if not m:
+        return code_demande
+    prefix = m.group(1)                  # "03 11 00"
+    suffix_natif = int(m.group(2))       # 1
+    # SELECT codes occupés dans la sous-section pour ce projet. LIKE matche
+    # tous les codes ".NN" — on filtre côté Python pour ne garder que les
+    # suffixes numériques valides (rejette "03 11 00.99x" ou autres).
+    sql = "SELECT id, section FROM ad_budget.budget_lignes WHERE projet_id = %s AND section LIKE %s"
+    params = [projet_id, f"{prefix}.%"]
+    cur.execute(sql, params)
+    used = set(extra_used or ())
+    for row in cur.fetchall():
+        rid = row["id"] if isinstance(row, dict) else row[0]
+        sec = row["section"] if isinstance(row, dict) else row[1]
+        if exclude_ligne_id is not None and rid == exclude_ligne_id:
+            continue
+        mm = _CSI_LINE_RE.match((sec or "").strip())
+        if mm:
+            try:
+                used.add(int(mm.group(2)))
+            except (TypeError, ValueError):
+                pass
+    if suffix_natif not in used:
+        return f"{prefix}.{suffix_natif:02d}"
+    n = suffix_natif + 1
+    while n in used:
+        n += 1
+    return f"{prefix}.{n:02d}"
+
+
 def _prix_vente_total(projet, raw_lines):
     """PRIX DE VENTE total = coûtant (général) + administration & profit par
     regroupement CSI (= « Sous-total avant taxes » du récap, hors taxes).
@@ -4742,6 +4804,10 @@ def register_ad_budget_routes(get_conn):
             # la création. override = FALSE (valeur héritée du carnet, pas une
             # saisie utilisateur). Le mode COMPUTED prend automatiquement le
             # relais côté Ad BUD quand PU_ST > 0 (stMontant = qte × PU_ST).
+            # Auto-incrément CSI : si le code natif Ad TYP est déjà occupé dans
+            # ce projet (ex. 2e Coffrage), on attribue le prochain suffixe libre
+            # (cf. _next_free_csi_suffix). 1er garde le code natif.
+            section_final = _next_free_csi_suffix(cur, projet_id, m["section"])
             cur.execute("""
                 INSERT INTO ad_budget.budget_lignes
                 (projet_id, section, description, unite, prix_unitaire, qte,
@@ -4750,7 +4816,7 @@ def register_ad_budget_routes(get_conn):
                  source_typ_code, source_typ_snapshot_at)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,0,0,TRUE,%s,NOW())
                 RETURNING *
-            """, (projet_id, m["section"], m["description"], m["unite"], m["prix_unitaire"], qte,
+            """, (projet_id, section_final, m["description"], m["unite"], m["prix_unitaire"], qte,
                   m["heures"], m["taux_horaire"], m["sous_traitant_montant"],
                   m["prix_unitaire_st"], code))
             row = cur.fetchone()
@@ -5202,6 +5268,10 @@ def register_ad_budget_routes(get_conn):
                 # D'INTENTION : on (re-)synchronise tout sur la valeur catalogue
                 # COURANTE. PU_ST hérite de m["prix_unitaire_st"] (= typ.prix_st
                 # par unité), override remis à FALSE (règle 2 d'aujourd'hui).
+                # Auto-incrément CSI : exclut la ligne courante du calcul (sinon
+                # elle se compare à elle-même si elle pioche un item du même code).
+                section_final = _next_free_csi_suffix(cur, projet_id, m["section"],
+                                                      exclude_ligne_id=ligne_id)
                 cur.execute("""
                     UPDATE ad_budget.budget_lignes SET
                       section=%s, description=%s, unite=%s, prix_unitaire=%s,
@@ -5216,7 +5286,7 @@ def register_ad_budget_routes(get_conn):
                       prix_unitaire_st_override=FALSE,
                       updated_at=NOW()
                     WHERE id=%s AND projet_id=%s RETURNING *
-                """, (m["section"], m["description"], m["unite"], m["prix_unitaire"],
+                """, (section_final, m["description"], m["unite"], m["prix_unitaire"],
                       qte, m["heures"], _hm, m["taux_horaire"], m["sous_traitant_montant"],
                       m["prix_unitaire_st"],
                       code, ligne_id, projet_id))

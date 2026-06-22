@@ -33,6 +33,7 @@ from modules.auth_jwt import make_jwt_deps, _extract_bearer
 from modules.ad_budget_api import (
     _map_typ_to_budget_cols,
     _load_and_authorize_projet,
+    _next_free_csi_suffix,
 )
 
 logger = logging.getLogger(__name__)
@@ -764,6 +765,11 @@ def register_ad_gabarits_routes(get_conn):
                             # l'insertion gabarit. override = FALSE (héritage
                             # carnet). Le mode COMPUTED côté Ad BUD prend le
                             # relais quand l'user saisira une qté > 0.
+                            # Auto-incrément CSI : un gabarit contenant N fois le
+                            # même code → suffixes séquentiels libres. Le SELECT
+                            # interne voit les INSERTs précédents de la transaction
+                            # courante (PostgreSQL READ COMMITTED).
+                            section_final = _next_free_csi_suffix(cur, projet_id, line_section)
                             cur.execute(
                                 """
                                 INSERT INTO ad_budget.budget_lignes
@@ -773,7 +779,7 @@ def register_ad_gabarits_routes(get_conn):
                                  source_typ_code, source_typ_snapshot_at)
                                 VALUES (%s,%s,%s,%s,%s,0,%s,%s,%s,%s,0,0,0,TRUE,%s,NOW())
                                 """,
-                                (projet_id, line_section, desc or m["description"], m["unite"],
+                                (projet_id, section_final, desc or m["description"], m["unite"],
                                  m["prix_unitaire"], m["heures"], m["taux_horaire"],
                                  m["sous_traitant_montant"], m["prix_unitaire_st"], code),
                             )
