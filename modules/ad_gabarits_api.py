@@ -357,11 +357,33 @@ def register_ad_gabarits_routes(get_conn):
                 if existing and mode == "additif":
                     skipped = len(existing)            # déjà poussé → ne pas dupliquer
                 else:
+                    # Défauts personnels (par-user) pointant sur les copies à
+                    # REMPLACER : la FK user_gabarit_defaut → gabarits ON DELETE
+                    # CASCADE les effacerait au DELETE ci-dessous (le « par défaut »
+                    # se décocherait tout seul au re-push). On les CAPTURE pour les
+                    # RE-POINTER vers la nouvelle copie (même org, mêmes users).
+                    carried_default_users = []
                     if existing and mode == "replace":
+                        cur.execute(
+                            "SELECT user_id FROM ad_budget.user_gabarit_defaut "
+                            "WHERE gabarit_id = ANY(%s)", (existing,))
+                        carried_default_users = [r["user_id"] for r in cur.fetchall()]
                         cur.execute("DELETE FROM ad_budget.gabarits WHERE id = ANY(%s)", (existing,))
                         replaced = len(existing)
-                    new_ids.append(_copy_gabarit_to_org(cur, master, target_org, push_id))
+                    new_id = _copy_gabarit_to_org(cur, master, target_org, push_id)
+                    new_ids.append(new_id)
                     inserted = 1
+                    # Le défaut survit au re-push : on le re-pointe vers la copie
+                    # fraîche (sinon perdu par la cascade ci-dessus).
+                    for uid in carried_default_users:
+                        cur.execute(
+                            "INSERT INTO ad_budget.user_gabarit_defaut "
+                            "(user_id, gabarit_id, organization_id, updated_at) "
+                            "VALUES (%s, %s, %s, NOW()) "
+                            "ON CONFLICT (user_id) DO UPDATE SET "
+                            "  gabarit_id = EXCLUDED.gabarit_id, "
+                            "  organization_id = EXCLUDED.organization_id, updated_at = NOW()",
+                            (uid, new_id, target_org))
                 cur.execute(
                     "UPDATE ad_budget.gabarit_push_log SET count_inserted=%s, count_replaced=%s, "
                     "count_skipped=%s, snapshot_after=%s::jsonb WHERE push_id=%s",

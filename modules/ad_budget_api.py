@@ -3167,6 +3167,13 @@ def register_ad_budget_routes(get_conn):
         hauteur_cloisons: float = 0,
         longueur_cloisons: float = 0,
         avec_heures: bool = True,
+        afficher_lignes_detail: bool = True,
+        afficher_sous_totaux: bool = True,
+        afficher_totaux_section: bool = True,
+        afficher_entete_section: bool = True,
+        afficher_entete_soussection: bool = True,
+        csi_div_labels: str = "",
+        csi_sec_labels: str = "",
     ):
         # PHASE 3A — auth (lecture). Délègue au builder partagé qui produit le
         # PDF ET le snapshot JSON dans la MÊME passe ; la route ne renvoie que
@@ -3181,6 +3188,13 @@ def register_ad_budget_routes(get_conn):
             jwt_token=_extract_bearer(authorization, token),
             inclure_ligne_groupe=inclure_ligne_groupe,
             inclure_ligne_titres=inclure_ligne_titres,
+            afficher_lignes_detail=afficher_lignes_detail,
+            afficher_sous_totaux=afficher_sous_totaux,
+            afficher_totaux_section=afficher_totaux_section,
+            afficher_entete_section=afficher_entete_section,
+            afficher_entete_soussection=afficher_entete_soussection,
+            csi_div_labels=csi_div_labels,
+            csi_sec_labels=csi_sec_labels,
         )
         safe_nom = "".join(c if c.isalnum() or c in "-_ " else "_" for c in (_snapshot["project"]["nom"] or "projet")).strip() or "projet"
         return StreamingResponse(
@@ -3229,6 +3243,19 @@ def register_ad_budget_routes(get_conn):
         jwt_token=None,
         inclure_ligne_groupe=False,
         inclure_ligne_titres=True,
+        # Niveaux d'affichage du rapport structuré (Division CSI → sous-section →
+        # lignes). Défaut TOUS True = rapport ACTUEL (régression zéro). Ils ne
+        # changent QUE l'affichage : les sous-totaux/totaux/grand total restent
+        # calculés sur TOUTES les lignes réelles (on masque, on ne recompute pas).
+        afficher_lignes_detail=True,
+        afficher_sous_totaux=True,
+        afficher_totaux_section=True,
+        # Bandeaux d'en-tête de groupe (indépendants) + libellés CSI passés par le
+        # front (groupes présents → {code: titre}) ; absents = code seul.
+        afficher_entete_section=True,
+        afficher_entete_soussection=True,
+        csi_div_labels="",
+        csi_sec_labels="",
     ):
         """Construit le PDF rapport ET le snapshot JSON dans la MÊME passe.
         Retourne (buf: BytesIO, snapshot: dict). Le rendu PDF est INCHANGÉ
@@ -3707,7 +3734,68 @@ def register_ad_budget_routes(get_conn):
             # front fait foi : rapport PDF = devis = écran, au dollar près.
             return float(_js_round(v)) if arr else v
 
+        # ── Bandeaux d'en-tête Division CSI / Sous-section (options d'affichage) ──
+        # Hiérarchie DÉRIVÉE du code CSI (aucun champ stocké) : Division = 2 premiers
+        # chiffres, Sous-section = 4 premiers chiffres « AB CD », Ligne = code complet.
+        # MIROIR EXACT du front (getPrefix / grandeDivisionLabel / grandeSectionLabel).
+        # Libellés CSI passés par le front (groupes présents) ; fallback = code seul.
+        try:
+            _div_labels = json.loads(csi_div_labels) if csi_div_labels else {}
+        except (ValueError, TypeError):
+            _div_labels = {}
+        try:
+            _sec_labels = json.loads(csi_sec_labels) if csi_sec_labels else {}
+        except (ValueError, TypeError):
+            _sec_labels = {}
+
+        def _csi_division(s):
+            d = re.sub(r"\D", "", s or "")
+            return d[:2] if len(d) >= 2 else "Divers"
+
+        def _csi_prefix(s):
+            d = re.sub(r"\D", "", s or "")
+            if len(d) >= 4:
+                return f"{d[:2]} {d[2:4]}"
+            if len(d) >= 2:
+                return f"{d[:2]} 00"
+            return "Divers"
+
+        def _div_header_label(div):
+            if div == "Divers":
+                return "Divers"
+            t = _div_labels.get(div)
+            return f"{div} 00 00 — {t}" if t else f"{div} 00 00"
+
+        def _sub_header_label(prefix):
+            if prefix == "Divers":
+                return "Divers"
+            t = _sec_labels.get(prefix)
+            return f"{prefix} 00 — {t}" if t else f"{prefix} 00"
+
+        # Bandeaux DÉJÀ émis (anti-répétition + anti-orphelin : un bandeau n'est
+        # posé qu'au 1er CONTENU réellement rendu de son groupe — jamais sur un
+        # groupe vide). Les indices alimentent les styles (SPAN + couleurs).
+        hdr_state = {"div": None, "prefix": None}
+        div_header_rows = []
+        sub_header_rows = []
+
+        def _open_group(div, prefix):
+            """Pose (au plus 1×) le bandeau Division puis Sous-section à l'entrée d'un
+            nouveau groupe. Idempotent : re-appel sur le même groupe = no-op. N'affecte
+            AUCUN calcul (rangées purement visuelles)."""
+            if afficher_entete_section and hdr_state["div"] != div:
+                table_data.append([_div_header_label(div)] + [""] * (len(selected) - 1))
+                div_header_rows.append(len(table_data) - 1)
+                hdr_state["div"] = div
+                hdr_state["prefix"] = None   # nouvelle division → ré-émettre la sous-section
+            if afficher_entete_soussection and hdr_state["prefix"] != prefix:
+                table_data.append([_sub_header_label(prefix)] + [""] * (len(selected) - 1))
+                sub_header_rows.append(len(table_data) - 1)
+                hdr_state["prefix"] = prefix
+
         for sec, sec_lignes in sections_groups.items():
+            sec_div = _csi_division(sec)
+            sec_prefix = _csi_prefix(sec)
             sec_total = 0.0
             section_has_visible_lines = False
             for l in sec_lignes:
@@ -3768,14 +3856,23 @@ def register_ad_budget_routes(get_conn):
                     group_sub_st[gkey] += st_st
                 else:
                     non_grouped_total += R(tot_real)
-                table_data.append([
-                    cell_for(c, l, qte, prix, adj, R(st), tot_disp,
-                             heures, taux, st_mo, st_mat, st_st, st_montant,
-                             ajm, ajmo, ajst)
-                    for c in selected
-                ])
+                # Affichage de la ligne de DÉTAIL gated par afficher_lignes_detail.
+                # L'accumulation (sec_total / group_subtotals / snap_*) ci-dessus est
+                # FAITE quoi qu'il arrive → masquer le détail ne change aucun total.
+                if afficher_lignes_detail:
+                    _open_group(sec_div, sec_prefix)   # bandeaux AVANT la 1re ligne du groupe
+                    table_data.append([
+                        cell_for(c, l, qte, prix, adj, R(st), tot_disp,
+                                 heures, taux, st_mo, st_mat, st_st, st_montant,
+                                 ajm, ajmo, ajst)
+                        for c in selected
+                    ])
+                # Vrai dès qu'une ligne CONTRIBUE (même si son détail est masqué) :
+                # le sous-total de sous-section doit pouvoir s'afficher seul.
                 section_has_visible_lines = True
-            if show_totals_row and section_has_visible_lines:
+            if show_totals_row and section_has_visible_lines and afficher_sous_totaux:
+                # Détail masqué mais sous-total visible → poser quand même les bandeaux.
+                _open_group(sec_div, sec_prefix)
                 table_data.append(make_summary_row(f"Sous-total {sec}", sec_total))
                 subtotal_rows.append(len(table_data) - 1)
 
@@ -3809,10 +3906,29 @@ def register_ad_budget_routes(get_conn):
         for r in subtotal_rows:
             table_style_cmds.append(("FONTNAME", (0, r), (-1, r), "Helvetica-Bold"))
             table_style_cmds.append(("BACKGROUND", (0, r), (-1, r), colors.HexColor("#dbeafe")))
+        # Bandeaux Division (bleu Adision, texte blanc) et Sous-section (gris-bleu
+        # clair, texte bleu) — SPAN pleine largeur, sentence case (libellé déjà
+        # « code — titre »). Ajoutés APRÈS ROWBACKGROUNDS → priment sur l'alternance.
+        for r in div_header_rows:
+            table_style_cmds.append(("SPAN", (0, r), (-1, r)))
+            table_style_cmds.append(("BACKGROUND", (0, r), (-1, r), colors.HexColor("#1e3a8a")))
+            table_style_cmds.append(("TEXTCOLOR", (0, r), (-1, r), colors.white))
+            table_style_cmds.append(("FONTNAME", (0, r), (-1, r), "Helvetica-Bold"))
+            table_style_cmds.append(("ALIGN", (0, r), (-1, r), "LEFT"))
+        for r in sub_header_rows:
+            table_style_cmds.append(("SPAN", (0, r), (-1, r)))
+            table_style_cmds.append(("BACKGROUND", (0, r), (-1, r), colors.HexColor("#e8edf7")))
+            table_style_cmds.append(("TEXTCOLOR", (0, r), (-1, r), colors.HexColor("#1e3a8a")))
+            table_style_cmds.append(("FONTNAME", (0, r), (-1, r), "Helvetica-Bold"))
+            table_style_cmds.append(("ALIGN", (0, r), (-1, r), "LEFT"))
 
-        table = Table(table_data, colWidths=col_widths, repeatRows=header_offset)
-        table.setStyle(TableStyle(table_style_cmds))
-        story.append(table)
+        # Si aucune rangée de DONNÉES (détail ET sous-totaux masqués → sommaire
+        # exécutif par Division CSI), on n'affiche pas le tableau pour éviter un
+        # en-tête de colonnes orphelin. Le bloc de totaux ci-dessous suffit.
+        if len(table_data) > header_offset:
+            table = Table(table_data, colWidths=col_widths, repeatRows=header_offset)
+            table.setStyle(TableStyle(table_style_cmds))
+            story.append(table)
 
         # Valeurs financières du snapshot — init à 0 (cas avec_prix=False) ;
         # le bloc ci-dessous les renseigne quand avec_prix. group_ap = A&P par
@@ -3840,29 +3956,33 @@ def register_ad_budget_routes(get_conn):
                 group_ap[key] = ap
                 real_sub_avant_taxes += sub + ap
 
-            # 2. Affichage des lignes par regroupement (filtré par selected_st / selected_ap)
-            for key, label, pct_field, _ in BUDGET_GROUPS_PDF:
-                sub = group_subtotals[key]
-                if sub <= 0:
-                    continue
-                if key not in selected_st:
-                    continue
-                pct = float(projet.get(pct_field) or 0)
-                ap = R(_group_admin_profit(projet, pct_field, sub,
-                                           group_sub_mat[key], group_sub_mo[key], group_sub_st[key]))
-                decomposed = any(projet.get(f"{pct_field}_{c}") is not None for c in ("mat", "mo", "st"))
-                ap_label = ("Administration et profit (décomposé)" if decomposed
-                            else f"Administration et profit {pct:g}%")
-                if key in selected_ap:
-                    # Mode classique : sous-total et admin & profit affichés séparément
-                    totals_rows.append([f"Sous-total {label}", f"{_frca_num(sub)} $"])
-                    totals_kinds.append("subtotal")
-                    totals_rows.append([ap_label, f"{_frca_num(ap)} $"])
-                    totals_kinds.append("admin")
-                else:
-                    # Mode distribution : sous-total gonflé (= sub + ap), pas de ligne admin
-                    totals_rows.append([f"Sous-total {label}", f"{_frca_num(sub + ap)} $"])
-                    totals_kinds.append("subtotal")
+            # 2. Affichage des TOTAUX PAR DIVISION CSI (regroupements), filtré par
+            #    selected_st / selected_ap. Gated par afficher_totaux_section : les
+            #    MONTANTS sont déjà accumulés dans real_sub_avant_taxes ci-dessus
+            #    (indépendant), donc masquer ces lignes ne touche pas le grand total.
+            if afficher_totaux_section:
+                for key, label, pct_field, _ in BUDGET_GROUPS_PDF:
+                    sub = group_subtotals[key]
+                    if sub <= 0:
+                        continue
+                    if key not in selected_st:
+                        continue
+                    pct = float(projet.get(pct_field) or 0)
+                    ap = R(_group_admin_profit(projet, pct_field, sub,
+                                               group_sub_mat[key], group_sub_mo[key], group_sub_st[key]))
+                    decomposed = any(projet.get(f"{pct_field}_{c}") is not None for c in ("mat", "mo", "st"))
+                    ap_label = ("Administration et profit (décomposé)" if decomposed
+                                else f"Administration et profit {pct:g}%")
+                    if key in selected_ap:
+                        # Mode classique : sous-total et admin & profit affichés séparément
+                        totals_rows.append([f"Sous-total {label}", f"{_frca_num(sub)} $"])
+                        totals_kinds.append("subtotal")
+                        totals_rows.append([ap_label, f"{_frca_num(ap)} $"])
+                        totals_kinds.append("admin")
+                    else:
+                        # Mode distribution : sous-total gonflé (= sub + ap), pas de ligne admin
+                        totals_rows.append([f"Sous-total {label}", f"{_frca_num(sub + ap)} $"])
+                        totals_kinds.append("subtotal")
 
             # 3. Sous-total avant taxes (visuel uniquement)
             if avec_sous_total_avant_taxes:
@@ -4081,6 +4201,13 @@ def register_ad_budget_routes(get_conn):
         avec_tps: bool = True,
         avec_tvq: bool = True,
         avec_heures: bool = True,
+        afficher_lignes_detail: bool = True,
+        afficher_sous_totaux: bool = True,
+        afficher_totaux_section: bool = True,
+        afficher_entete_section: bool = True,
+        afficher_entete_soussection: bool = True,
+        csi_div_labels: str = "",
+        csi_sec_labels: str = "",
         orientation: str = "portrait",
         mobilisation: float = 0,
         surface_plancher: float = 0,
@@ -4156,6 +4283,13 @@ def register_ad_budget_routes(get_conn):
             avec_tvq, orientation, mobilisation, surface_plancher,
             hauteur_cloisons, longueur_cloisons, avec_heures=avec_heures,
             jwt_token=jwt_token,
+            afficher_lignes_detail=afficher_lignes_detail,
+            afficher_sous_totaux=afficher_sous_totaux,
+            afficher_totaux_section=afficher_totaux_section,
+            afficher_entete_section=afficher_entete_section,
+            afficher_entete_soussection=afficher_entete_soussection,
+            csi_div_labels=csi_div_labels,
+            csi_sec_labels=csi_sec_labels,
         )
         pdf_bytes = buf.getvalue()
         # 2. Snapshot = budget COMPLET (vérité Ad ANA) : aucune section/colonne
@@ -4483,12 +4617,18 @@ def register_ad_budget_routes(get_conn):
                 raise _typ_err(e)
             m = _map_typ_to_budget_cols(typ, ligne["qte"])   # re-mappe à la qté courante
             # ⟳ EXPLICITE = acceptation user : réaligne le coût sur Ad TYP et
-            # remet l'override à FALSE (ignore volontairement le flag).
+            # remet TOUS les overrides à FALSE (ignore volontairement les flags).
+            # Règle métier validée Simon : clic ⟳ = l'utilisateur sait ce qu'il
+            # fait, on resync tout. Aligné avec la pioche autocomplete (else AUTO).
             cur.execute("""
                 UPDATE ad_budget.budget_lignes SET
                   section=%s, description=%s, unite=%s, prix_unitaire=%s,
                   heures=%s, taux_horaire=%s, sous_traitant_montant=%s,
-                  source_typ_snapshot_at=NOW(), prix_unitaire_override=FALSE,
+                  source_typ_snapshot_at=NOW(),
+                  prix_unitaire_override=FALSE, qte_override=FALSE,
+                  taux_horaire_override=FALSE, ajust_materiaux_override=FALSE,
+                  ajust_main_oeuvre_override=FALSE, ajust_sous_traitant_override=FALSE,
+                  sous_traitant_montant_override=FALSE,
                   updated_at=NOW()
                 WHERE id=%s AND projet_id=%s RETURNING *
             """, (m["section"], m["description"], m["unite"], m["prix_unitaire"],
@@ -4801,39 +4941,69 @@ def register_ad_budget_routes(get_conn):
             # rendement (heures=0, ex. Mobilisation) ne doit PAS créer un faux override
             # à 0 sur une ligne hr (sinon MO=0 au lieu du défaut qté).
             _hm = bool((m["heures"] or 0) > 0)
+            # OVERRIDES GÉNÉRALISÉS — branche AUTO (rescale qté déclenché par une
+            # saisie utilisateur). qte_override TOUJOURS posé à TRUE : la qté
+            # vient d'une saisie explicite, donc elle DOIT survivre à un push
+            # master ultérieur. taux_horaire_override posé à TRUE si overlay
+            # tauxHoraire fourni dans data (= saisie en cours préservée par le
+            # client snapshotTyp ; sinon ligne["taux_horaire"] courant reconduit).
+            _tov = bool(data.get("taux_horaire") not in (None, ""))
             if auto and "prix_unitaire" in data:
                 # Saisie de coût en cours (overlay non encore sauvé) au moment du
                 # changement de qté : on la persiste + pose l'override pour la
                 # protéger (sinon elle serait perdue à la purge de l'overlay).
+                # OVERRIDES GÉNÉRALISÉS : taux_horaire et sous_traitant_montant
+                # respectés via CASE WHEN — un override existant n'est pas écrasé
+                # par le rescale qté (règle « saisie utilisateur > carnet »).
                 cur.execute("""
                     UPDATE ad_budget.budget_lignes SET
-                      qte=%s, heures=%s, heures_manuelles=%s, taux_horaire=%s, sous_traitant_montant=%s,
+                      qte=%s, qte_override=TRUE,
+                      heures=%s, heures_manuelles=%s,
+                      taux_horaire = CASE WHEN taux_horaire_override THEN taux_horaire ELSE %s END,
+                      taux_horaire_override = (taux_horaire_override OR %s),
+                      sous_traitant_montant = CASE WHEN sous_traitant_montant_override THEN sous_traitant_montant ELSE %s END,
                       prix_unitaire=%s, prix_unitaire_override=%s,
                       source_typ_snapshot_at=NOW(), updated_at=NOW()
                     WHERE id=%s AND projet_id=%s RETURNING *
-                """, (qte, m["heures"], _hm, taux_auto, m["sous_traitant_montant"],
+                """, (qte, m["heures"], _hm, taux_auto, _tov, m["sous_traitant_montant"],
                       float(data.get("prix_unitaire") or 0),
                       bool(data.get("prix_unitaire_override", True)),
                       ligne_id, projet_id))
             elif auto:
                 # Rescale qté pur : préserve prix_unitaire / override / section /
-                # description / unité ; ne touche que heures / taux / ST.
+                # description / unité ; ne touche que heures / taux / ST. OVERRIDES
+                # GÉNÉRALISÉS : taux_horaire et sous_traitant_montant respectent
+                # leur flag override (CASE WHEN) — la saisie manuelle survit au
+                # rescale qté. Le flag heures_manuelles existant tient le rôle
+                # d'override pour heures (couplé à _hm).
                 cur.execute("""
                     UPDATE ad_budget.budget_lignes SET
-                      qte=%s, heures=%s, heures_manuelles=%s, taux_horaire=%s, sous_traitant_montant=%s,
+                      qte=%s, qte_override=TRUE,
+                      heures=%s, heures_manuelles=%s,
+                      taux_horaire = CASE WHEN taux_horaire_override THEN taux_horaire ELSE %s END,
+                      taux_horaire_override = (taux_horaire_override OR %s),
+                      sous_traitant_montant = CASE WHEN sous_traitant_montant_override THEN sous_traitant_montant ELSE %s END,
                       source_typ_snapshot_at=NOW(), updated_at=NOW()
                     WHERE id=%s AND projet_id=%s RETURNING *
-                """, (qte, m["heures"], _hm, taux_auto, m["sous_traitant_montant"],
+                """, (qte, m["heures"], _hm, taux_auto, _tov, m["sous_traitant_montant"],
                       ligne_id, projet_id))
             else:
                 # Pioche EXPLICITE (autocomplete) : re-pull complet depuis Ad TYP ;
-                # le coût vient d'Ad TYP -> override remis à FALSE.
+                # le coût vient d'Ad TYP -> override remis à FALSE. Règle métier
+                # validée Simon : autocomplete = NOUVELLE LIGNE D'INTENTION → tous
+                # les overrides de l'ancien item perdent leur sens, on les remet à
+                # FALSE en bloc (qté/taux/ajust/ST + prix_unitaire).
                 cur.execute("""
                     UPDATE ad_budget.budget_lignes SET
                       section=%s, description=%s, unite=%s, prix_unitaire=%s,
                       qte=%s, heures=%s, heures_manuelles=%s, taux_horaire=%s, sous_traitant_montant=%s,
                       source_typ_code=%s, source_typ_snapshot_at=NOW(),
-                      item_id_ad_mat=NULL, prix_unitaire_override=FALSE, updated_at=NOW()
+                      item_id_ad_mat=NULL,
+                      prix_unitaire_override=FALSE, qte_override=FALSE,
+                      taux_horaire_override=FALSE, ajust_materiaux_override=FALSE,
+                      ajust_main_oeuvre_override=FALSE, ajust_sous_traitant_override=FALSE,
+                      sous_traitant_montant_override=FALSE,
+                      updated_at=NOW()
                     WHERE id=%s AND projet_id=%s RETURNING *
                 """, (m["section"], m["description"], m["unite"], m["prix_unitaire"],
                       qte, m["heures"], _hm, m["taux_horaire"], m["sous_traitant_montant"],
@@ -4965,6 +5135,16 @@ def register_ad_budget_routes(get_conn):
             # Flag override HEURES : posé quand l'user saisit des heures à la main ->
             # la saisie prime sur le défaut « heures=qté » des lignes unité hr.
             "heures_manuelles",
+            # Sprint OVERRIDES GÉNÉRALISATION — flags par champ override-able. La
+            # saisie manuelle domine le carnet. Le front peut les envoyer
+            # explicitement, mais la pose est AUSSI automatique ci-dessous dès
+            # que le champ correspondant figure dans le body.
+            "qte_override",
+            "taux_horaire_override",
+            "ajust_materiaux_override",
+            "ajust_main_oeuvre_override",
+            "ajust_sous_traitant_override",
+            "sous_traitant_montant_override",
         ]:
             if field in data:
                 val = data[field]
@@ -4972,10 +5152,35 @@ def register_ad_budget_routes(get_conn):
                 # cast "" → uuid qui planterait). Délier = renvoyer null.
                 if field == "sous_traitant_contact_id":
                     val = val or None
-                elif field in ("prix_unitaire_override", "heures_manuelles"):
+                elif field in (
+                    "prix_unitaire_override", "heures_manuelles",
+                    "qte_override", "taux_horaire_override",
+                    "ajust_materiaux_override", "ajust_main_oeuvre_override",
+                    "ajust_sous_traitant_override", "sous_traitant_montant_override",
+                ):
                     val = bool(val)
                 fields.append(f"{field} = %s")
                 values.append(val)
+        # Sprint OVERRIDES GÉNÉRALISATION — auto-pose des flags override sur les
+        # champs override-able présents dans le body (= intention utilisateur
+        # explicite). Le front n'a pas besoin de l'envoyer ; un PUT contenant
+        # 'qte' suffit à poser qte_override=TRUE. La règle « saisie utilisateur >
+        # carnet » est ainsi garantie par défaut, même pour un appelant qui
+        # oublierait le flag. Skipé si le front a posé explicitement le flag
+        # (cas symétrique de prix_unitaire_override géré par le front à la
+        # pioche Ad MAT / Ad TYP — pas de double-écriture).
+        _AUTO_OVERRIDE_MAP = {
+            "qte": "qte_override",
+            "taux_horaire": "taux_horaire_override",
+            "ajust_materiaux": "ajust_materiaux_override",
+            "ajust_main_oeuvre": "ajust_main_oeuvre_override",
+            "ajust_sous_traitant": "ajust_sous_traitant_override",
+            "sous_traitant_montant": "sous_traitant_montant_override",
+        }
+        for fname, ovcol in _AUTO_OVERRIDE_MAP.items():
+            if fname in data and ovcol not in data:
+                fields.append(f"{ovcol} = %s")
+                values.append(True)
         # Snapshot-prix MAT fourni → horodate côté serveur (source de vérité).
         if "source_mat_prix_snapshot" in data:
             fields.append("source_mat_snapshot_at = NOW()")
