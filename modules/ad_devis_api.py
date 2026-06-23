@@ -513,6 +513,30 @@ def register_ad_devis_routes(get_conn):
         #    Aéré mais pas dispersé. Espace d'aération avant TRAVAUX INCLUS.
         pres_style = ParagraphStyle("pres", parent=body, leading=16, spaceAfter=11)
         pres_txt = (devis.get("presentation") or "—").strip()
+        # Source unique de vérité pour le nom du contact : le PDF rend toujours
+        # la valeur LIVE de contact_client (fiche projet), peu importe ce qui
+        # a été figé dans le texte au moment de l'insertion des templates
+        # « Présentation budget/soumission » côté Ad BUD. Deux chemins :
+        #   (a) placeholder {contact} préservé par le front → substitué live.
+        #   (b) legacy : 1re ligne « À l'attention de … » figée → ré-écrite
+        #       avec contact_client courant. Cohérent avec le bloc en-tête
+        #       CLIENT (cf. ligne ~487, même source _ident.contact_client).
+        # Si contact_client vide : on retire la ligne pour éviter
+        # « À l'attention de » orphelin (et le placeholder devient vide).
+        _contact_live = (_ident.get("contact_client") or "").strip()
+        if _contact_live:
+            pres_txt = pres_txt.replace("{contact}", _contact_live)
+            pres_txt = re.sub(
+                r"^\s*À l'attention de[^\n]*",
+                f"À l'attention de {_contact_live}",
+                pres_txt, count=1,
+            )
+        else:
+            pres_txt = pres_txt.replace("{contact}", "")
+            pres_txt = re.sub(
+                r"^\s*À l'attention de[^\n]*\n?",
+                "", pres_txt, count=1,
+            ).lstrip()
         for para in re.split(r"\n\s*\n", pres_txt) or [pres_txt]:
             if para.strip():
                 story.append(Paragraph(esc(para).replace("\n", "<br/>"), pres_style))
