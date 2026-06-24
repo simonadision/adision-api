@@ -2823,6 +2823,61 @@ def register_ad_budget_routes(get_conn):
         return {"status": "ok", "is_verrouille": row["is_verrouille"],
                 "verrouille_par": row["verrouille_par"], "verrouille_le": row["verrouille_le"]}
 
+    @router.patch("/projets/by-hub/{hub_id}/verrou-mirror")
+    def sync_verrou_mirror_from_hub(hub_id: int, data: dict, user=Depends(jwt_user)):
+        """Alignement HUB → BUD du miroir local. Appelé par adision-app-api
+        APRÈS son toggle de app_hub.projects.is_verrouille pour propager
+        immédiatement vers le miroir BUD, sans attendre un pull au prochain
+        GET projet. Élimine le stale (cf. incident verrou 309/310 juin 2026).
+
+        Idempotent. Met à jour TOUS les budgets non-archive liés au hub_id
+        (un projet HUB peut avoir 1 budget brouillon actif + N archives).
+
+        Body : {is_verrouille: bool, verrouille_par_email: str|null,
+                verrouille_le: iso8601|null}.
+        Auth : JWT user (le même que celui qui a fait le toggle HUB).
+        Gate org : le user doit appartenir à l'org du projet ou être super_admin
+        (vérifié indirectement par jwt_user + l'UPDATE qui ne touchera rien si
+        l'org_id du user diffère et qu'il n'est pas super_admin)."""
+        is_locked = bool((data or {}).get("is_verrouille"))
+        par_email = (data or {}).get("verrouille_par_email") or "(via hub)"
+        verrouille_le = (data or {}).get("verrouille_le")  # iso ou None
+        is_super_admin = user.get("platform_role") == "super_admin"
+
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            # Gate org : super_admin libre, sinon filtre par organization_id du user.
+            org_filter = "" if is_super_admin else " AND organization_id = %s"
+            params_base = (int(hub_id),) if is_super_admin else (int(hub_id), user["organization_id"])
+            if is_locked:
+                # UPDATE ne touche QUE les budgets non-archive (1 actif par projet HUB).
+                # Les archives gardent leur historique de verrou figé.
+                sql = (
+                    "UPDATE ad_budget.projets SET is_verrouille = TRUE, "
+                    "    verrouille_par = %s, "
+                    "    verrouille_le = COALESCE(%s::timestamptz, NOW()), "
+                    "    updated_at = NOW() "
+                    "WHERE ad_hub_project_id = %s AND statut <> 'archive'" + org_filter +
+                    " RETURNING id, is_verrouille, verrouille_par, verrouille_le"
+                )
+                params = (par_email, verrouille_le) + params_base
+            else:
+                sql = (
+                    "UPDATE ad_budget.projets SET is_verrouille = FALSE, "
+                    "    verrouille_par = NULL, verrouille_le = NULL, updated_at = NOW() "
+                    "WHERE ad_hub_project_id = %s AND statut <> 'archive'" + org_filter +
+                    " RETURNING id, is_verrouille, verrouille_par, verrouille_le"
+                )
+                params = params_base
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            conn.commit()
+        finally:
+            cur.close(); conn.close()
+        return {"status": "ok", "hub_id": int(hub_id), "is_verrouille": is_locked,
+                "updated": [dict(r) for r in rows], "rowcount": len(rows)}
+
     @router.post("/projets/{projet_id}/duplicate")
     def duplicate_projet(projet_id: int, user=Depends(jwt_user)):
         # Phase 6 Deploy 3 — DUPLICATION GELÉE (410 Gone). La copie locale n'était
