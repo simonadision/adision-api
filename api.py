@@ -696,3 +696,68 @@ def internal_backfill_organization(
     finally:
         conn.close()
     return {"updated": updated}
+
+
+@app.patch("/internal/budget-verrou-mirror/{hub_id}")
+def internal_sync_verrou_mirror(
+    hub_id: int,
+    data: dict,
+    x_internal_secret: str = Header(None),
+):
+    """Endpoint service-à-service (juin 2026) : alignement HUB → BUD du miroir
+    local du verrou projet. Appelé par adision-app-api après son toggle de
+    app_hub.projects.is_verrouille pour propager IMMÉDIATEMENT vers le miroir
+    BUD, sans attendre un pull au prochain GET projet. Élimine le stale (cf.
+    incident verrou 309/310).
+
+    Auth : X-Internal-Secret == INTERNAL_SERVICE_SECRET (secret partagé). PAS
+    de JWT — appel machine-à-machine. Volontairement HORS du router /budget
+    (qui exige module ad_bud dans le JWT), car un super_admin sans module
+    ad_bud doit pouvoir toggler le verrou et déclencher la propagation.
+
+    Body : {is_verrouille: bool, verrouille_par_email: str|null,
+            verrouille_le: iso8601|null}.
+    Scope : UPDATE TOUS les budgets non-archive liés au hub_id (1 actif + N
+    archives). Idempotent."""
+    expected = os.environ.get("INTERNAL_SERVICE_SECRET")
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail="INTERNAL_SERVICE_SECRET non configuré côté serveur",
+        )
+    if not x_internal_secret or not secrets.compare_digest(x_internal_secret, expected):
+        raise HTTPException(status_code=401, detail="Secret de service invalide")
+
+    is_locked = bool((data or {}).get("is_verrouille"))
+    par_email = (data or {}).get("verrouille_par_email") or "(via hub)"
+    verrouille_le = (data or {}).get("verrouille_le")
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        if is_locked:
+            cur.execute(
+                "UPDATE ad_budget.projets SET is_verrouille = TRUE, "
+                "    verrouille_par = %s, "
+                "    verrouille_le = COALESCE(%s::timestamptz, NOW()), "
+                "    updated_at = NOW() "
+                "WHERE ad_hub_project_id = %s AND statut <> 'archive' "
+                "RETURNING id",
+                (par_email, verrouille_le, int(hub_id)),
+            )
+        else:
+            cur.execute(
+                "UPDATE ad_budget.projets SET is_verrouille = FALSE, "
+                "    verrouille_par = NULL, verrouille_le = NULL, updated_at = NOW() "
+                "WHERE ad_hub_project_id = %s AND statut <> 'archive' "
+                "RETURNING id",
+                (int(hub_id),),
+            )
+        rows = cur.fetchall()
+        updated_ids = [r[0] for r in rows]
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+    return {"status": "ok", "hub_id": int(hub_id), "is_verrouille": is_locked,
+            "updated_ids": updated_ids, "rowcount": len(updated_ids)}
