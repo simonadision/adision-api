@@ -69,6 +69,59 @@ def _group_admin_profit(projet, pct_field, sub, sub_mat, sub_mo, sub_st):
         return float(r) if r is not None else disc
     return (sub_mat * eff("mat") + sub_mo * eff("mo") + sub_st * eff("st")) / 100.0
 
+
+def _resolve_discipline_pct_field(section):
+    """Mappe une section CSI (ex. '03 30 00') vers le pct_field de sa discipline.
+    Renvoie None si la section ne match aucun regroupement (admin+profit = 0)."""
+    if not section:
+        return None
+    try:
+        prefix = section.split()[0] if " " in str(section) else str(section)[:2]
+        n = int(prefix)
+    except (ValueError, AttributeError):
+        return None
+    for key, _label, pct_field, matches in BUDGET_GROUPS_PDF:
+        if matches(n):
+            return pct_field
+    return None
+
+
+def _line_admin_profit(projet, line):
+    """Juin 2026 — Admin+profit ventilé PAR ITEM (mode 'ventile').
+
+    Cohérent avec _group_admin_profit côté discipline + mode décomposé :
+      - Si AUCUN pct_admin_<discipline>_<cat> n'est défini → simple
+        (line.total × pctDiscipline / 100).
+      - Sinon : décomposé par catégorie. Chaque sous-total catégorie de la
+        ligne (mat/mo/st) est multiplié par son pct effectif (catégorie si
+        défini, sinon discipline). Cohérent avec _group_admin_profit où la
+        formule s'applique aux sub_mat/sub_mo/sub_st GROUPÉS.
+
+    Strategie d'arrondi (a) - OBLIGATOIRE : retour FLOAT non arrondi.
+    L'arrondi se fait au TOTAL FINAL côté caller pour garantir égalité
+    centime-perfect entre mode global et ventilé (taux uniformes).
+    """
+    pct_field = _resolve_discipline_pct_field(line.get("section"))
+    if not pct_field:
+        return 0.0
+    disc = float(projet.get(pct_field) or 0)
+    raws = {c: projet.get(f"{pct_field}_{c}") for c in ("mat", "mo", "st")}
+    if all(raws[c] is None for c in raws):
+        return float(line.get("total") or 0) * disc / 100.0
+    def eff(c):
+        r = raws[c]
+        return float(r) if r is not None else disc
+    st_mat = float(line.get("st_mat") or 0)
+    st_mo = float(line.get("st_mo") or 0)
+    st_st = float(line.get("st_st") or 0)
+    return (st_mat * eff("mat") + st_mo * eff("mo") + st_st * eff("st")) / 100.0
+
+
+def _is_ventile_mode(projet):
+    """Mode admin+profit ventilé par item ? Lit pct_admin_mode du projet,
+    défaut 'global' (rétrocompat : champ ajouté juin 2026)."""
+    return (projet.get("pct_admin_mode") or "global") == "ventile"
+
 BUDGET_GROUPS_PDF = [
     ("conditions", "Conditions générales", "pct_admin_conditions", lambda n: n == 1),
     ("architecture", "Architecture", "pct_admin_architecture", lambda n: 2 <= n <= 14),
@@ -2397,6 +2450,10 @@ def register_ad_budget_routes(get_conn):
             # Étiquette de révision éditable (Espace Rapports). PAS dans
             # SNAPSHOT_AFFECTING_FIELDS -> l'éditer ne bump pas la révision.
             "revision_label",
+            # Juin 2026 — Mode de calcul Administration et profit :
+            # 'global' (défaut) ou 'ventile'. Migration sprint_admin_profit_mode.
+            # CHECK BD bloque toute autre valeur (sécurité côté DB).
+            "pct_admin_mode",
         ]:
             if field in data:
                 v = data[field]
@@ -2408,6 +2465,13 @@ def register_ad_budget_routes(get_conn):
                     v = None
                 elif field in PCT_FIELDS and (v == "" or v is None):
                     v = 0
+                elif field == "pct_admin_mode":
+                    # Garde-fou applicatif (la BD CHECK refuserait quand même).
+                    if v not in ("global", "ventile"):
+                        raise HTTPException(
+                            status_code=422,
+                            detail="pct_admin_mode doit être 'global' ou 'ventile'.",
+                        )
                 fields.append(f"{field} = %s")
                 values.append(v)
         if not fields:
@@ -3757,6 +3821,14 @@ def register_ad_budget_routes(get_conn):
             selected_ap = set(all_group_keys)
         else:
             selected_ap = {s.strip() for s in admin_profits.split(",") if s.strip()} & all_group_keys
+        # Juin 2026 — En mode VENTILE l'admin+profit est ventilé DANS chaque
+        # item du budget, le bloc admin séparé du PDF n'a plus de sens (sinon
+        # double-comptage). On force selected_ap=∅ pour réutiliser la branche
+        # « distribution » existante (sous-totaux discipline gonflés, pas de
+        # ligne admin séparée). La section TOTAUX PAR DIVISION reste, le
+        # total final est identique au mode global (centime-perfect).
+        if _is_ventile_mode(projet):
+            selected_ap = set()
         # Facteur d'affichage par regroupement : si sous-total inclus mais
         # admin & profit exclu, on gonfle le Total des lignes (et la sec_total
         # affichée) en distribuant le montant admin pro rata.
