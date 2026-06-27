@@ -14,11 +14,16 @@ import os
 from typing import Optional
 
 import jwt
-from fastapi import Depends, Header, HTTPException, Query
+from fastapi import Cookie, Depends, Header, HTTPException, Query
 from psycopg.rows import dict_row
 
 JWT_ALGORITHM = "HS256"
 REQUIRED_MODULE = "ad_bud"
+
+# Étape 1 SSO (juin 2026) — cookie de session cross-subdomain ADDITIF.
+# Lu en dernier ressort par `_extract_bearer`. Posé par adision-app-api
+# au login. Si absent, le système header/query reste fonctionnel.
+SESSION_COOKIE_NAME = "__Secure-adision-session"
 
 
 def _get_jwt_secret() -> str:
@@ -66,10 +71,15 @@ def _derive_platform_role(role):
     return "client"
 
 
-def _extract_bearer(authorization: Optional[str], token_query: Optional[str] = None) -> str:
+def _extract_bearer(
+    authorization: Optional[str],
+    token_query: Optional[str] = None,
+    session_cookie: Optional[str] = None,
+) -> str:
     """Lit le JWT soit du header `Authorization: Bearer <jwt>`, soit du
     query param `?token=<jwt>` (utilisé seulement pour les GET de download
-    PDF / Excel ouverts via window.open, qui n'acceptent pas de header)."""
+    PDF / Excel ouverts via window.open, qui n'acceptent pas de header), soit
+    du cookie de session cross-subdomain (étape 1 SSO, juin 2026 — additif)."""
     if authorization:
         parts = authorization.split(" ", 1)
         if len(parts) == 2 and parts[0].lower() == "bearer" and parts[1].strip():
@@ -80,6 +90,8 @@ def _extract_bearer(authorization: Optional[str], token_query: Optional[str] = N
         )
     if token_query:
         return token_query.strip()
+    if session_cookie:
+        return session_cookie.strip()
     raise HTTPException(
         status_code=401,
         detail="Authentification requise (header Authorization: Bearer <JWT>)",
@@ -143,13 +155,15 @@ def make_jwt_deps(get_conn):
     def jwt_user(
         authorization: Optional[str] = Header(None),
         token: Optional[str] = Query(None),
+        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
     ) -> dict:
         """Dependency standard : accepte le JWT soit via header
         `Authorization: Bearer <jwt>`, soit via query `?token=<jwt>` (utilisé
-        par les GET de download PDF / Excel ouverts en window.open).
+        par les GET de download PDF / Excel ouverts en window.open), soit via
+        cookie de session cross-subdomain (étape 1 SSO, juin 2026).
         Vérifie signature + module ad_bud, auto-provisionne le user dans
         ad_budget.users, retourne le row local enrichi des modules JWT."""
-        jwt_token = _extract_bearer(authorization, token)
+        jwt_token = _extract_bearer(authorization, token, session_cookie)
         payload = _decode_token(jwt_token)
         _check_module(payload)
         conn = get_conn()
@@ -180,6 +194,7 @@ def make_jwt_deps(get_conn):
     def jwt_super_admin(
         authorization: Optional[str] = Header(None),
         token: Optional[str] = Query(None),
+        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
     ) -> dict:
         """Dependency réservée aux super_admin (administration transverse :
         grille des taux horaires, etc.).
@@ -194,7 +209,7 @@ def make_jwt_deps(get_conn):
             email, role, modules, exp) — l'appelant prend `sub`/`email` pour
             renseigner les colonnes updated_by.
         """
-        jwt_token = _extract_bearer(authorization, token)
+        jwt_token = _extract_bearer(authorization, token, session_cookie)
         payload = _decode_token(jwt_token)
         if payload.get("role") != "super_admin":
             raise HTTPException(
