@@ -2927,14 +2927,16 @@ def register_ad_budget_routes(get_conn):
                contact_entrepreneur, email_entrepreneur, telephone_entrepreneur,
                logo_base64,
                pct_admin_conditions, pct_admin_architecture,
-               pct_admin_mecanique, pct_admin_excavation)
+               pct_admin_mecanique, pct_admin_excavation,
+               arrondi_dollar, pct_admin_mode)
             SELECT %s, %s, %s, client, adresse, description, statut, notes,
                    nom_client, contact_client, email_client, telephone_client,
                    numero_projet, date_debut, date_fin,
                    contact_entrepreneur, email_entrepreneur, telephone_entrepreneur,
                    logo_base64,
                    pct_admin_conditions, pct_admin_architecture,
-                   pct_admin_mecanique, pct_admin_excavation
+                   pct_admin_mecanique, pct_admin_excavation,
+                   arrondi_dollar, pct_admin_mode
             FROM ad_budget.projets
             WHERE id = %s
             RETURNING *
@@ -3019,11 +3021,13 @@ def register_ad_budget_routes(get_conn):
                   (user_id, organization_id, statut, notes,
                    pct_admin_conditions, pct_admin_architecture,
                    pct_admin_mecanique, pct_admin_excavation,
-                   ad_hub_project_id)
+                   ad_hub_project_id,
+                   arrondi_dollar, pct_admin_mode)
                 SELECT %s, %s, statut, notes,
                        pct_admin_conditions, pct_admin_architecture,
                        pct_admin_mecanique, pct_admin_excavation,
-                       %s
+                       %s,
+                       arrondi_dollar, pct_admin_mode
                 FROM ad_budget.projets WHERE id = %s
                 RETURNING *
                 """,
