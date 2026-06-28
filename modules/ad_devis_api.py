@@ -18,7 +18,7 @@ import re
 from datetime import date
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from psycopg.rows import dict_row
 from typing import Optional
@@ -30,7 +30,7 @@ from reportlab.lib.units import cm, mm
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from modules import hub_service
-from modules.auth_jwt import make_jwt_deps, _extract_bearer
+from modules.auth_jwt import SESSION_COOKIE_NAME, make_jwt_deps, _extract_bearer
 from modules.ad_budget_api import build_pdf_logo, _load_and_authorize_projet, draw_adflo_footer
 
 logger = logging.getLogger(__name__)
@@ -137,7 +137,10 @@ def register_ad_devis_routes(get_conn):
 
     @router.get("/projets/{projet_id}/devis")
     def get_devis(projet_id: int, user=Depends(jwt_user),
-                  authorization: Optional[str] = Header(None)):
+                  authorization: Optional[str] = Header(None),
+                  session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
+        # Phase D-v2b pré-requis — session_cookie pour le re-extract manuel
+        # (proxy hub). _load_and_authorize_projet (l. 141) reste APRÈS extraction.
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
@@ -150,7 +153,7 @@ def register_ad_devis_routes(get_conn):
         finally:
             cur.close()
             conn.close()
-        jwt_token = _extract_bearer(authorization, None)
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
         # Phase 6 — identité CLIENT depuis le hub (source unique). Fail-closed :
         # hub en erreur -> 502 (pas de fallback sur le local figé).
         _hubc = {}
@@ -256,12 +259,15 @@ def register_ad_devis_routes(get_conn):
         user=Depends(jwt_user_or_token),
         authorization: Optional[str] = Header(None),
         token: Optional[str] = Query(None),
+        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
         montant: float = 0,
         couleur: str = "adision",
         date_devis: Optional[str] = None,
     ):
+        # Phase D-v2b pré-requis — session_cookie en fallback (header + query
+        # restent). _load_and_authorize_projet reste APRÈS extraction.
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
-        jwt_token = _extract_bearer(authorization, token)
+        jwt_token = _extract_bearer(authorization, token, session_cookie)
         buf, _snap = _build_devis(projet_id, montant, couleur, jwt_token, date_devis)
         safe = "".join(c if c.isalnum() or c in "-_ " else "_"
                        for c in (_snap["project"]["nom"] or "devis")).strip() or "devis"
@@ -275,6 +281,7 @@ def register_ad_devis_routes(get_conn):
         projet_id: int,
         user=Depends(jwt_user),
         authorization: Optional[str] = Header(None),
+        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
         montant: float = 0,
         couleur: str = "adision",
         revision_choice: Optional[str] = None,
@@ -284,9 +291,12 @@ def register_ad_devis_routes(get_conn):
         (report_type='proposition_devis', montant_avant_taxes = le quantitatif).
         Mécanique de révision (option A) identique au rapport : si la révision a
         déjà été émise ET que le budget a changé depuis, on demande à l'user
-        (choice_required) ; 'new' bumpe, 'correction' remplace. dirty -> FALSE."""
+        (choice_required) ; 'new' bumpe, 'correction' remplace. dirty -> FALSE.
+
+        Phase D-v2b pré-requis — session_cookie pour le re-extract manuel
+        (proxy hub). _load_and_authorize_projet reste APRÈS extraction."""
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
-        jwt_token = _extract_bearer(authorization, None)
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         try:

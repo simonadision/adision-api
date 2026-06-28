@@ -10,7 +10,7 @@ from typing import Optional
 
 import httpx
 import openpyxl
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from psycopg.errors import UniqueViolation
 from psycopg.rows import dict_row
@@ -19,7 +19,7 @@ from psycopg.types.json import Json
 from modules import con_service, hub_service, mat_service, typ_service
 from modules.ad_budget_constants import AD_VIU_BLINDSPOT_DIVISIONS
 from modules.aggregates import adapt_budget_lines, compute_aggregates, _js_round
-from modules.auth_jwt import _extract_bearer, make_jwt_deps
+from modules.auth_jwt import SESSION_COOKIE_NAME, _extract_bearer, make_jwt_deps
 from modules.taux_horaires_api import (
     _load_taux_default_map,
     _resolve_taux_default,
@@ -374,15 +374,20 @@ def _effective_qte(ligne, mobilisation, surface_plancher, surface_mur, surface_g
     return float(ligne.get("qte") or 0)
 
 
-def _push_budget_snapshot(get_conn, projet_id, authorization):
+def _push_budget_snapshot(get_conn, projet_id, authorization, session_cookie=None):
     """FIRE-AND-FORGET (pipeline Ad ANA brique 4) : recalcule les totaux du budget et les
     pousse sur la fiche hub via hub_service.patch_snapshot, SI le projet a un
     ad_hub_project_id ET un JWT exploitable. N'ÉLÈVE JAMAIS — log + return en cas d'échec
-    (le push enrichit la fiche hub, il ne doit jamais faire planter la sauvegarde du budget)."""
+    (le push enrichit la fiche hub, il ne doit jamais faire planter la sauvegarde du budget).
+
+    Phase D-v2b pré-requis — session_cookie en fallback header (cookie-only Ad BUD).
+    Si aucune source d'identité valide, return silencieux (fire-and-forget)."""
     try:
         jwt_token = None
         if authorization and authorization.lower().startswith("bearer "):
             jwt_token = authorization.split(" ", 1)[1].strip()
+        elif session_cookie:
+            jwt_token = session_cookie.strip()
         if not jwt_token:
             return
         conn = get_conn(); cur = conn.cursor(row_factory=dict_row)
@@ -647,15 +652,23 @@ def _apply_master_template(
     return cur.rowcount
 
 
-def _hub_project_name(projet_row, authorization):
+def _hub_project_name(projet_row, authorization, session_cookie=None):
     """Phase 7A — nom du projet depuis Ad HUB (source unique), BEST-EFFORT : 1
     appel (fetch_revision_meta renvoie `name`). None si projet non lié ou hub
     indisponible. Pour les libellés COSMÉTIQUES (réponses import VIU, noms de
-    fichiers d'export) — jamais fail-closed (ne casse pas l'action principale)."""
+    fichiers d'export) — jamais fail-closed (ne casse pas l'action principale).
+
+    Phase D-v2b pré-requis — session_cookie en fallback header. Guard pour éviter
+    le raise 401 de _extract_bearer si aucune source d'identité (best-effort)."""
     hid = (projet_row or {}).get("ad_hub_project_id")
     if not hid:
         return None
-    jwt_token = _extract_bearer(authorization, None)
+    if not (authorization or session_cookie):
+        return None
+    try:
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
+    except HTTPException:
+        return None
     if not jwt_token:
         return None
     meta = hub_service.fetch_revision_meta(jwt_token, [hid])
@@ -1383,6 +1396,7 @@ def register_ad_budget_routes(get_conn):
         client_nom: Optional[str] = None,
         include_archived: bool = False,
         authorization: Optional[str] = Header(None),
+        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
     ):
         # Toujours filtrer sur le user du JWT — l'éventuel ?user_id= en query
         # est ignoré (un user ne voit que ses propres projets).
@@ -1416,7 +1430,7 @@ def register_ad_budget_routes(get_conn):
         # d'identité locales. La région (libellé FR Ad BUD) est convertie en code
         # hub avant l'appel. hub_ids=[] -> ANY('{}') -> liste vide (cohérent).
         if type_batiment or region or client_nom:
-            jwt_token = _extract_bearer(authorization, None)
+            jwt_token = _extract_bearer(authorization, None, session_cookie)
             crit = {
                 "type_batiment": type_batiment,
                 "region": hub_service.region_label_to_code(region),
@@ -1453,7 +1467,7 @@ def register_ad_budget_routes(get_conn):
         # hub, on récupère numero_revision / est_revision_active / nb_revisions afin
         # que Ad BUD n'affiche qu'1 carte par famille (la version active). Best-effort :
         # si le hub est down, on marque tout actif (la liste ne plante jamais).
-        jwt_token = _extract_bearer(authorization, None)
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
         hub_ids = [r.get("ad_hub_project_id") for r in rows if r.get("ad_hub_project_id") is not None]
         meta = hub_service.fetch_revision_meta(jwt_token, hub_ids) if jwt_token else {}
         for r in rows:
@@ -1480,7 +1494,7 @@ def register_ad_budget_routes(get_conn):
     # ══════════════════════════════════════════════════════════
 
     @router.get("/projects/mine")
-    def projects_mine(user=Depends(jwt_user), authorization: Optional[str] = Header(None)):
+    def projects_mine(user=Depends(jwt_user), authorization: Optional[str] = Header(None), session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
         """Liste légère des projets du user — utilisée par le modal "Pousser
         vers Ad BUD" d'Ad VIU. nb_sections = nombre de valeurs section
         distinctes (codes CSI) déjà présentes dans le projet.
@@ -1513,7 +1527,7 @@ def register_ad_budget_routes(get_conn):
         # (1 appel hub : fetch_revision_meta renvoie `name`). Best-effort : noms
         # None si hub indispo (la liste ne plante jamais — pas de fail-closed sur
         # une liste de navigation). Le champ `nom` de la réponse vient du hub.
-        jwt_token = _extract_bearer(authorization, None)
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
         hub_ids = [r["ad_hub_project_id"] for r in rows if r.get("ad_hub_project_id")]
         meta = hub_service.fetch_revision_meta(jwt_token, hub_ids) if (jwt_token and hub_ids) else {}
         for r in rows:
@@ -1523,7 +1537,7 @@ def register_ad_budget_routes(get_conn):
 
     @router.post("/projects/from-viu")
     def projects_from_viu(data: dict, user=Depends(jwt_user),
-                          authorization: Optional[str] = Header(None)):
+                          authorization: Optional[str] = Header(None), session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
         """Crée un projet (mode=new) ou ajoute des lignes à un projet existant
         (mode=existing) à partir des sections CSI détectées par Ad VIU.
 
@@ -1695,7 +1709,7 @@ def register_ad_budget_routes(get_conn):
             conn.commit()
             return {
                 "project_id": project_id,
-                "project_name": _hub_project_name(proj, authorization),
+                "project_name": _hub_project_name(proj, authorization, session_cookie),
                 "sections_added": new_sections_count,
                 "lines_added": lines_added,
                 # Nombre de lignes du squelette standard ajoutées si le projet
@@ -1717,7 +1731,7 @@ def register_ad_budget_routes(get_conn):
     # ════════════════════════════════════════════════════════════════════
     @router.post("/projects/from-viu-v2")
     def projects_from_viu_v2(data: dict, user=Depends(jwt_user),
-                             authorization: Optional[str] = Header(None)):
+                             authorization: Optional[str] = Header(None), session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
         """Cree un projet (mode=new) ou ajoute des lignes a un projet existant
         (mode=existing) a partir des items detectes/valides par Ad VIU v2.
 
@@ -2017,7 +2031,7 @@ def register_ad_budget_routes(get_conn):
             conn.commit()
             return {
                 "project_id": project_id,
-                "project_name": _hub_project_name(proj, authorization),
+                "project_name": _hub_project_name(proj, authorization, session_cookie),
                 # Nouvelle structure (Phase 2 — 2026-05-12) : REPLACE
                 # behavior. deleted_count = squelette architectural + items
                 # Ad VIU precedents vires ; inserted_count = nouveaux items
@@ -2051,6 +2065,7 @@ def register_ad_budget_routes(get_conn):
         data: dict,
         user=Depends(jwt_user),
         authorization: Optional[str] = Header(None),
+        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
     ):
         # On force user_id depuis le JWT, pas depuis le body — un user ne
         # peut pas créer un projet pour quelqu'un d'autre.
@@ -2104,7 +2119,7 @@ def register_ad_budget_routes(get_conn):
         # via hub_service.soft_delete_project (best-effort, cf. bloc except).
         created_hub_id = None
         if create_ad_hub_project:
-            jwt_token = _extract_bearer(authorization, None)
+            jwt_token = _extract_bearer(authorization, None, session_cookie)
             # Mapping des champs BUD → HUB : sous-ensemble commun. Le HUB
             # exige `name` (>= 1 char) ; les autres sont optionnels et seront
             # filtrés s'ils sont vides pour ne pas spammer Ad HUB avec des
@@ -2218,7 +2233,7 @@ def register_ad_budget_routes(get_conn):
             # pointant vers l'existant, et on nettoie un éventuel HUB mode B.
             conn.rollback()
             if created_hub_id is not None:
-                jwt_token = _extract_bearer(authorization, None)
+                jwt_token = _extract_bearer(authorization, None, session_cookie)
                 hub_service.soft_delete_project(jwt_token, created_hub_id)
             existing_id = None
             try:
@@ -2246,7 +2261,7 @@ def register_ad_budget_routes(get_conn):
             # On tente un soft-delete best-effort sans masquer l'erreur amont.
             conn.rollback()
             if created_hub_id is not None:
-                jwt_token = _extract_bearer(authorization, None)
+                jwt_token = _extract_bearer(authorization, None, session_cookie)
                 hub_service.soft_delete_project(jwt_token, created_hub_id)
             raise
         finally:
@@ -2264,8 +2279,9 @@ def register_ad_budget_routes(get_conn):
     def get_hub_project(
         hub_project_id: int,
         authorization: Optional[str] = Header(None),
+        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
     ):
-        jwt_token = _extract_bearer(authorization, None)
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
         try:
             data = hub_service.fetch_project(jwt_token, hub_project_id)
         except hub_service.HubServiceError as e:
@@ -2284,8 +2300,9 @@ def register_ad_budget_routes(get_conn):
         hub_project_id: int,
         data: dict,
         authorization: Optional[str] = Header(None),
+        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
     ):
-        jwt_token = _extract_bearer(authorization, None)
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
         try:
             updated = hub_service.patch_project(jwt_token, hub_project_id, data or {})
         except hub_service.HubServiceError as e:
@@ -2300,6 +2317,7 @@ def register_ad_budget_routes(get_conn):
         include_hub: bool = False,
         user=Depends(jwt_user),
         authorization: Optional[str] = Header(None),
+        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
     ):
         # PHASE 3A — authentification + autorisation (lecture).
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
@@ -2331,7 +2349,7 @@ def register_ad_budget_routes(get_conn):
         if hub_pid is not None:
             hub_data = None
             try:
-                jwt_token = _extract_bearer(authorization, None)
+                jwt_token = _extract_bearer(authorization, None, session_cookie)
                 hub_data = hub_service.fetch_project(jwt_token, hub_pid)  # None si 404
             except hub_service.HubServiceError as e:
                 if include_hub:
@@ -2375,7 +2393,7 @@ def register_ad_budget_routes(get_conn):
 
     @router.put("/projets/{projet_id}")
     def update_projet(projet_id: int, data: dict, user=Depends(jwt_user),
-                      authorization: Optional[str] = Header(None)):
+                      authorization: Optional[str] = Header(None), session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
         # PHASE 3A — authentification + autorisation (écriture).
         _load_and_authorize_projet(get_conn, projet_id, user, "write")
         # Brief 5a — identité projet = source unique Ad HUB. Refus 403 explicite.
@@ -2501,7 +2519,7 @@ def register_ad_budget_routes(get_conn):
             # Résolue ici (1 fetch) et passée à _create_snapshot. Fail-closed :
             # hub en erreur -> rollback de la transition + 502 (le statut reste
             # inchangé ; pas de snapshot avec une identité locale figée/fausse).
-            _jwt = _extract_bearer(authorization, None)
+            _jwt = _extract_bearer(authorization, None, session_cookie)
             try:
                 _ident = (hub_service.resolve_hub_identity(updated, _jwt, {})
                           if _jwt else {})
@@ -2528,6 +2546,7 @@ def register_ad_budget_routes(get_conn):
         projet_id: int,
         user=Depends(jwt_user),
         authorization: Optional[str] = Header(None),
+        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
     ):
         # PHASE 3A — authentification + autorisation (écriture).
         _load_and_authorize_projet(get_conn, projet_id, user, "write")
@@ -2557,13 +2576,13 @@ def register_ad_budget_routes(get_conn):
         # le second échouait.
         ad_hub_project_id = deleted[0] if deleted else None
         if ad_hub_project_id is not None:
-            jwt_token = _extract_bearer(authorization, None)
+            jwt_token = _extract_bearer(authorization, None, session_cookie)
             hub_service.soft_delete_project(jwt_token, ad_hub_project_id)
         return {"status": "deleted"}
 
     @router.get("/projets/{projet_id}/export-for-con")
     def export_projet_for_con(projet_id: int, user=Depends(jwt_user),
-                              authorization: Optional[str] = Header(None)):
+                              authorization: Optional[str] = Header(None), session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
         """Sprint 1.A Ad CON — Export du projet+lignes pour Ad CON.
 
         Architecture PULL : Ad CON viendra appeler cet endpoint au Sprint 1.B
@@ -2627,7 +2646,7 @@ def register_ad_budget_routes(get_conn):
 
             # Phase 6 — IDENTITÉ projet = Ad HUB (source unique). Fail-closed : hub
             # en erreur -> 502 (pas de fallback sur le local figé envoyé à Ad CON).
-            _jwt = _extract_bearer(authorization, None)
+            _jwt = _extract_bearer(authorization, None, session_cookie)
             _hubc = {}
             if _jwt:
                 try:
@@ -2778,6 +2797,7 @@ def register_ad_budget_routes(get_conn):
         projet_id: int,
         user=Depends(jwt_user),
         authorization: Optional[str] = Header(None),
+        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
     ):
         """Sprint 1.A Ad CON — Détection d'existence d'un projet Ad CON
         pour adapter le label du bouton header projet Ad BUD.
@@ -2804,7 +2824,7 @@ def register_ad_budget_routes(get_conn):
 
         # 2) Récupère le JWT brut depuis le header pour le forwarder vers Ad CON
         # (même module HS256 partagé, Ad CON vérifie signature + ad_con dans modules).
-        jwt_token = _extract_bearer(authorization, None)
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
 
         # 3) Délégation au client cross-service (cache + fallback gracieux).
         return con_service.check_has_con(jwt_token, projet_id)
@@ -2826,7 +2846,7 @@ def register_ad_budget_routes(get_conn):
 
     @router.patch("/projets/{projet_id}/verrou")
     def toggle_projet_verrou(projet_id: int, data: dict, user=Depends(jwt_user),
-                             authorization: Optional[str] = Header(None)):
+                             authorization: Optional[str] = Header(None), session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
         """Verrouille / déverrouille un projet (lecture seule), INDÉPENDAMMENT du statut.
         VAGUE 2 — le verrou est une propriété du PROJET HUB (source unique). Si le budget
         est lié (ad_hub_project_id), ce toggle PROXIFIE vers le hub (PATCH /verrou, gate
@@ -2851,7 +2871,7 @@ def register_ad_budget_routes(get_conn):
         v_le_hub = None
         if hub_pid is not None:
             try:
-                jwt_token = _extract_bearer(authorization, None)
+                jwt_token = _extract_bearer(authorization, None, session_cookie)
                 hub_proj = hub_service.toggle_project_verrou(jwt_token, int(hub_pid), verrouille)
                 v_le_hub = hub_proj.get("verrouille_le")
             except hub_service.HubServiceError as e:
@@ -2975,6 +2995,7 @@ def register_ad_budget_routes(get_conn):
     def reviser_projet_version(
         projet_id: int, data: dict, user=Depends(jwt_user),
         authorization: Optional[str] = Header(None),
+        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
     ):
         raison = ((data or {}).get("raison_revision") or (data or {}).get("raison") or "").strip() or None
         # Source : on LIT le budget courant (write : on en crée un nouveau).
@@ -2991,7 +3012,7 @@ def register_ad_budget_routes(get_conn):
             raise HTTPException(
                 status_code=400,
                 detail="Ce budget n'est pas lié à un projet Ad HUB — révision de projet impossible.")
-        jwt_token = _extract_bearer(authorization, None)
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
         if not jwt_token:
             raise HTTPException(status_code=401, detail="Bearer JWT requis")
 
@@ -3069,7 +3090,7 @@ def register_ad_budget_routes(get_conn):
             cur.close(); conn.close()
 
         # 3. Push snapshot du nouveau budget -> alimente la version active.
-        _push_budget_snapshot(get_conn, new_id, authorization)
+        _push_budget_snapshot(get_conn, new_id, authorization, session_cookie)
         return {"status": "revised", "projet": new_projet, "nb_lignes_copiees": nb_lignes,
                 "revision_hub": (rev or {}).get("revision")}
 
@@ -3084,6 +3105,7 @@ def register_ad_budget_routes(get_conn):
     def get_projet_revisions(
         projet_id: int, user=Depends(jwt_user),
         authorization: Optional[str] = Header(None),
+        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
     ):
         # Lecture : autorise comme un read normal (périmètre user/org/super_admin).
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
@@ -3097,7 +3119,7 @@ def register_ad_budget_routes(get_conn):
         # Budget non lié au hub -> pas de famille (badge ne s'affiche pas côté front).
         if hub_id is None:
             return {"revisions": [], "nb_revisions": 1, "racine_id": None, "active_numero": None}
-        jwt_token = _extract_bearer(authorization, None)
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
         if not jwt_token:
             raise HTTPException(status_code=401, detail="Bearer JWT requis")
         # Best-effort : si le hub est indisponible, on renvoie une famille vide
@@ -3148,6 +3170,7 @@ def register_ad_budget_routes(get_conn):
     def refresh_family_snapshots(
         projet_id: int, user=Depends(jwt_user),
         authorization: Optional[str] = Header(None),
+        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
     ):
         if user.get("platform_role") != "super_admin":
             raise HTTPException(status_code=403, detail="Action réservée à un super_admin.")
@@ -3162,7 +3185,7 @@ def register_ad_budget_routes(get_conn):
         hub_id = _row.get("ad_hub_project_id") if _row else None
         if hub_id is None:
             raise HTTPException(status_code=400, detail="Budget non lié à un projet Ad HUB.")
-        jwt_token = _extract_bearer(authorization, None)
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
         if not jwt_token:
             raise HTTPException(status_code=401, detail="Bearer JWT requis")
         try:
@@ -3183,7 +3206,7 @@ def register_ad_budget_routes(get_conn):
         refreshed = []
         for b in bud_rows:
             # Re-pousse le snapshot (budget_estime_total = PRIX DE VENTE) — fire-and-forget interne.
-            _push_budget_snapshot(get_conn, b["id"], authorization)
+            _push_budget_snapshot(get_conn, b["id"], authorization, session_cookie)
             c2 = get_conn(); cu2 = c2.cursor(row_factory=dict_row)
             try:
                 cu2.execute("SELECT * FROM ad_budget.projets WHERE id=%s", (b["id"],))
@@ -3199,7 +3222,7 @@ def register_ad_budget_routes(get_conn):
 
     @router.get("/projets/{projet_id}/export")
     def export_projet_excel(projet_id: int, user=Depends(jwt_user),
-                            authorization: Optional[str] = Header(None)):
+                            authorization: Optional[str] = Header(None), session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
         # PHASE 3A — authentification + autorisation (lecture : export = lecture).
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
         conn = get_conn()
@@ -3286,7 +3309,7 @@ def register_ad_budget_routes(get_conn):
         buf.seek(0)
 
         # Phase 7A — nom de fichier depuis le hub (best-effort -> "projet" si indispo).
-        safe_nom = "".join(c if c.isalnum() or c in "-_ " else "_" for c in (_hub_project_name(projet, authorization) or "projet")).strip() or "projet"
+        safe_nom = "".join(c if c.isalnum() or c in "-_ " else "_" for c in (_hub_project_name(projet, authorization, session_cookie) or "projet")).strip() or "projet"
         filename = f"{safe_nom}.xlsx"
         return StreamingResponse(
             buf,
@@ -3299,6 +3322,7 @@ def register_ad_budget_routes(get_conn):
         projet_id: int,
         user=Depends(jwt_user_or_token),
         authorization: Optional[str] = Header(None),
+        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
         token: Optional[str] = Query(None),
         actifs_seulement: bool = True,
         avec_prix: bool = True,
@@ -3335,7 +3359,7 @@ def register_ad_budget_routes(get_conn):
             sous_totaux, admin_profits, avec_sous_total_avant_taxes, avec_tps,
             avec_tvq, orientation, mobilisation, surface_plancher,
             hauteur_cloisons, longueur_cloisons, avec_heures=avec_heures,
-            jwt_token=_extract_bearer(authorization, token),
+            jwt_token=_extract_bearer(authorization, token, session_cookie),
             inclure_ligne_groupe=inclure_ligne_groupe,
             inclure_ligne_titres=inclure_ligne_titres,
             afficher_lignes_detail=afficher_lignes_detail,
@@ -3358,6 +3382,7 @@ def register_ad_budget_routes(get_conn):
         projet_id: int,
         user=Depends(jwt_user_or_token),
         authorization: Optional[str] = Header(None),
+        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
         token: Optional[str] = Query(None),
         actifs_seulement: bool = True,
         avec_tps: bool = True,
@@ -3369,7 +3394,7 @@ def register_ad_budget_routes(get_conn):
         _buf, snapshot = _build_projet_report(
             projet_id, actifs_seulement, True, "", "", None, None, True,
             avec_tps, avec_tvq, "portrait", 0, 0, 0, 0,
-            jwt_token=_extract_bearer(authorization, None),
+            jwt_token=_extract_bearer(authorization, None, session_cookie),
         )
         return snapshot
 
@@ -4505,6 +4530,7 @@ def register_ad_budget_routes(get_conn):
         projet_id: int,
         user=Depends(jwt_user),
         authorization: Optional[str] = Header(None),
+        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
         # Config PDF (modale) — pilote UNIQUEMENT l'artefact PDF (une VUE).
         actifs_seulement: bool = True,
         avec_prix: bool = True,
@@ -4590,7 +4616,7 @@ def register_ad_budget_routes(get_conn):
         # 'correction' (ou émission directe) : on reste sur rev_no/rev_label courants.
 
         # Token pour les logos (client/org via hub_service) ET l'émission HUB.
-        jwt_token = _extract_bearer(authorization, None)
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
         # 1. PDF = config de la modale (artefact / vue). On ignore son snapshot.
         buf, _filtered_snap = _build_projet_report(
             projet_id, actifs_seulement, avec_prix, sections, colonnes,
@@ -4745,6 +4771,7 @@ def register_ad_budget_routes(get_conn):
     @router.post("/projets/{projet_id}/lignes")
     def create_budget_ligne(projet_id: int, data: dict,
                             authorization: Optional[str] = Header(None),
+                            session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
                             user=Depends(jwt_user)):
         """
         Ajoute un item au budget d'un projet.
@@ -4814,7 +4841,7 @@ def register_ad_budget_routes(get_conn):
         cur.close()
         conn.close()
         _mark_budget_dirty_if_emitted(projet_id)  # ajout de ligne -> snapshot
-        _push_budget_snapshot(get_conn, projet_id, authorization)  # pipeline Ad ANA (fire-and-forget)
+        _push_budget_snapshot(get_conn, projet_id, authorization, session_cookie)  # pipeline Ad ANA (fire-and-forget)
         return {"status": "created", "ligne": row}
 
     # ─── Pont Ad TYP → Ad BUD (étape 1) — lecture cross-service + snapshot ───
@@ -4826,6 +4853,7 @@ def register_ad_budget_routes(get_conn):
     def proxy_typ_catalogue(q: Optional[str] = None, division: Optional[str] = None,
                             section: Optional[str] = None, limit: int = 50,
                             authorization: Optional[str] = Header(None),
+                            session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
                             user=Depends(jwt_user)):
         """Proxy lecture seule du catalogue Ad TYP (cross-service) pour
         l'autocomplete « + depuis Ad TYP ». Ad BUD LIT Ad TYP ; n'écrit jamais.
@@ -4838,7 +4866,7 @@ def register_ad_budget_routes(get_conn):
         On déduplique ICI (proxy EXCLUSIF d'Ad BUD) et NON dans adision_dig : la vue
         de curation « Catalogue Adision » (ad-typ) et Ad ADM interrogent adision_dig
         en direct et doivent garder l'union master complète."""
-        jwt_token = _extract_bearer(authorization, None)
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
         try:
             data = typ_service.search_catalogue(jwt_token, q=q, division=division, section=section, limit=limit)
         except typ_service.TypServiceError as e:
@@ -4862,6 +4890,7 @@ def register_ad_budget_routes(get_conn):
     @router.post("/projets/{projet_id}/lignes/from-typ")
     def create_budget_ligne_from_typ(projet_id: int, data: dict,
                                      authorization: Optional[str] = Header(None),
+                                     session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
                                      user=Depends(jwt_user)):
         """Pioche une ligne Ad TYP (par code) → crée une budget_ligne SNAPSHOT
         (aplatie MAT/MO/ST) + lien source_typ_code pour re-tarif ultérieure."""
@@ -4873,7 +4902,7 @@ def register_ad_budget_routes(get_conn):
         # Défaut Ad BUD : une ligne neuve naît à QTÉ 0 (MO/ST = 0 ; prix_unitaire
         # par unité préservé → scaling à la saisie de la qté).
         qte = data.get("qte", 0)
-        jwt_token = _extract_bearer(authorization, None)
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
         try:
             typ = typ_service.get_ligne(jwt_token, code, org=proj_org)
         except typ_service.TypServiceError as e:
@@ -4906,18 +4935,19 @@ def register_ad_budget_routes(get_conn):
         finally:
             cur.close(); conn.close()
         _mark_budget_dirty_if_emitted(projet_id)  # ajout depuis Ad TYP -> snapshot
-        _push_budget_snapshot(get_conn, projet_id, authorization)  # pipeline Ad ANA (fire-and-forget)
+        _push_budget_snapshot(get_conn, projet_id, authorization, session_cookie)  # pipeline Ad ANA (fire-and-forget)
         return {"status": "created", "ligne": row, "mo_flat": m["mo_flat"]}
 
     @router.post("/projets/{projet_id}/lignes/{ligne_id}/refresh-typ")
     def refresh_budget_ligne_from_typ(projet_id: int, ligne_id: int,
                                       authorization: Optional[str] = Header(None),
+                                      session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
                                       user=Depends(jwt_user)):
         """Re-tarif d'une ligne liée Ad TYP : re-lit Ad TYP + re-mappe (snapshot
         rafraîchi). AUTORISÉ UNIQUEMENT si le projet est au statut 'brouillon'
         (« En cours ») — gelé sinon."""
         _load_and_authorize_projet(get_conn, projet_id, user, "write")
-        jwt_token = _extract_bearer(authorization, None)
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         try:
@@ -4970,7 +5000,7 @@ def register_ad_budget_routes(get_conn):
         finally:
             cur.close(); conn.close()
         _mark_budget_dirty_if_emitted(projet_id)  # re-tarif Ad TYP -> snapshot
-        _push_budget_snapshot(get_conn, projet_id, authorization)  # pipeline Ad ANA (fire-and-forget)
+        _push_budget_snapshot(get_conn, projet_id, authorization, session_cookie)  # pipeline Ad ANA (fire-and-forget)
         return {"status": "refreshed", "ligne": row, "mo_flat": m["mo_flat"]}
 
     # ─── Onglet « MAJ » : détection + application groupée des MAJ Ad TYP ───
@@ -4982,6 +5012,7 @@ def register_ad_budget_routes(get_conn):
     @router.get("/projets/{projet_id}/maj-typ")
     def detect_maj_typ(projet_id: int,
                        authorization: Optional[str] = Header(None),
+                       session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
                        user=Depends(jwt_user)):
         """Détecte EN LOT les lignes divergentes de leur source, PAR MODULE : Ad TYP
         (via typ_service) ET Ad MAT (via mat_service), 1 appel cross-service chacun
@@ -4989,7 +5020,7 @@ def register_ad_budget_routes(get_conn):
         cohérent avec la garde 409 du ⟳). Une ligne est soit TYP soit MAT (exclusivité)
         → aucun double comptage."""
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
-        jwt_token = _extract_bearer(authorization, None)
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         try:
@@ -5061,6 +5092,7 @@ def register_ad_budget_routes(get_conn):
     @router.post("/projets/{projet_id}/maj-typ/apply")
     def apply_maj_typ(projet_id: int, data: dict,
                       authorization: Optional[str] = Header(None),
+                      session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
                       user=Depends(jwt_user)):
         """Applique les MAJ Ad TYP sur les lignes COCHÉES (ligne_ids) : refresh
         depuis la source (même mapping que le ⟳) MAIS override-aware — ne touche
@@ -5068,7 +5100,7 @@ def register_ad_budget_routes(get_conn):
         heures_manuelles réel → heures/taux préservés). N'altère pas les flags
         d'override (≠ ⟳ qui les remet à FALSE). Bloqué 409 hors 'brouillon'."""
         _load_and_authorize_projet(get_conn, projet_id, user, "write")
-        jwt_token = _extract_bearer(authorization, None)
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
         ids = data.get("ligne_ids") if isinstance(data, dict) else None
         if not isinstance(ids, list) or not ids:
             raise HTTPException(status_code=400, detail="ligne_ids (liste non vide) requis")
@@ -5127,6 +5159,7 @@ def register_ad_budget_routes(get_conn):
     @router.post("/projets/{projet_id}/maj-mat/apply")
     def apply_maj_mat(projet_id: int, data: dict,
                       authorization: Optional[str] = Header(None),
+                      session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
                       user=Depends(jwt_user)):
         """Applique les MAJ Ad MAT sur les lignes COCHÉES (ligne_ids) : descend le PRIX
         COURANT de l'item (+ description/unité) et RÉÉCRIT le snapshot dédié
@@ -5135,7 +5168,7 @@ def register_ad_budget_routes(get_conn):
         référence catalogue). Le flag prix_unitaire_override n'est PAS un signal MAT
         (snapshot dédié) → non touché. Bloqué 409 hors 'brouillon'. Indépendant d'Ad TYP."""
         _load_and_authorize_projet(get_conn, projet_id, user, "write")
-        jwt_token = _extract_bearer(authorization, None)
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
         ids = data.get("ligne_ids") if isinstance(data, dict) else None
         if not isinstance(ids, list) or not ids:
             raise HTTPException(status_code=400, detail="ligne_ids (liste non vide) requis")
@@ -5200,6 +5233,7 @@ def register_ad_budget_routes(get_conn):
     @router.post("/projets/{projet_id}/lignes/{ligne_id}/apply-typ")
     def apply_typ_to_ligne(projet_id: int, ligne_id: int, data: dict,
                            authorization: Optional[str] = Header(None),
+                           session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
                            user=Depends(jwt_user)):
         """Pioche Ad TYP DANS une ligne EXISTANTE (autocomplete de la cellule
         description) → SNAPSHOT aplati MAT/MO/ST sur cette ligne (UPDATE, pas
@@ -5217,7 +5251,7 @@ def register_ad_budget_routes(get_conn):
         code = (data.get("code") or "").strip()
         if not code:
             raise HTTPException(status_code=400, detail="code Ad TYP requis")
-        jwt_token = _extract_bearer(authorization, None)
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         try:
@@ -5379,12 +5413,13 @@ def register_ad_budget_routes(get_conn):
         finally:
             cur.close(); conn.close()
         _mark_budget_dirty_if_emitted(projet_id)  # apply Ad TYP sur ligne -> snapshot
-        _push_budget_snapshot(get_conn, projet_id, authorization)  # pipeline Ad ANA (fire-and-forget)
+        _push_budget_snapshot(get_conn, projet_id, authorization, session_cookie)  # pipeline Ad ANA (fire-and-forget)
         return {"status": "applied", "ligne": row, "mo_flat": m["mo_flat"]}
 
     @router.post("/projets/{projet_id}/lignes/import")
     def import_items_to_projet(projet_id: int, data: dict,
                                authorization: Optional[str] = Header(None),
+                               session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
                                user=Depends(jwt_user)):
         """
         Importe plusieurs items de la base principale vers un projet.
@@ -5438,7 +5473,7 @@ def register_ad_budget_routes(get_conn):
         conn.close()
         if inserted:
             _mark_budget_dirty_if_emitted(projet_id)  # import de lignes -> snapshot
-            _push_budget_snapshot(get_conn, projet_id, authorization)  # pipeline Ad ANA (fire-and-forget)
+            _push_budget_snapshot(get_conn, projet_id, authorization, session_cookie)  # pipeline Ad ANA (fire-and-forget)
         return {"status": "imported", "count": inserted}
 
     # Valeurs autorisées pour sous_traitant_type. None / "" = vide.
@@ -5447,7 +5482,7 @@ def register_ad_budget_routes(get_conn):
     @router.put("/projets/{projet_id}/lignes/{ligne_id}")
     def update_budget_ligne(projet_id: int, ligne_id: int, data: dict,
                             user=Depends(jwt_user),
-                            authorization: Optional[str] = Header(None)):
+                            authorization: Optional[str] = Header(None), session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
         # PHASE 3A — authentification + autorisation (écriture) sur le projet
         # PARENT. La mutation ci-dessous reste scopée WHERE id=%s AND
         # projet_id=%s : un ligne_id appartenant à un autre projet ne matche
@@ -5569,13 +5604,13 @@ def register_ad_budget_routes(get_conn):
         cur.close()
         conn.close()
         _mark_budget_dirty_if_emitted(projet_id)  # mutation de ligne -> snapshot
-        _push_budget_snapshot(get_conn, projet_id, authorization)  # pipeline Ad ANA (fire-and-forget)
+        _push_budget_snapshot(get_conn, projet_id, authorization, session_cookie)  # pipeline Ad ANA (fire-and-forget)
         return {"status": "updated"}
 
     @router.patch("/projets/{projet_id}/lignes/{ligne_id}")
     def patch_budget_ligne(projet_id: int, ligne_id: int, data: dict,
                            user=Depends(jwt_user),
-                           authorization: Optional[str] = Header(None)):
+                           authorization: Optional[str] = Header(None), session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
         # Alias PATCH du PUT — même comportement, même whitelist de champs.
         # L'autorisation est faite par update_budget_ligne (on lui transmet user).
         return update_budget_ligne(projet_id, ligne_id, data, user, authorization)
@@ -5625,7 +5660,7 @@ def register_ad_budget_routes(get_conn):
     @router.delete("/projets/{projet_id}/lignes/{ligne_id}")
     def delete_budget_ligne(projet_id: int, ligne_id: int,
                             user=Depends(jwt_user),
-                            authorization: Optional[str] = Header(None)):
+                            authorization: Optional[str] = Header(None), session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
         # PHASE 3A — authentification + autorisation (écriture) sur le projet
         # PARENT. Le DELETE reste scopé WHERE id=%s AND projet_id=%s : un
         # ligne_id d'un autre projet ne matche rien.
@@ -5640,7 +5675,7 @@ def register_ad_budget_routes(get_conn):
         cur.close()
         conn.close()
         _mark_budget_dirty_if_emitted(projet_id)  # suppression de ligne -> snapshot
-        _push_budget_snapshot(get_conn, projet_id, authorization)  # pipeline Ad ANA (fire-and-forget)
+        _push_budget_snapshot(get_conn, projet_id, authorization, session_cookie)  # pipeline Ad ANA (fire-and-forget)
         return {"status": "deleted"}
 
     @router.get("/projets/{projet_id}/total")

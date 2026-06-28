@@ -17,17 +17,24 @@ Transactions LOCALES à ad_budget (pas de transaction distribuée — assumé).
 """
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException
 
-from modules.auth_jwt import _decode_token, _extract_bearer
+from modules.auth_jwt import SESSION_COOKIE_NAME, _decode_token, _extract_bearer
 
 
 def register_ad_budget_matlink_routes(get_conn):
     router = APIRouter(prefix="/budget", tags=["Ad BUD — liens Ad MAT (interne)"])
 
-    def jwt_org(authorization: Optional[str] = Header(None)) -> str:
-        """Valide la signature JWT et exige organization_id. PAS de module ad_bud."""
-        token = _extract_bearer(authorization, None)
+    def jwt_org(
+        authorization: Optional[str] = Header(None),
+        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
+    ) -> str:
+        """Valide la signature JWT et exige organization_id. PAS de module ad_bud.
+
+        Phase D-v2b pré-requis (juin 2026) — session_cookie en fallback header.
+        Check organization_id (l. 403) appliqué APRÈS extraction : cookie = source
+        d'identité, PAS bypass d'autorisation."""
+        token = _extract_bearer(authorization, None, session_cookie)
         payload = _decode_token(token)
         org = payload.get("active_organization_id") or payload.get("organization_id")
         if not org:

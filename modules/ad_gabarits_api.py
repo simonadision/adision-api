@@ -25,11 +25,11 @@ import re
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException
 from psycopg.rows import dict_row
 
 from modules import typ_service
-from modules.auth_jwt import make_jwt_deps, _extract_bearer
+from modules.auth_jwt import SESSION_COOKIE_NAME, make_jwt_deps, _extract_bearer
 from modules.ad_budget_api import (
     _map_typ_to_budget_cols,
     _load_and_authorize_projet,
@@ -705,13 +705,18 @@ def register_ad_gabarits_routes(get_conn):
     @router.post("/projets/{projet_id}/insert-gabarit")
     def insert_gabarit(projet_id: int, data: dict,
                        authorization: Optional[str] = Header(None),
+                       session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
                        user=Depends(jwt_user)):
+        # Phase D-v2b pré-requis — session_cookie en fallback header pour le
+        # re-extract manuel (proxy hub). Depends(jwt_user) supporte déjà le
+        # cookie nativement (auth_jwt.py:155-166). Check d'autorisation
+        # _load_and_authorize_projet (l. 710) reste APRÈS extraction.
         org = _org(user)
         _load_and_authorize_projet(get_conn, projet_id, user, "write")
         gabarit_id = data.get("gabarit_id")
         if not gabarit_id:
             raise HTTPException(status_code=400, detail="gabarit_id requis")
-        jwt_token = _extract_bearer(authorization, None)
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         try:
