@@ -374,37 +374,53 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Adision API", lifespan=lifespan)
 
+# Whitelist explicite : Ad ADM (super_admin), Ad HUB, et tous les
+# satellites Ad FLO qui consomment des endpoints servis par ce backend.
+# Sprint 6 (28 mai 2026) — Ad EST ajouté : nouveau consommateur de
+# /budget/taux-horaires via @adision/ui TauxHorairePicker mode
+# four_levels. Tant qu'à faire, mat/con/est listés pour éviter de
+# rejouer ce ticket à chaque module nouveau qui consommera la grille
+# ACQ (single source of truth ad_budget.taux_horaires).
+# allow_credentials=True impose une whitelist nommée (wildcard refusé
+# par le navigateur quand credentials=true).
+#
+# Phase I étape 3 (juin 2026) — extrait en constante CORS_ALLOWED_ORIGINS
+# pour DRY avec le middleware origin_guard (cf. install_origin_guard
+# plus bas). Source unique de vérité partagée CORS + CSRF guard.
+CORS_ALLOWED_ORIGINS = [
+    "https://app.adision.ca",     # Ad HUB (adision-app)
+    "https://admin.adision.ca",   # Ad ADM
+    "https://bud.adision.ca",     # Ad BUD
+    "https://viu.adision.ca",     # Ad VIU (push budget ← v2)
+    "https://ana.adision.ca",     # Ad ANA
+    "https://est.adision.ca",     # Ad EST (Sprint 6 — picker ACQ 4 niveaux)
+    "https://mat.adision.ca",     # Ad MAT (futur consommateur potentiel)
+    "https://con.adision.ca",     # Ad CON (futur consommateur potentiel)
+    "https://typ.adision.ca",     # Ad TYP (éditeur d'assemblage — taux horaires ACQ)
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:5175",
+]
 app.add_middleware(
     CORSMiddleware,
-    # Whitelist explicite : Ad ADM (super_admin), Ad HUB, et tous les
-    # satellites Ad FLO qui consomment des endpoints servis par ce backend.
-    # Sprint 6 (28 mai 2026) — Ad EST ajouté : nouveau consommateur de
-    # /budget/taux-horaires via @adision/ui TauxHorairePicker mode
-    # four_levels. Tant qu'à faire, mat/con/est listés pour éviter de
-    # rejouer ce ticket à chaque module nouveau qui consommera la grille
-    # ACQ (single source of truth ad_budget.taux_horaires).
-    # allow_credentials=True impose une whitelist nommée (wildcard refusé
-    # par le navigateur quand credentials=true).
-    allow_origins=[
-        "https://app.adision.ca",     # Ad HUB (adision-app)
-        "https://admin.adision.ca",   # Ad ADM
-        "https://bud.adision.ca",     # Ad BUD
-        "https://viu.adision.ca",     # Ad VIU (push budget ← v2)
-        "https://ana.adision.ca",     # Ad ANA
-        "https://est.adision.ca",     # Ad EST (Sprint 6 — picker ACQ 4 niveaux)
-        "https://mat.adision.ca",     # Ad MAT (futur consommateur potentiel)
-        "https://con.adision.ca",     # Ad CON (futur consommateur potentiel)
-        "https://typ.adision.ca",     # Ad TYP (éditeur d'assemblage — taux horaires ACQ)
-        "http://localhost:5173",
-        "http://localhost:5174",
-        "http://localhost:5175",
-    ],
+    allow_origins=CORS_ALLOWED_ORIGINS,
     # Couvre les preview deploys Vercel de tous les frontends Ad FLO.
+    # ⚠ DETTE Phase I étape 3 — regex vercel.app large hérité (preview
+    # deploys). Le origin_guard reste plus strict (regex .adision.ca + liste
+    # explicite, PAS vercel.app) — un preview Vercel qui POSTait avec cookie
+    # serait bloqué. Non corrigé ici (chantier preview Vercel séparé).
     allow_origin_regex=r"^https://[a-z0-9-]+\.vercel\.app$",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+# ── Phase I étape 3 — middleware Origin/Referer CSRF (ENFORCE) ──────
+# Défense en profondeur, branchement identique au hub (adision-app-api
+# SHA 9c58e94, étape 2 validée runtime). Discriminant cookie SSO :
+# webhooks/Bearer s2s/public token tous exemptés AUTO.
+from modules.origin_guard import install_origin_guard
+install_origin_guard(app, cors_allowed_origins=CORS_ALLOWED_ORIGINS, log_only=False)
 
 app.include_router(register_ad_budget_routes(get_conn))
 app.include_router(register_ad_gabarits_routes(get_conn))
