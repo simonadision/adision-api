@@ -354,11 +354,20 @@ def _bootstrap_db():
                 print(f"[bootstrap] {f.name} ✓", flush=True)
             except Exception as e:
                 conn.rollback()
+                # Phase K2-3 étape 2 (29 juin 2026) — harmonisation B3 sur
+                # le pattern hub K1.3 / pilote est K2-3.1.b. AVANT : log +
+                # continue (les migrations suivantes essayaient quand
+                # même → risque schéma partiel silencieux). APRÈS : raise
+                # propagé jusqu'au lifespan (qui appelle _bootstrap_db()
+                # SANS try/except, donc l'exception remonte → uvicorn
+                # n'atteint pas ready → Railway healthcheck rouge →
+                # auto-rollback. Cohérent avec les autres backends.
                 print(
-                    f"[bootstrap] ERREUR sur {f.name} : "
+                    f"[bootstrap] FATAL — ERREUR sur {f.name} : "
                     f"{type(e).__name__} : {e}",
                     flush=True,
                 )
+                raise
             finally:
                 cur.close()
     finally:
