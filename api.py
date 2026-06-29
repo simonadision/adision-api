@@ -431,6 +431,47 @@ app.add_middleware(
 from modules.origin_guard import install_origin_guard
 install_origin_guard(app, cors_allowed_origins=CORS_ALLOWED_ORIGINS, log_only=False)
 
+# ── LEÇON 3 K4 (29 juin 2026) — filet CORS sur exception 500 ─────────
+# Pattern copié verbatim du hub adision-app-api (SHA cd2d07d). Garantit
+# que toute exception non gérée produit une réponse 500 AVEC les headers
+# CORS (au lieu de tomber en ERR_FAILED muet côté browser, masquant
+# l'erreur réelle). L'erreur reste 500 (PAS avalée), le traceback est
+# loggué — le filet rend juste l'erreur LISIBLE.
+import re as _re_for_cors
+import traceback as _tb_for_cors
+from fastapi import Request
+from fastapi.responses import JSONResponse as _JSONResponse_for_cors
+
+_CORS_RE = _re_for_cors.compile(r"^https://([a-z0-9-]+\.)?adision\.ca$")
+_CORS_EXPLICIT = set(CORS_ALLOWED_ORIGINS)
+
+def _cors_headers_for_origin(origin: str | None) -> dict:
+    if not origin:
+        return {}
+    if origin in _CORS_EXPLICIT or _CORS_RE.match(origin):
+        return {
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Credentials": "true",
+            "Vary": "Origin",
+        }
+    return {}
+
+@app.exception_handler(Exception)
+async def _cors_aware_500_handler(request: Request, exc: Exception):
+    """Filet structurel — toute exception non gérée → 500 JSON AVEC CORS.
+    Log le traceback intégral pour ne RIEN cacher du bug réel."""
+    print(
+        f"[exception_handler] {request.method} {request.url.path} → "
+        f"{type(exc).__name__}: {exc}\n{_tb_for_cors.format_exc()}",
+        flush=True,
+    )
+    headers = _cors_headers_for_origin(request.headers.get("origin"))
+    return _JSONResponse_for_cors(
+        status_code=500,
+        content={"detail": f"Internal Server Error: {type(exc).__name__}"},
+        headers=headers,
+    )
+
 app.include_router(register_ad_budget_routes(get_conn))
 app.include_router(register_ad_gabarits_routes(get_conn))
 app.include_router(register_ad_export_gabarits_routes(get_conn))
