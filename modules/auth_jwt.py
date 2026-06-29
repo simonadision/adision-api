@@ -17,6 +17,8 @@ import jwt
 from fastapi import Cookie, Depends, Header, HTTPException, Query
 from psycopg.rows import dict_row
 
+from modules.revocation_cache import is_token_revoked
+
 JWT_ALGORITHM = "HS256"
 REQUIRED_MODULE = "ad_bud"
 
@@ -165,6 +167,14 @@ def make_jwt_deps(get_conn):
         ad_budget.users, retourne le row local enrichi des modules JWT."""
         jwt_token = _extract_bearer(authorization, token, session_cookie)
         payload = _decode_token(jwt_token)
+        # Phase J3 étape 2 — kill-switch satellite (cat.2, endpoint hub
+        # + cache TTL 60s). Voir modules/revocation_cache.py. Fail-open
+        # défensif si erreur (ne propage jamais de 500).
+        if is_token_revoked(payload.get("user_id"), payload.get("iat")):
+            raise HTTPException(
+                status_code=401,
+                detail="Session révoquée — reconnexion requise",
+            )
         _check_module(payload)
         conn = get_conn()
         try:
@@ -211,6 +221,13 @@ def make_jwt_deps(get_conn):
         """
         jwt_token = _extract_bearer(authorization, token, session_cookie)
         payload = _decode_token(jwt_token)
+        # Phase J3 étape 2 — kill-switch satellite (cat.2). Un super_admin
+        # révoqué est révoqué partout, donc check identique à jwt_user.
+        if is_token_revoked(payload.get("user_id"), payload.get("iat")):
+            raise HTTPException(
+                status_code=401,
+                detail="Session révoquée — reconnexion requise",
+            )
         if payload.get("role") != "super_admin":
             raise HTTPException(
                 status_code=403, detail="Accès super_admin requis"
