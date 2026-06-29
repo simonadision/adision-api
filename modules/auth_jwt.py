@@ -10,16 +10,12 @@ Le user_id retourné par get_current_user() est le `ad_budget.users.id` LOCAL,
 pas le `app_central.users.id` du dashboard — c'est lui qui est utilisé comme
 foreign key dans `ad_budget.projets.user_id`.
 """
-import logging
 import os
 from typing import Optional
 
 import jwt
-import psycopg
 from fastapi import Cookie, Depends, Header, HTTPException, Query
 from psycopg.rows import dict_row
-
-logger = logging.getLogger("auth_jwt")
 
 JWT_ALGORITHM = "HS256"
 REQUIRED_MODULE = "ad_bud"
@@ -60,68 +56,6 @@ def _decode_token(token: str) -> dict:
         raise HTTPException(status_code=401, detail="Token expiré, reconnexion nécessaire")
     except jwt.InvalidTokenError as e:
         raise HTTPException(status_code=401, detail=f"Token invalide : {e}")
-
-
-# ── Phase J étape 2 (29 juin 2026) — check révocation JWT niveau 2 ──
-# Pattern verbatim du hub adision-app-api (auth_jwt.py SHA ac86a1e + K4).
-# api-bud est CATÉGORIE 1 du cadrage J : il partage la base PostgreSQL
-# du hub (même DATABASE_URL, accède app_central.users en SQL local).
-# Donc SELECT direct, instantané (ms), pas besoin de cache.
-#
-# Le kill se POSE sur le hub via POST /admin/users/{id}/revoke-sessions
-# (UPDATE tokens_valid_from = NOW()). api-bud ne fait que VÉRIFIER —
-# il est consommateur du kill, pas déclencheur.
-#
-# ⚠ LEÇON 2 K4 — fail-safe sur UndefinedColumn : si la colonne
-# tokens_valid_from n'est pas là (cas pathologique), log warning et
-# fail-open au lieu de propager une 500 sans CORS. En prod normale
-# (mig 140 appliquée sur le hub, base partagée → visible par api-bud),
-# le filet ne se déclenche jamais. Filet défensif transverse.
-def _assert_token_not_revoked(payload: dict, get_conn) -> None:
-    """Lève 401 si le token est antérieur à users.tokens_valid_from
-    (kill-switch sessions, posé par le hub). SQL direct sur la base
-    app_central partagée — ms, pas de cache.
-
-    Skip silencieux si :
-      - get_conn est None (compat tests / autres modules)
-      - payload ne contient pas iat ou user_id (token malformé géré
-        ailleurs ; ce helper ne sert qu'à la révocation)
-      - user introuvable en app_central.users (déjà géré par les
-        autres gates — ne pas dupliquer le 404 ici)
-      - colonne tokens_valid_from absente (fail-safe leçon 2 K4)
-    """
-    if not get_conn:
-        return
-    user_id = payload.get("user_id")
-    iat = payload.get("iat")
-    if not user_id or iat is None:
-        return
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT EXTRACT(EPOCH FROM tokens_valid_from)::BIGINT "
-                    "FROM app_central.users WHERE id = %s",
-                    (int(user_id),),
-                )
-                row = cur.fetchone()
-    except psycopg.errors.UndefinedColumn:
-        # FILET DÉFENSIF — leçon 2 K4 : la colonne n'existe pas
-        # (migration 140 pas appliquée pour une raison X). On NE crashe
-        # PAS la prod avec une 500 sans CORS — on log et fail-open.
-        logger.warning(
-            "[revocation] colonne tokens_valid_from absente — "
-            "check skippé (fail-safe leçon K4)"
-        )
-        return
-    if not row:
-        return  # user introuvable : laisser les autres gates lever 404
-    tvf_epoch = row[0]
-    if int(iat) < int(tvf_epoch):
-        raise HTTPException(
-            status_code=401,
-            detail="Session révoquée — reconnexion requise",
-        )
 
 
 def _derive_platform_role(role):
@@ -231,10 +165,6 @@ def make_jwt_deps(get_conn):
         ad_budget.users, retourne le row local enrichi des modules JWT."""
         jwt_token = _extract_bearer(authorization, token, session_cookie)
         payload = _decode_token(jwt_token)
-        # Phase J étape 2 (29 juin 2026) — check révocation kill-switch
-        # AVANT le check module. Catégorie 1 (DB partagée) → SQL direct
-        # sur app_central.users.tokens_valid_from posé par le hub.
-        _assert_token_not_revoked(payload, get_conn)
         _check_module(payload)
         conn = get_conn()
         try:
