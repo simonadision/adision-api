@@ -195,10 +195,18 @@ def make_jwt_deps(get_conn):
         return user
 
     def jwt_admin(user: dict = Depends(jwt_user)) -> dict:
-        """Dependency réservée aux admins. FastAPI dédupe Depends(jwt_user)
-        si la même route le déclare aussi en param, donc 1 seul DB lookup."""
-        if user.get("role") != "admin":
-            raise HTTPException(status_code=403, detail="Accès admin requis")
+        """Dependency réservée aux admins PLATEFORME ADISION. FastAPI dédupe
+        Depends(jwt_user) si la même route le déclare aussi en param, donc
+        1 seul DB lookup.
+
+        HOTFIX SÉCURITÉ 2026-07-02 — check migré de user.get('role') vers
+        user.get('platform_role') : le role legacy peut valoir 'super_admin'
+        sur un compte d'org cliente (ex. simon@contracta.ca, dette
+        documentée) et NE prouve plus aucun accès plateforme. Un client
+        avec role='super_admin' legacy pouvait exécuter les endpoints
+        admin d'Ad BUD."""
+        if user.get("platform_role") not in ("staff", "super_admin"):
+            raise HTTPException(status_code=403, detail="Accès admin plateforme Adision requis")
         return user
 
     def jwt_super_admin(
@@ -228,9 +236,12 @@ def make_jwt_deps(get_conn):
                 status_code=401,
                 detail="Session révoquée — reconnexion requise",
             )
-        if payload.get("role") != "super_admin":
+        # HOTFIX SÉCURITÉ 2026-07-02 — check migré de role → platform_role.
+        # Voir jwt_admin ci-dessus + auth_api.py::_require_super_admin
+        # (durcissement Loi 25 étendu aux satellites).
+        if payload.get("platform_role") != "super_admin":
             raise HTTPException(
-                status_code=403, detail="Accès super_admin requis"
+                status_code=403, detail="Accès super_admin plateforme Adision requis"
             )
         return payload
 
