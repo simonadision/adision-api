@@ -573,10 +573,14 @@ def get_items():
 def search_items(q: str = ""):
     conn = get_conn()
     cur = conn.cursor(row_factory=dict_row)
+    # Old Stock — endpoint public search : jamais d'old_stock exposé aux
+    # utilisateurs finaux (retraités par succession, remplacés par leur
+    # successor_id).
     cur.execute("""
         SELECT id, description
         FROM items
         WHERE actif = true
+          AND catalog_scope IN ('master', 'client')
           AND description ILIKE %s
         ORDER BY description
         LIMIT 50;
@@ -605,7 +609,7 @@ def get_suggestions():
             s.created_at
         FROM suggestions_mapping_items s
         JOIN prix_web_items p ON p.id = s.prix_web_item_id
-        JOIN items i ON i.id = s.item_id
+        JOIN items i ON i.id = s.item_id AND i.catalog_scope IN ('master', 'client')
         WHERE s.statut = 'a_valider'
         ORDER BY s.id DESC;
     """)
