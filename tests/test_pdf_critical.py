@@ -145,7 +145,7 @@ def test_devis_rend():
         "ad_budget.devis": ("one", make_devis()),
     }
     bdv = _build_devis_fn(make_get_conn(results))
-    buf, snap = bdv(1, 12345.0, "adision", "TOKEN.X")
+    buf, snap, _identity_source = bdv(1, 12345.0, "adision", "TOKEN.X")
     pages, size = _pdf_pages(buf)
     assert size > 1000 and pages >= 1, "devis vide"
     print(f"  [OK] devis : {pages} pages, {size} o")
