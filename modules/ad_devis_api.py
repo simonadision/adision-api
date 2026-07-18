@@ -31,7 +31,10 @@ from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, 
 
 from modules import hub_service
 from modules.auth_jwt import SESSION_COOKIE_NAME, make_jwt_deps, _extract_bearer
-from modules.ad_budget_api import build_pdf_logo, _load_and_authorize_projet, draw_adflo_footer
+from modules.ad_budget_api import (
+    build_pdf_logo, _load_and_authorize_projet, draw_adflo_footer,
+    _persist_hub_identity_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +138,26 @@ def register_ad_devis_routes(get_conn):
         cur.execute("SELECT * FROM ad_budget.devis WHERE projet_id = %s", (projet_id,))
         return cur.fetchone()
 
+    def _resolve_identity_with_snapshot(projet, jwt_token, cache):
+        """Identité projet avec REPLI snapshot (Brief 1) : plus de 502 sur le
+        chemin devis. Rafraîchit le miroir local quand le hub répond (source
+        'hub') ; trace en log quand on retombe sur le snapshot ('snapshot').
+        Retourne (ident, source) — source ∈ {'hub','snapshot','none'}."""
+        if not jwt_token:
+            return {}, "none"
+        ident, source = hub_service.resolve_hub_identity_with_fallback(projet, jwt_token, cache)
+        if source == "hub":
+            try:
+                _cc = get_conn(); _ccur = _cc.cursor()
+                _persist_hub_identity_snapshot(_ccur, projet.get("id"), ident)
+                _cc.commit(); _ccur.close(); _cc.close()
+            except Exception:
+                pass  # best-effort
+        elif source == "snapshot":
+            print(f"[devis] identité depuis SNAPSHOT local (hub injoignable) "
+                  f"projet={projet.get('id')} snapshot_at={projet.get('hub_identity_snapshot_at')}", flush=True)
+        return ident, source
+
     @router.get("/projets/{projet_id}/devis")
     def get_devis(projet_id: int, user=Depends(jwt_user),
                   authorization: Optional[str] = Header(None),
@@ -154,16 +177,9 @@ def register_ad_devis_routes(get_conn):
             cur.close()
             conn.close()
         jwt_token = _extract_bearer(authorization, None, session_cookie)
-        # Phase 6 — identité CLIENT depuis le hub (source unique). Fail-closed :
-        # hub en erreur -> 502 (pas de fallback sur le local figé).
+        # Identité CLIENT depuis le hub AVEC REPLI snapshot (Brief 1) — plus de 502.
         _hubc = {}
-        if jwt_token:
-            try:
-                _ident = hub_service.resolve_hub_identity(projet, jwt_token, _hubc)
-            except hub_service.HubServiceError as e:
-                raise HTTPException(status_code=502, detail=f"Ad HUB indisponible : {e.detail}")
-        else:
-            _ident = {}
+        _ident, _ident_source = _resolve_identity_with_snapshot(projet, jwt_token, _hubc)
         # Entreprise (fiche org HUB) — non bloquant.
         entreprise = {}
         try:
@@ -196,6 +212,9 @@ def register_ad_devis_routes(get_conn):
             },
             "user": {"nom": user.get("nom"), "email": user.get("email")},
             "documents": documents,
+            # Traçabilité : 'hub' (frais) | 'snapshot' (copie locale, hub down) |
+            # 'none' (aucune identité). Le front peut afficher un bandeau discret.
+            "identity_source": _ident_source,
         }
 
     @router.put("/projets/{projet_id}/devis")
@@ -268,12 +287,17 @@ def register_ad_devis_routes(get_conn):
         # restent). _load_and_authorize_projet reste APRÈS extraction.
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
         jwt_token = _extract_bearer(authorization, token, session_cookie)
-        buf, _snap = _build_devis(projet_id, montant, couleur, jwt_token, date_devis)
+        buf, _snap, _ident_source = _build_devis(projet_id, montant, couleur, jwt_token, date_devis)
         safe = "".join(c if c.isalnum() or c in "-_ " else "_"
                        for c in (_snap["project"]["nom"] or "devis")).strip() or "devis"
         return StreamingResponse(
             buf, media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="devis_{safe}.pdf"'},
+            headers={
+                "Content-Disposition": f'attachment; filename="devis_{safe}.pdf"',
+                # Traçabilité côté client : le front peut afficher un bandeau discret
+                # « identité depuis copie locale » quand la valeur est 'snapshot'.
+                "X-Bud-Identity-Source": _ident_source or "none",
+            },
         )
 
     @router.post("/projets/{projet_id}/devis/emit")
@@ -335,7 +359,7 @@ def register_ad_devis_routes(get_conn):
                 cur.close()
                 conn.close()
 
-        buf, snapshot = _build_devis(projet_id, montant, couleur, jwt_token, date_devis)
+        buf, snapshot, _ident_source = _build_devis(projet_id, montant, couleur, jwt_token, date_devis)
         pdf_bytes = buf.getvalue()
         fields = {
             "report_type": "proposition_devis",
@@ -390,16 +414,11 @@ def register_ad_devis_routes(get_conn):
         except Exception as e:  # noqa: BLE001
             print(f"[devis] fetch_organization échec (pdf): {e}", flush=True)
 
-        # Phase 6 — identité CLIENT depuis le hub (source unique). Fail-closed :
-        # hub en erreur -> 502 (pas de fallback sur le local figé du devis).
+        # Identité CLIENT depuis le hub AVEC REPLI snapshot (Brief 1) — le devis ne
+        # 502 plus si le hub est injoignable ; il repart du miroir local (identité
+        # possiblement périmée → tracée en métadonnée PDF /Subject + log).
         _hubc = {}
-        if jwt_token:
-            try:
-                _ident = hub_service.resolve_hub_identity(projet, jwt_token, _hubc)
-            except hub_service.HubServiceError as e:
-                raise HTTPException(status_code=502, detail=f"Ad HUB indisponible : {e.detail}")
-        else:
-            _ident = {}
+        _ident, _ident_source = _resolve_identity_with_snapshot(projet, jwt_token, _hubc)
 
         nb = (couleur == "nb")
         ACCENT = colors.HexColor("#111827") if nb else colors.HexColor("#1e3a8a")
@@ -419,11 +438,19 @@ def register_ad_devis_routes(get_conn):
             return Paragraph(esc(txt).replace("\n", "<br/>"), body)
 
         margin = 1.8 * cm
+        # TRAÇABILITÉ invisible (rendu pixel-identique quand hub OK) : /Subject PDF
+        # marqué SEULEMENT si l'identité vient du snapshot local.
+        _pdf_subject = (
+            f"Identité projet issue d'une copie locale (hub indisponible) — "
+            f"snapshot du {projet.get('hub_identity_snapshot_at')}"
+            if _ident_source == "snapshot" else ""
+        )
         buf = io.BytesIO()
         doc = SimpleDocTemplate(buf, pagesize=letter,
                                 rightMargin=margin, leftMargin=margin,
                                 topMargin=margin, bottomMargin=2.2 * cm,
-                                title=f"Devis — {_ident.get('nom') or projet_id}")
+                                title=f"Devis — {_ident.get('nom') or projet_id}",
+                                subject=_pdf_subject)
         story = []
 
         # 1. EN-TÊTE : logo entreprise (gauche) + titre (droite). Colonnes
@@ -677,6 +704,6 @@ def register_ad_devis_routes(get_conn):
                 "travaux_non_inclus": _lines(devis.get("travaux_non_inclus")),
             },
         }
-        return buf, snapshot
+        return buf, snapshot, _ident_source
 
     return router

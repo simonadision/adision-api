@@ -331,11 +331,60 @@ def resolve_hub_identity(projet_row, jwt_token, cache) -> dict:
         logger.warning("resolve_hub_identity: projet hub %s introuvable (404)", hub_id)
         cache[hub_id] = {}
         return {}
+    out = map_project_to_identity(p)
+    cache[hub_id] = out
+    return out
+
+
+def map_project_to_identity(hub_project: dict) -> dict:
+    """Mappe une row projet hub sérialisée (GET /api/projects) vers les clés
+    conventionnelles d'identité Ad BUD (celles que le devis/rapport impriment).
+    Partagé par resolve_hub_identity ET la persistance du snapshot local (miroir).
+    `region` code→libellé FR ; `logo_url` tel quel."""
+    p = hub_project or {}
     out = {local: p.get(hub_field) for local, hub_field in _HUB_IDENTITY_MAP.items()}
     rc = p.get("region")
     out["region"] = _REGION_CODE_TO_LABEL.get(rc, rc)
-    cache[hub_id] = out
     return out
+
+
+def resolve_hub_identity_with_fallback(projet_row, jwt_token, cache):
+    """IDENTITÉ projet avec REPLI sur le snapshot local — NE fail-close PAS.
+
+    Retourne un tuple (identity: dict, source: str) où source ∈ :
+      - "hub"      : identité FRAÎCHE du hub (le caller DOIT la persister comme
+                     snapshot — réconciliation paresseuse).
+      - "snapshot" : hub indisponible/404/non-lié ET un snapshot local existe
+                     (`projet_row['hub_identity_snapshot']`) → identité
+                     POTENTIELLEMENT PÉRIMÉE (le caller trace : métadonnée + log).
+      - "none"     : ni hub ni snapshot → {} (dégradé propre, champs « — »,
+                     JAMAIS de 500/502 — cas d'un ancien projet sans snapshot).
+
+    Aucune exception réseau n'est propagée : c'est le contraire de
+    resolve_hub_identity (fail-closed) — à utiliser sur les chemins où le
+    livrable (devis/rapport) NE DOIT PLUS dépendre de la dispo du hub."""
+    if cache is None:
+        cache = {}
+    ident = None
+    try:
+        ident = resolve_hub_identity(projet_row, jwt_token, cache)
+    except HubServiceError as e:
+        logger.warning(
+            "resolve_hub_identity_with_fallback: hub indisponible (%s) — repli sur snapshot local", e)
+        ident = None
+    if ident:  # dict non vide = le hub a répondu avec des données
+        return ident, "hub"
+    # Repli : snapshot local (JSONB → dict via le driver ; tolère une chaîne JSON).
+    snap = (projet_row or {}).get("hub_identity_snapshot")
+    if isinstance(snap, str) and snap.strip():
+        try:
+            import json as _json
+            snap = _json.loads(snap)
+        except Exception:  # noqa: BLE001
+            snap = None
+    if isinstance(snap, dict) and snap:
+        return snap, "snapshot"
+    return {}, "none"
 
 
 def region_label_to_code(label):

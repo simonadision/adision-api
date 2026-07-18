@@ -146,6 +146,17 @@ def _ensure_schema():
         cur.execute(
             "ALTER TABLE ad_budget.projets ADD COLUMN IF NOT EXISTS dernier_snapshot_id INTEGER"
         )
+        # 7bis. MIROIR local de l'IDENTITÉ projet/client (nom, client, no projet,
+        # zone/région, contacts, logo_url…) — même patron que le miroir de verrou
+        # is_verrouille. Le hub reste la SOURCE UNIQUE ; ce snapshot sert de REPLI
+        # à la génération du devis/rapport quand le hub est injoignable (plus de
+        # 502 sur ce chemin — le livrable contractuel ne dépend plus de la dispo
+        # du hub). Rafraîchi paresseusement à chaque GET projet réussi.
+        cur.execute(
+            "ALTER TABLE ad_budget.projets "
+            "ADD COLUMN IF NOT EXISTS hub_identity_snapshot JSONB, "
+            "ADD COLUMN IF NOT EXISTS hub_identity_snapshot_at TIMESTAMPTZ"
+        )
         # 8. Index sur statut — Ad ANA filtrera dessus.
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_projet_statut ON ad_budget.projets(statut)"

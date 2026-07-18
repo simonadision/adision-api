@@ -248,6 +248,23 @@ def _json_dumps_with_default(obj):
     return json.dumps(obj, default=str)
 
 
+def _persist_hub_identity_snapshot(cur, projet_id, identity: dict) -> None:
+    """Met à jour le MIROIR local de l'identité projet (ad_budget.projets.
+    hub_identity_snapshot) — même patron best-effort que le miroir de verrou.
+    Sert de repli à la génération du devis/rapport quand le hub est injoignable.
+    N'écrit rien si l'identité est vide. Ne casse JAMAIS le flux appelant."""
+    if not identity or not projet_id:
+        return
+    try:
+        cur.execute(
+            "UPDATE ad_budget.projets SET hub_identity_snapshot = %s, "
+            "hub_identity_snapshot_at = NOW() WHERE id = %s",
+            (Json(identity, dumps=_json_dumps_with_default), projet_id),
+        )
+    except Exception as e:  # noqa: BLE001 — best-effort, jamais bloquant
+        print(f"[hub_identity_snapshot] persist échec projet={projet_id}: {e}", flush=True)
+
+
 def _create_snapshot(cur, projet_row, trigger_event: str, ident: dict) -> int:
     """Crée un snapshot du projet dans app_ana.project_snapshots et le marque
     is_latest=TRUE. Marque les anciens snapshots du même projet à FALSE et
@@ -2387,6 +2404,19 @@ def register_ad_budget_routes(get_conn):
                         pass  # best-effort : on garde la valeur locale courante
                     result["is_verrouille"] = hub_lock
 
+            # MIROIR IDENTITÉ (même patron que le verrou) — réconciliation PARESSEUSE :
+            # si le hub a répondu, on rafraîchit le snapshot local d'identité pour
+            # qu'il serve de repli à la prochaine génération de devis/rapport si le
+            # hub tombe. Best-effort, jamais bloquant pour le GET.
+            if hub_proj is not None:
+                try:
+                    _ident_snap = hub_service.map_project_to_identity(hub_proj)
+                    _c3 = get_conn(); _cur3 = _c3.cursor()
+                    _persist_hub_identity_snapshot(_cur3, projet_id, _ident_snap)
+                    _c3.commit(); _cur3.close(); _c3.close()
+                except Exception:
+                    pass  # best-effort : le snapshot précédent reste en place
+
             if include_hub and "ad_hub" not in result:
                 result["ad_hub"] = hub_data  # None si 404 (projet HUB supprimé/inaccessible)
         return result
@@ -3472,15 +3502,23 @@ def register_ad_budget_routes(get_conn):
         cur.close()
         conn.close()
 
-        # Phase 6 — IDENTITÉ projet = Ad HUB (source unique). Résolue 1 fois (cache
-        # scope-fonction = 1 seul fetch_project). Fail-closed : hub en erreur -> 502
-        # (PAS de fallback sur le local figé). jwt_token absent -> {} (cas-limite).
+        # IDENTITÉ projet = Ad HUB (source unique) AVEC REPLI sur le snapshot local
+        # si le hub est injoignable (Brief 1) : le rapport ne 502 plus pour cette
+        # raison. Quand le hub répond, on rafraîchit le snapshot (réconciliation).
         _hub_cache = {}
+        _ident_source = "none"
         if jwt_token:
-            try:
-                _ident = hub_service.resolve_hub_identity(projet, jwt_token, _hub_cache)
-            except hub_service.HubServiceError as e:
-                raise HTTPException(status_code=502, detail=f"Ad HUB indisponible : {e.detail}")
+            _ident, _ident_source = hub_service.resolve_hub_identity_with_fallback(projet, jwt_token, _hub_cache)
+            if _ident_source == "hub":
+                try:
+                    _cc = get_conn(); _ccur = _cc.cursor()
+                    _persist_hub_identity_snapshot(_ccur, projet.get("id"), _ident)
+                    _cc.commit(); _ccur.close(); _cc.close()
+                except Exception:
+                    pass  # best-effort
+            elif _ident_source == "snapshot":
+                print(f"[rapport] identité depuis SNAPSHOT local (hub injoignable) "
+                      f"projet={projet.get('id')} snapshot_at={projet.get('hub_identity_snapshot_at')}", flush=True)
         else:
             _ident = {}
 
@@ -3495,12 +3533,20 @@ def register_ad_budget_routes(get_conn):
         margin = 1.5 * cm
         total_w = pagesize[0] - 2 * margin  # ~527 portrait, ~707 landscape
 
+        # TRAÇABILITÉ (invisible dans les pages → rendu pixel-identique quand hub OK) :
+        # si l'identité vient du snapshot local, on le marque en MÉTADONNÉE PDF /Subject.
+        _pdf_subject = (
+            f"Identité projet issue d'une copie locale (hub indisponible) — "
+            f"snapshot du {projet.get('hub_identity_snapshot_at')}"
+            if _ident_source == "snapshot" else ""
+        )
         buf = io.BytesIO()
         doc = SimpleDocTemplate(
             buf, pagesize=pagesize,
             rightMargin=margin, leftMargin=margin,
             topMargin=margin, bottomMargin=margin,
             title=f"Rapport budget — {_ident.get('nom') or ''}",
+            subject=_pdf_subject,
         )
         ss = getSampleStyleSheet()
         story = []
