@@ -433,6 +433,11 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    # Brief 1 — expose l'en-tête de traçabilité identité aux fetch cross-subdomain
+    # (bud→api-bud) : le front peut afficher un bandeau « identité depuis copie
+    # locale » quand la valeur est 'snapshot'. Le champ JSON /devis.identity_source
+    # reste la source primaire (corps de réponse, toujours lisible).
+    expose_headers=["X-Bud-Identity-Source"],
 )
 
 # ── Phase I étape 3 — middleware Origin/Referer CSRF (ENFORCE) ──────
