@@ -290,7 +290,7 @@ def register_ad_devis_routes(get_conn):
         # restent). _load_and_authorize_projet reste APRÈS extraction.
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
         jwt_token = _extract_bearer(authorization, token, session_cookie)
-        buf, _snap, _ident_source = _build_devis(projet_id, montant, couleur, jwt_token, date_devis)
+        buf, _snap, _ident_source = _build_devis(projet_id, montant, couleur, jwt_token, date_devis, user=user)
         safe = "".join(c if c.isalnum() or c in "-_ " else "_"
                        for c in (_snap["project"]["nom"] or "devis")).strip() or "devis"
         return StreamingResponse(
@@ -362,7 +362,7 @@ def register_ad_devis_routes(get_conn):
                 cur.close()
                 conn.close()
 
-        buf, snapshot, _ident_source = _build_devis(projet_id, montant, couleur, jwt_token, date_devis)
+        buf, snapshot, _ident_source = _build_devis(projet_id, montant, couleur, jwt_token, date_devis, user=user)
         pdf_bytes = buf.getvalue()
         fields = {
             "report_type": "proposition_devis",
@@ -397,9 +397,14 @@ def register_ad_devis_routes(get_conn):
             "hub": result,
         }
 
-    def _build_devis(projet_id, montant, couleur, jwt_token, date_devis=None):
+    def _build_devis(projet_id, montant, couleur, jwt_token, date_devis=None, user=None):
         """Construit le PDF devis ET le snapshot (proposition_devis) ; retourne
-        (buf, snapshot). Auth faite par l'appelant (route)."""
+        (buf, snapshot). Auth faite par l'appelant (route).
+
+        `user` = utilisateur courant (dict {nom,email}) pour le REPLI du bloc
+        signature quand le devis n'a pas de responsable saisi. Optionnel : sans
+        user ET sans responsable -> mention neutre « — », JAMAIS de 500 (avant,
+        un `user` libre non défini partait en NameError -> 500)."""
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         try:
@@ -642,10 +647,11 @@ def register_ad_devis_routes(get_conn):
         #    organisation -> courriel -> téléphone. Organisation pré-remplie
         #    depuis l'entrepreneur (org du projet) si non saisie.
         story.append(Spacer(1, 24))
-        nom_resp = devis.get("responsable_nom") or user.get("nom") or "—"
+        _u = user or {}
+        nom_resp = devis.get("responsable_nom") or _u.get("nom") or "—"
         titre_resp = devis.get("titre_responsable")
         org_resp = devis.get("organisation") or entreprise.get("name")
-        courriel_resp = devis.get("responsable_email") or user.get("email") or "—"
+        courriel_resp = devis.get("responsable_email") or _u.get("email") or "—"
         tel_resp = devis.get("responsable_tel") or "—"
 
         sig_name_style = ParagraphStyle("signame", parent=small,

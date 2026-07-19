@@ -151,6 +151,26 @@ def test_devis_rend():
     print(f"  [OK] devis : {pages} pages, {size} o")
 
 
+def test_devis_sans_responsable_ne_500_pas():
+    """GARDE ANTI-RÉGRESSION du 500 'NameError user' : un devis SANS responsable
+    (responsable_nom/email vides) NE DOIT PAS lever. Avant, _build_devis
+    référençait un `user` libre non défini, court-circuité par `or` UNIQUEMENT
+    tant qu'un responsable était saisi -> devis sans responsable = 500 en prod.
+    Ici on n'injecte AUCUN user -> le repli tombe sur « — » proprement."""
+    _patch_no_network()
+    results = {
+        "ad_budget.projets": ("one", make_projet()),
+        "ad_budget.devis": ("one", make_devis(responsable_nom="", responsable_email="",
+                                               titre_responsable="", organisation="",
+                                               responsable_tel="")),
+    }
+    bdv = _build_devis_fn(make_get_conn(results))
+    buf, snap, _src = bdv(1, 9800.0, "adision", "TOKEN.X")  # user=None (défaut)
+    pages, size = _pdf_pages(buf)
+    assert size > 1000 and pages >= 1, "devis sans responsable non rendu"
+    print(f"  [OK] devis SANS responsable : {pages} pages, {size} o (aucune NameError)")
+
+
 # ── Test snapshot (dissociation vue/vérité) ──────────────────────────────
 def test_snapshot_complet_vs_filtre():
     """Le snapshot reflète la config : config COMPLÈTE -> toutes les sections ;

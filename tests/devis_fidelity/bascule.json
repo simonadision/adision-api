@@ -4,9 +4,9 @@
   "strict": false,
   "derniere_evaluation": {
     "date": "2026-07-19",
-    "verts": "7/8",
+    "verts": "9/9",
     "tolerances": { "layout_pt": 8.0, "visuel_frac": 0.03, "flou_px": 2.5, "canal": 60 },
-    "residuel": "08-projet-long (devis extreme 3 pages) : Δy montant=8.6pt / visuel p1=3.3% sur la PAGE DE DEBORDEMENT uniquement (page 0 alignee a 2pt, tout le contenu present, 3 pages des deux cotes). Ecart = arithmetique exacte de coupure inter-pages entre les 2 moteurs.",
-    "verdict": "PAS DE BASCULE : reportlab reste le moteur servi (7/8 < lot complet vert)."
+    "residuel": "aucun. 08-projet-long ferme en reproduisant la regle de coupure Platypus (veuve/orpheline min-2 lignes + decalage de continuation d'une interligne). 09-sans-responsable ajoute (cas reel non couvert). Tolerances STRICTES inchangees.",
+    "verdict": "LOT COMPLET VERT. Bascule PROPOSEE mais NON FAITE : reportlab reste servi jusqu'a validation sur vrais projets via le drapeau ?pdf_engine=jspdf (peut reveler un 10e cas). Pour basculer : default_engine='jspdf' + strict=true."
   }
 }
