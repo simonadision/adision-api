@@ -10,4 +10,12 @@ if ! python tests/test_pdf_critical.py; then
   echo "[pre-push] ÉCHEC des tests PDF — push BLOQUÉ." >&2
   exit 1
 fi
+# Divergences écran↔rapport connues (D3/D4) : tests ATTENDUS-EN-ÉCHEC (xfail).
+# Exit 0 tant que le défaut est présent (attendu) ; exit 1 en XPASS = un défaut
+# documenté a été corrigé sans retirer le marqueur → mettre le fichier à jour.
+echo "[pre-push] Divergences écran↔rapport (D3/D4, xfail strict)…"
+if ! python tests/test_divergences_ecran_rapport.py; then
+  echo "[pre-push] XPASS inattendu — un défaut D3/D4 a changé, MAJ du test requise." >&2
+  exit 1
+fi
 echo "[pre-push] OK — chemins critiques verts."
