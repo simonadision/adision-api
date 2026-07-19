@@ -551,33 +551,117 @@ def _next_free_csi_suffix(cur, projet_id, code_demande, *, exclude_ligne_id=None
     return f"{prefix}.{n:02d}"
 
 
-def _prix_vente_total(projet, raw_lines):
-    """PRIX DE VENTE total = coûtant (général) + administration & profit par
-    regroupement CSI (= « Sous-total avant taxes » du récap, hors taxes).
+def compute_budget_totals(projet, raw_lines):
+    """CHEMIN DE CALCUL PARTAGÉ — source UNIQUE du bloc financier Ad BUD :
+    coûtant + administration & profit par regroupement CSI + taxes, en
+    RESPECTANT l'option `arrondi_dollar` ET l'ajustement global historique
+    (`ajustement_pct`).
 
-    Réutilise adapt_budget_lines (base MO alignée sur le récap : heures=qté pour
-    les lignes « hr ») + _group_admin_profit (A&P par discipline / catégorie,
-    mêmes nombres que le PDF et le front). Sans arrondi (valeur canonique, comme
-    le coûtant). C'est l'info CONTRACTUELLE poussée au hub (budget_estime_total)
-    et affichée partout ; les ratios Mat/MO/ST restent sur le coûtant (budget_*)."""
-    adapted = adapt_budget_lines(raw_lines)
+    C'est la fonction que consomment À LA FOIS le rapport PDF (`_build_projet_report`)
+    ET `_prix_vente_total` (= `budget_estime_total` poussé au hub). L'accord des
+    trois nombres — écran / PDF / hub — devient STRUCTUREL (un seul calcul), au
+    lieu d'être surveillé par trois implémentations en parallèle. Miroir exact du
+    sommaire écran (App.jsx `getRow` + `groupAdminProfit` + taxes).
+
+    `raw_lines` : rows BD à plat, DÉJÀ filtrés par l'appelant (le rapport filtre
+    `actif=TRUE` en SQL selon `actifs_seulement` ; le push snapshot passe les
+    lignes actives). Aucun filtre `actif` ici — miroir exact de la boucle du
+    rapport, qui ne re-teste pas `actif`.
+
+    Modèle d'arrondi (identique au front et au PDF) : « lignes + A&P arrondis
+    SÉPARÉMENT » — `R()` arrondit au dollar (mode arrondi) chaque total de ligne,
+    chaque A&P de regroupement et chaque taxe ; sinon identité (au cent).
+    """
+    arr = bool(projet.get("arrondi_dollar"))
+
+    def R(v):
+        # Demi vers le HAUT (_js_round = floor(v+0.5)) = JS Math.round du front,
+        # PAS le round() natif Python (banquier). Rapport = devis = écran.
+        return float(_js_round(v)) if arr else v
+
+    keys = [k for k, _, _, _ in BUDGET_GROUPS_PDF]
     pct_field_by_key = {k: pf for k, _, pf, _ in BUDGET_GROUPS_PDF}
-    grp = {k: {"sub": 0.0, "mat": 0.0, "mo": 0.0, "st": 0.0} for k, _, _, _ in BUDGET_GROUPS_PDF}
-    general = 0.0
-    for ln in adapted:
-        mat = (ln["mat"].get("cout") or 0) * (ln["mat"].get("qte") or 0) * (1 + (ln["mat"].get("ajust_pct") or 0) / 100.0)
-        mo = (ln["mo"].get("heures") or 0) * (ln["mo"].get("taux") or 0) * (1 + (ln["mo"].get("ajust_pct") or 0) / 100.0)
-        st = (ln["st"].get("montant") or 0) * (1 + (ln["st"].get("ajust_pct") or 0) / 100.0)
-        total = mat + mo + st
-        general += total
-        gkey = _group_key_for(_section_prefix_n(ln.get("csi_code") or ln.get("section")))
-        if gkey:
-            g = grp[gkey]; g["sub"] += total; g["mat"] += mat; g["mo"] += mo; g["st"] += st
-    ap_total = 0.0
-    for k, g in grp.items():
-        if g["sub"]:
-            ap_total += _group_admin_profit(projet, pct_field_by_key[k], g["sub"], g["mat"], g["mo"], g["st"])
-    return round(general + ap_total, 2)
+    gsub = {k: 0.0 for k in keys}
+    gmat = {k: 0.0 for k in keys}
+    gmo = {k: 0.0 for k in keys}
+    gst = {k: 0.0 for k in keys}
+    non_grouped_total = 0.0
+    snap_mat = 0.0
+    snap_mo = 0.0
+    snap_st = 0.0
+    for l in raw_lines:
+        qte = _effective_qte(l, 0, 0, 0, 0)
+        heures = _heures_effectives(l.get("unite"), l.get("heures"), l.get("heures_manuelles"), qte)
+        taux = float(l.get("taux_horaire") or 0)
+        st_montant = float(l.get("sous_traitant_montant") or 0)
+        ajm = float(l.get("ajust_materiaux") or 0)
+        ajmo = float(l.get("ajust_main_oeuvre") or 0)
+        ajst = float(l.get("ajust_sous_traitant") or 0)
+        has_mo = heures > 0 and taux > 0
+        has_st = st_montant > 0
+        if qte <= 0 and not has_mo and not has_st:
+            continue
+        prix = float(l.get("prix_unitaire") or 0)
+        adj = float(l.get("ajustement_pct") or 0)
+        st_mat = qte * prix * (1 + ajm / 100)
+        st_mo = heures * taux * (1 + ajmo / 100)
+        st_st = st_montant * (1 + ajst / 100)
+        st = st_mat + st_mo + st_st
+        # snap_* accumulés AVANT le filtre tot_disp (cohérent avec le rapport).
+        snap_mat += st_mat
+        snap_mo += st_mo
+        snap_st += st_st
+        tot_real = st * (1 + adj / 100)
+        # Filtre « total de ligne nul » (au dollar en mode arrondi) — miroir du
+        # rapport (avec_prix). factor=1 : le gonflement pro-rata d'affichage
+        # n'existe que dans le PDF, jamais dans les vrais totaux.
+        if R(tot_real) == 0:
+            continue
+        gkey = _group_key_for(_section_prefix_n(l.get("section")))
+        if gkey is not None:
+            gsub[gkey] += R(tot_real)
+            gmat[gkey] += st_mat
+            gmo[gkey] += st_mo
+            gst[gkey] += st_st
+        else:
+            non_grouped_total += R(tot_real)
+    real_sub = non_grouped_total
+    group_ap = {}
+    for k in keys:
+        sub = gsub[k]
+        if sub <= 0:
+            continue
+        ap = R(_group_admin_profit(projet, pct_field_by_key[k], sub, gmat[k], gmo[k], gst[k]))
+        group_ap[k] = ap
+        real_sub += sub + ap
+    tps = R(real_sub * TPS_RATE)
+    tvq = R(real_sub * TVQ_RATE)
+    return {
+        "sous_total_avant_taxes": real_sub,
+        "tps": tps,
+        "tvq": tvq,
+        "total_general": real_sub + tps + tvq,
+        # coûtant par catégorie (sommes BRUTES, non arrondies — l'appelant applique
+        # R()/round() comme aujourd'hui pour rester byte-identique).
+        "snap_mat": snap_mat,
+        "snap_mo": snap_mo,
+        "snap_st": snap_st,
+        "group_subtotals": gsub,
+        "group_admin_profit": group_ap,
+        "non_grouped_total": non_grouped_total,
+    }
+
+
+def _prix_vente_total(projet, raw_lines):
+    """PRIX DE VENTE total (= « Sous-total avant taxes » du récap, hors taxes) =
+    coûtant général + administration & profit par regroupement CSI.
+
+    DÉLÈGUE au chemin partagé `compute_budget_totals` : MÊME calcul que le PDF et
+    l'écran, `arrondi_dollar` ET `ajustement_pct` compris. C'est l'info
+    CONTRACTUELLE poussée au hub (`budget_estime_total`). Plus aucune 3e
+    implémentation à maintenir en accord — l'égalité écran / PDF / hub est
+    structurelle. Les ratios Mat/MO/ST du hub restent sur le coûtant (budget_*)."""
+    return round(compute_budget_totals(projet, raw_lines)["sous_total_avant_taxes"], 2)
 
 
 # Mapping notation Ad VIU v2 (ASCII plain, decision produit J7
@@ -3931,23 +4015,17 @@ def register_ad_budget_routes(get_conn):
             table_data.append(headers)
         header_offset = len(table_data)           # = nb de rangées d'en-tête
         subtotal_rows = []
-        group_subtotals = {key: 0.0 for key, _, _, _ in BUDGET_GROUPS_PDF}
-        # Sous-totaux par CATÉGORIE et par groupe (pré-ajustement_pct, comme le
-        # front) pour l'admin & profit décomposé.
-        group_sub_mat = {key: 0.0 for key, _, _, _ in BUDGET_GROUPS_PDF}
-        group_sub_mo = {key: 0.0 for key, _, _, _ in BUDGET_GROUPS_PDF}
-        group_sub_st = {key: 0.0 for key, _, _, _ in BUDGET_GROUPS_PDF}
-        non_grouped_total = 0.0
+        # Sous-totaux financiers (group_subtotals, sous-cat mat/mo/st, snap_mat/mo/st,
+        # non_grouped_total, A&P par groupe) NE sont PLUS accumulés dans cette boucle :
+        # ils viennent du chemin de calcul PARTAGÉ compute_budget_totals (source
+        # unique, cf. bloc totaux plus bas) — le MÊME que consomme _prix_vente_total
+        # (budget_estime_total du hub). La boucle ne fait plus que l'AFFICHAGE des
+        # lignes + le comptage des HEURES (non porté par compute_budget_totals).
         # Totaux d'heures : production (MO hors contremaître) vs contremaître.
         # Heures lues directement dans la colonne `heures` (décision Simon :
         # somme directe, pas de conversion ; l'unité « sem. » est cosmétique).
         mo_h = 0.0
         contremaitre_h = 0.0
-        # Sous-totaux GLOBAUX par section (toutes lignes, groupées ou non) pour
-        # le snapshot : sous_total_mat/mo/st. Exacts ici, arrondis à la sortie.
-        snap_mat = 0.0
-        snap_mo = 0.0
-        snap_st = 0.0
 
         # Mode arrondi au dollar (option projet). R() arrondit au dollar le plus
         # près en mode arrondi, sinon identité (rétrocompat exacte). Appliqué au
@@ -4168,9 +4246,6 @@ def register_ad_budget_routes(get_conn):
                 st_st = st_montant * (1 + ajst / 100)
                 # Sous-total ligne = somme des 3 sous-totaux par section.
                 st = st_mat + st_mo + st_st
-                snap_mat += st_mat
-                snap_mo += st_mo
-                snap_st += st_st
                 # tot_real = total brut. ajustement_pct historique reste appliqué
                 # pour rétro-compat des projets antérieurs à la refonte ; sera
                 # à 0 sur les nouvelles saisies.
@@ -4190,16 +4265,12 @@ def register_ad_budget_routes(get_conn):
                 if avec_prix and tot_disp == 0:
                     continue
                 sec_total += tot_disp
-                if gkey is not None:
-                    group_subtotals[gkey] += R(tot_real)
-                    group_sub_mat[gkey] += st_mat
-                    group_sub_mo[gkey] += st_mo
-                    group_sub_st[gkey] += st_st
-                else:
-                    non_grouped_total += R(tot_real)
-                # Affichage de la ligne de DÉTAIL gated par afficher_lignes_detail.
-                # L'accumulation (sec_total / group_subtotals / snap_*) ci-dessus est
-                # FAITE quoi qu'il arrive → masquer le détail ne change aucun total.
+                # NOTE : l'accumulation des sous-totaux financiers a MIGRÉ vers
+                # compute_budget_totals (chemin partagé) — la boucle n'accumule plus
+                # que sec_total (affichage) et les heures. gkey/factor restent
+                # utilisés ci-dessus pour le gonflement d'affichage (tot_disp).
+                # Affichage de la ligne de DÉTAIL gated par afficher_lignes_detail :
+                # masquer le détail ne change aucun total (calculés à part).
                 if afficher_lignes_detail:
                     _open_group(sec_div, sec_prefix)   # bandeaux AVANT la 1re ligne du groupe
                     table_data.append([
@@ -4316,6 +4387,17 @@ def register_ad_budget_routes(get_conn):
             table.setStyle(TableStyle(table_style_cmds))
             story.append(table)
 
+        # ── CHEMIN DE CALCUL PARTAGÉ (source unique) ──────────────────────────
+        # Le bloc financier (sous-totaux par regroupement, A&P, taxes, coûtant
+        # mat/mo/st) vient de compute_budget_totals — LE MÊME calcul que
+        # _prix_vente_total (budget_estime_total du hub) et que le récap écran.
+        # Le PDF ne recalcule plus rien : l'accord PDF / hub / écran est structurel.
+        _totals = compute_budget_totals(projet, lignes)
+        group_subtotals = _totals["group_subtotals"]
+        snap_mat = _totals["snap_mat"]
+        snap_mo = _totals["snap_mo"]
+        snap_st = _totals["snap_st"]
+
         # Valeurs financières du snapshot — init à 0 (cas avec_prix=False) ;
         # le bloc ci-dessous les renseigne quand avec_prix. group_ap = A&P par
         # groupe (mêmes nombres que le bloc totaux affiché).
@@ -4330,22 +4412,16 @@ def register_ad_budget_routes(get_conn):
             totals_rows = []
             totals_kinds = []
 
-            # 1. Sous-total avant taxes RÉEL : toutes les valeurs réelles, indépendant
-            #    des cases selected_st / selected_ap (qui n'agissent que sur l'affichage).
-            real_sub_avant_taxes = non_grouped_total
-            for key, _, pct_field, _ in BUDGET_GROUPS_PDF:
-                sub = group_subtotals[key]
-                if sub <= 0:
-                    continue
-                ap = R(_group_admin_profit(projet, pct_field, sub,
-                                           group_sub_mat[key], group_sub_mo[key], group_sub_st[key]))
-                group_ap[key] = ap
-                real_sub_avant_taxes += sub + ap
+            # 1. Sous-total avant taxes RÉEL + A&P par groupe : lus DIRECTEMENT du
+            #    chemin partagé (indépendants des cases selected_st / selected_ap,
+            #    qui n'agissent que sur l'affichage).
+            real_sub_avant_taxes = _totals["sous_total_avant_taxes"]
+            group_ap = _totals["group_admin_profit"]
 
             # 2. Affichage des TOTAUX PAR DIVISION CSI (regroupements), filtré par
             #    selected_st / selected_ap. Gated par afficher_totaux_section : les
-            #    MONTANTS sont déjà accumulés dans real_sub_avant_taxes ci-dessus
-            #    (indépendant), donc masquer ces lignes ne touche pas le grand total.
+            #    MONTANTS sont déjà dans real_sub_avant_taxes ci-dessus (indépendant),
+            #    donc masquer ces lignes ne touche pas le grand total.
             if afficher_totaux_section:
                 for key, label, pct_field, _ in BUDGET_GROUPS_PDF:
                     sub = group_subtotals[key]
@@ -4354,8 +4430,7 @@ def register_ad_budget_routes(get_conn):
                     if key not in selected_st:
                         continue
                     pct = float(projet.get(pct_field) or 0)
-                    ap = R(_group_admin_profit(projet, pct_field, sub,
-                                               group_sub_mat[key], group_sub_mo[key], group_sub_st[key]))
+                    ap = group_ap.get(key, 0.0)
                     decomposed = any(projet.get(f"{pct_field}_{c}") is not None for c in ("mat", "mo", "st"))
                     ap_label = ("Administration et profit (décomposé)" if decomposed
                                 else f"Administration et profit {pct:g}%")
@@ -4375,10 +4450,10 @@ def register_ad_budget_routes(get_conn):
                 totals_rows.append(["Sous-total avant taxes", f"{_frca_num(real_sub_avant_taxes)} $"])
                 totals_kinds.append("subtotal_taxes")
 
-            # 4. TPS / TVQ — affectent réellement le TOTAL GÉNÉRAL. Chaque taxe
-            #    arrondie au dollar séparément (mode arrondi).
-            tps_amount = R(real_sub_avant_taxes * TPS_RATE)
-            tvq_amount = R(real_sub_avant_taxes * TVQ_RATE)
+            # 4. TPS / TVQ — affectent réellement le TOTAL GÉNÉRAL. Lues du chemin
+            #    partagé (chaque taxe arrondie au dollar séparément en mode arrondi).
+            tps_amount = _totals["tps"]
+            tvq_amount = _totals["tvq"]
             if avec_tps:
                 totals_rows.append([f"TPS {TPS_RATE * 100:g}%", f"{_frca_num(tps_amount)} $"])
                 totals_kinds.append("tax")
