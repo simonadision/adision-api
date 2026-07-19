@@ -12,6 +12,11 @@ reportlab
 # par reportlab pour l'embarquage PNG, explicité ici car on l'importe.
 pillow
 pyjwt
+# PyMuPDF (fitz) : lecture/rendu PDF pour le harnais pré-push. REQUIS par
+# tests/test_pdf_critical.py (page_count) ET tests/test_devis_fidelity.py
+# (extraction texte + rendu image pour le diff jsPDF↔reportlab). Etait importe
+# sans etre declare -> pre-push cassait dans un venv reconstruit. Corrige.
+pymupdf
 # Sprint C1 — client HTTP cross-service Ad BUD → Ad HUB (modules/hub_service.py).
 # Aligné sur Ad VIU qui utilise déjà httpx>=0.27 pour son propre hub_service.
 httpx>=0.27

@@ -18,4 +18,11 @@ if ! python tests/test_divergences_ecran_rapport.py; then
   echo "[pre-push] XPASS inattendu — un défaut D3/D4 a changé, MAJ du test requise." >&2
   exit 1
 fi
+# Fidélité devis jsPDF↔reportlab (Option B). NON BLOQUANT tant que la bascule
+# n'est pas faite (bascule.json : default_engine='reportlab', strict=false) :
+# reportlab reste le moteur SERVI, on ne bloque pas le push sur la dérive jsPDF.
+# Devient BLOQUANT le jour de la bascule (strict=true / default_engine='jspdf').
+# `|| true` filet si node/monorepo indisponibles (le script gère aussi le SKIP).
+echo "[pre-push] Fidélité devis jsPDF↔reportlab (Option B)…"
+python tests/test_devis_fidelity.py || echo "[pre-push] (harnais fidélité : coexistence/indispo — non bloquant)"
 echo "[pre-push] OK — chemins critiques verts."

@@ -1,0 +1,12 @@
+{
+  "_doc": "Etat de la bascule du moteur PDF devis (Option B). REPORTLAB reste le moteur SERVI a l'utilisateur tant que default_engine='reportlab'. Le harnais de fidelite (test_devis_fidelity.py) ne BLOQUE le pre-push que si strict=true OU default_engine='jspdf'. On ne bascule QUE lorsque le lot temoin passe dans la tolerance (3 axes verts sur tous les temoins).",
+  "default_engine": "reportlab",
+  "strict": false,
+  "derniere_evaluation": {
+    "date": "2026-07-19",
+    "verts": "7/8",
+    "tolerances": { "layout_pt": 8.0, "visuel_frac": 0.03, "flou_px": 2.5, "canal": 60 },
+    "residuel": "08-projet-long (devis extreme 3 pages) : Δy montant=8.6pt / visuel p1=3.3% sur la PAGE DE DEBORDEMENT uniquement (page 0 alignee a 2pt, tout le contenu present, 3 pages des deux cotes). Ecart = arithmetique exacte de coupure inter-pages entre les 2 moteurs.",
+    "verdict": "PAS DE BASCULE : reportlab reste le moteur servi (7/8 < lot complet vert)."
+  }
+}
