@@ -4,9 +4,19 @@
   "strict": false,
   "derniere_evaluation": {
     "date": "2026-07-19",
-    "verts": "9/9",
+    "verts": "10/10",
     "tolerances": { "layout_pt": 8.0, "visuel_frac": 0.03, "flou_px": 2.5, "canal": 60 },
-    "residuel": "aucun. 08-projet-long ferme en reproduisant la regle de coupure Platypus (veuve/orpheline min-2 lignes + decalage de continuation d'une interligne). 09-sans-responsable ajoute (cas reel non couvert). Tolerances STRICTES inchangees.",
-    "verdict": "LOT COMPLET VERT. Bascule PROPOSEE mais NON FAITE : reportlab reste servi jusqu'a validation sur vrais projets via le drapeau ?pdf_engine=jspdf (peut reveler un 10e cas). Pour basculer : default_engine='jspdf' + strict=true."
+    "residuel": "aucun. Temoins : +09-sans-responsable, +10-caracteres-speciaux (’ « » — … oe ae accents, presents des 2 cotes). 08 ferme (regle Platypus). Tolerances STRICTES inchangees.",
+    "validation_reelle": {
+      "source": "ad_budget.devis (prod, read-only, railway run --service Postgres)",
+      "devis_reels": "5/5 verts sur 3 axes (1 organisation)",
+      "montants_inhabituels": "tres grand / zero / negatif : verts",
+      "axes_non_representes_en_reel": [
+        "apostrophe typographique ’ et composes oe/ae/«»/—/… (0 en reel -> couverts par le temoin 10)",
+        "devis 3 pages (0 en reel -> couvert par le temoin 08)",
+        "logo d'une AUTRE org (1 seule org ; logos au hub httpx R2, PAS en base -> non testable depuis la DB ; rognage canvas a valider en navigateur)"
+      ]
+    },
+    "verdict": "LOT COMPLET VERT + reel 5/5. Bascule PROPOSEE, NON FAITE. Drapeau ?pdf_engine=jspdf corrige (le routeur SPA strippait la query -> capture au chargement + sessionStorage). Pour basculer : default_engine='jspdf' + strict=true."
   }
 }
