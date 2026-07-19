@@ -213,8 +213,11 @@ def register_ad_devis_routes(get_conn):
             "user": {"nom": user.get("nom"), "email": user.get("email")},
             "documents": documents,
             # Traçabilité : 'hub' (frais) | 'snapshot' (copie locale, hub down) |
-            # 'none' (aucune identité). Le front peut afficher un bandeau discret.
+            # 'none' (aucune identité). Le front affiche un bandeau selon la valeur.
             "identity_source": _ident_source,
+            # Date de la dernière synchro d'identité (miroir) — pour dater le
+            # bandeau « identité en cache » (lecture seule, aucune logique changée).
+            "identity_snapshot_at": projet.get("hub_identity_snapshot_at"),
         }
 
     @router.put("/projets/{projet_id}/devis")
