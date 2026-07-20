@@ -91,22 +91,32 @@ def _trim_logo_whitespace(content: bytes) -> bytes:
         return content
 
 
-def _logo_flowable_for_org(org, max_width=150):
-    """Image reportlab du logo entreprise depuis org.logo_url (R2 proxy stable).
-    Le blanc autour du logo est rogné pour un alignement franc à la marge.
-    Org sans logo / fetch en échec -> build_pdf_logo('') -> "" (placeholder
-    NEUTRE, jamais Adision — décision Simon, cohérent multi-tenant)."""
+def _org_logo_base64(org):
+    """Logo entreprise (R2 via org.logo_url) FETCHÉ + ROGNÉ + base64, ou None.
+    SOURCE UNIQUE partagée : le PDF reportlab (_logo_flowable_for_org) ET le
+    moteur client (exposé par GET /devis) consomment CE base64 -> logo identique
+    des deux côtés, byte pour byte. Best-effort : None si pas d'URL / fetch KO."""
     url = (org or {}).get("logo_url")
-    if url:
-        try:
-            r = httpx.get(url, timeout=10.0)
-            if r.status_code == 200 and r.content:
-                import base64
-                content = _trim_logo_whitespace(r.content)
-                return build_pdf_logo(base64.b64encode(content).decode("ascii"), max_width=max_width)
-        except Exception as e:  # noqa: BLE001
-            print(f"[devis] logo org fetch échec: {e}", flush=True)
-    return build_pdf_logo("", max_width=max_width)
+    if not url:
+        return None
+    try:
+        r = httpx.get(url, timeout=10.0)
+        if r.status_code == 200 and r.content:
+            import base64
+            content = _trim_logo_whitespace(r.content)
+            return base64.b64encode(content).decode("ascii")
+    except Exception as e:  # noqa: BLE001
+        print(f"[devis] logo org fetch échec: {e}", flush=True)
+    return None
+
+
+def _logo_flowable_for_org(org, max_width=150):
+    """Image reportlab du logo entreprise depuis org.logo_url (R2 proxy stable),
+    via _org_logo_base64 (source partagée avec le moteur client). Le blanc est
+    rogné pour un alignement franc à la marge. Org sans logo / fetch en échec ->
+    build_pdf_logo('') -> "" (placeholder NEUTRE, jamais Adision — décision Simon,
+    cohérent multi-tenant)."""
+    return build_pdf_logo(_org_logo_base64(org) or "", max_width=max_width)
 
 
 # Format date fr-CA SANS dépendance babel (pas dans requirements.txt) ni locale
@@ -203,6 +213,12 @@ def register_ad_devis_routes(get_conn):
                 "neq": entreprise.get("neq"),
                 "courriel": entreprise.get("courriel"),
                 "telephone": entreprise.get("telephone"),
+                # Logo de l'org du PROJET, déjà rogné + base64 — MÊME source que le
+                # PDF reportlab (_org_logo_base64). Alimente le moteur client à
+                # l'identique et voyage avec devisData (cache hors ligne). None si
+                # l'org n'a pas de logo. Auparavant NON exposé -> logo manquant côté
+                # jsPDF qui interrogeait l'org ACTIVE (mauvaise source).
+                "logo_base64": _org_logo_base64(entreprise),
             },
             "client": {
                 "nom": _ident.get("nom_client"),
