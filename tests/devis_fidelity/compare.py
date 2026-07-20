@@ -131,8 +131,11 @@ DEFAULT_ANCHORS = [
 ]
 
 
-def compare(master_bytes, cand_bytes, montant_str=None, extra_anchors=None):
-    anchors = list(DEFAULT_ANCHORS)
+def compare(master_bytes, cand_bytes, montant_str=None, extra_anchors=None, base_anchors=None):
+    # base_anchors : jeu d'ancres de base (defaut = DEFAULT_ANCHORS, specifiques
+    # au devis). Le rapport passe SON propre jeu -> ne pas chercher les ancres
+    # devis (« MONTANT DES TRAVAUX », « DOCUMENTS CONSULTÉS ») absentes du rapport.
+    anchors = list(DEFAULT_ANCHORS if base_anchors is None else base_anchors)
     if montant_str:
         anchors.append(("montant_valeur", montant_str))
     if extra_anchors:

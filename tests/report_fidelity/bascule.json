@@ -1,0 +1,5 @@
+{
+  "default_engine": "reportlab",
+  "strict": false,
+  "_comment": "reportlab SERVI. jsPDF rapport en coexistence (report seul, non bloquant) tant que le lot 13 cas n'est pas vert. Passer strict=true / default_engine=jspdf au jour de la bascule (comme le devis)."
+}
