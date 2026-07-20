@@ -1,7 +1,7 @@
 {
-  "_doc": "Etat de la bascule du moteur PDF devis (Option B). REPORTLAB reste le moteur SERVI a l'utilisateur tant que default_engine='reportlab'. Le harnais de fidelite (test_devis_fidelity.py) ne BLOQUE le pre-push que si strict=true OU default_engine='jspdf'. On ne bascule QUE lorsque le lot temoin passe dans la tolerance (3 axes verts sur tous les temoins).",
-  "default_engine": "reportlab",
-  "strict": false,
+  "_doc": "Etat de la bascule du moteur PDF devis (Option B). BASCULE le 2026-07-20 : JSPDF est desormais le moteur SERVI par defaut (default_engine='jspdf'). Le harnais de fidelite (test_devis_fidelity.py) BLOQUE le pre-push (strict=true) : toute derive jsPDF<->reportlab hors tolerance casse le push. RETOUR ARRIERE : remettre default_engine='reportlab' + strict=false ici, ET DEFAULT_ENGINE='reportlab' cote client (devisClientEngine.js). Trappe utilisateur immediate : ?pdf_engine=reportlab.",
+  "default_engine": "jspdf",
+  "strict": true,
   "derniere_evaluation": {
     "date": "2026-07-19",
     "verts": "10/10",
