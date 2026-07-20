@@ -18,11 +18,26 @@ if ! python tests/test_divergences_ecran_rapport.py; then
   echo "[pre-push] XPASS inattendu — un défaut D3/D4 a changé, MAJ du test requise." >&2
   exit 1
 fi
-# Fidélité devis jsPDF↔reportlab (Option B). NON BLOQUANT tant que la bascule
-# n'est pas faite (bascule.json : default_engine='reportlab', strict=false) :
-# reportlab reste le moteur SERVI, on ne bloque pas le push sur la dérive jsPDF.
-# Devient BLOQUANT le jour de la bascule (strict=true / default_engine='jspdf').
-# `|| true` filet si node/monorepo indisponibles (le script gère aussi le SKIP).
-echo "[pre-push] Fidélité devis jsPDF↔reportlab (Option B)…"
-python tests/test_devis_fidelity.py || echo "[pre-push] (harnais fidélité : coexistence/indispo — non bloquant)"
+# Contrat GET /devis (plomberie) — attrape « champ non exposé » / « source
+# divergente » / « mauvaise org » (le harnais de rendu ne peut pas les voir).
+# Sans réseau -> toujours bloquant.
+echo "[pre-push] Contrat GET /devis (plomberie)…"
+if ! python tests/test_devis_contract.py; then
+  echo "[pre-push] ÉCHEC contrat GET /devis — push BLOQUÉ." >&2
+  exit 1
+fi
+# Fidélité devis jsPDF↔reportlab (Option B). BASCULÉ : jsPDF est le moteur SERVI
+# (bascule.json strict=true) -> le harnais BLOQUE si un témoin sort de la
+# tolérance. Le script gère lui-même le report-only si strict=false (avant
+# bascule). Garde node/monorepo : on ne bloque pas un env qui n'a pas de quoi
+# rendre le jsPDF (sinon faux blocage), mais on bloque bien sur une VRAIE dérive.
+if command -v node >/dev/null 2>&1 && [ -d "../adision-monorepo/packages/devis-pdf" ]; then
+  echo "[pre-push] Fidélité devis jsPDF↔reportlab (moteur servi)…"
+  if ! python tests/test_devis_fidelity.py; then
+    echo "[pre-push] ÉCHEC fidélité devis (moteur servi = jsPDF) — push BLOQUÉ." >&2
+    exit 1
+  fi
+else
+  echo "[pre-push] (node/monorepo absent — fidélité devis sautée, non bloquant)"
+fi
 echo "[pre-push] OK — chemins critiques verts."
