@@ -905,6 +905,44 @@ def fetch_org_logo_base64(jwt_token, organization_id):
     return ""
 
 
+def _resolve_report_logo_base64(projet, ident, jwt_token):
+    """Logo du RAPPORT (base64) résolu UNE fois — SOURCE PARTAGÉE reportlab + client.
+
+    C'est la recette du devis (_org_logo_base64) transposée au rapport : le MÊME
+    base64 est consommé par le builder reportlab ET exposé au moteur client (via le
+    snapshot d'identité), octet pour octet -> logo identique des deux côtés, aucun
+    fetch ni CORS côté client, hors ligne OK.
+
+    Rang 0 (ZÉRO réseau) : déjà résolu -> `ident['logo_base64']` (snapshot local,
+      repli hors ligne) OU `projet['logo_base64']` (injection par le harnais de
+      fidélité, qui n'a pas de hub vivant). Prime sur tout.
+    Rangs EN LIGNE (jwt) : logo du CLIENT lié > logo du PROJET (hub logo_url) >
+      logo de l'ORG DU PROJET. L'org interrogée est TOUJOURS celle du projet
+      (projet.organization_id / projet.client_id), jamais l'org active du JWT —
+      c'était la moitié de la cause du bug logo sur le devis.
+    "" (placeholder NEUTRE, jamais Adision) si rien. Ne lève JAMAIS."""
+    pre = (ident or {}).get("logo_base64") or (projet or {}).get("logo_base64")
+    if pre:
+        return pre
+    if not jwt_token:
+        return ""
+    # rang 2 (défaut) : logo du projet via hub logo_url (org DU PROJET, source unique).
+    chosen = _fetch_logo_b64_from_url((ident or {}).get("logo_url"))
+    # rang 1 : logo du CLIENT lié — PRIME sur le logo projet.
+    if projet.get("client_id"):
+        try:
+            client_data = hub_service.fetch_client(jwt_token, int(projet["client_id"]))
+            if client_data and client_data.get("logo_base64"):
+                chosen = client_data["logo_base64"]
+        except hub_service.HubServiceError as e:
+            print(f"[ad-bud PDF] fetch_client {projet.get('client_id')} échec, "
+                  f"fallback org/neutre : {e}", flush=True)
+    # rang 3 — défaut white-label : logo de l'ORG DU PROJET (jamais Adision).
+    if not chosen:
+        chosen = fetch_org_logo_base64(jwt_token, projet.get("organization_id"))
+    return chosen or ""
+
+
 def _authorize_projet(projet, user, mode):
     """Contrôle d'accès centralisé à un projet Ad BUD (PHASE 3A multi-tenant).
 
@@ -2495,6 +2533,12 @@ def register_ad_budget_routes(get_conn):
             if hub_proj is not None:
                 try:
                     _ident_snap = hub_service.map_project_to_identity(hub_proj)
+                    # LOGO en base64 dans le snapshot -> le moteur client (rapport
+                    # jsPDF) le rend HORS LIGNE sans fetch, même sans avoir généré de
+                    # reportlab. Même helper/priorité que le rendu -> logo identique.
+                    _lb = _resolve_report_logo_base64(result, _ident_snap, jwt_token)
+                    if _lb:
+                        _ident_snap["logo_base64"] = _lb
                     _c3 = get_conn(); _cur3 = _c3.cursor()
                     _persist_hub_identity_snapshot(_cur3, projet_id, _ident_snap)
                     _c3.commit(); _cur3.close(); _c3.close()
@@ -3593,18 +3637,29 @@ def register_ad_budget_routes(get_conn):
         _ident_source = "none"
         if jwt_token:
             _ident, _ident_source = hub_service.resolve_hub_identity_with_fallback(projet, jwt_token, _hub_cache)
-            if _ident_source == "hub":
-                try:
-                    _cc = get_conn(); _ccur = _cc.cursor()
-                    _persist_hub_identity_snapshot(_ccur, projet.get("id"), _ident)
-                    _cc.commit(); _ccur.close(); _cc.close()
-                except Exception:
-                    pass  # best-effort
-            elif _ident_source == "snapshot":
+            if _ident_source == "snapshot":
                 print(f"[rapport] identité depuis SNAPSHOT local (hub injoignable) "
                       f"projet={projet.get('id')} snapshot_at={projet.get('hub_identity_snapshot_at')}", flush=True)
         else:
             _ident = {}
+
+        # LOGO du rapport (base64) résolu UNE fois via l'aide PARTAGÉE -> reportlab
+        # (ci-dessous, build_pdf_logo) ET le moteur client (via le snapshot exposé)
+        # consomment le MÊME base64. On l'AJOUTE à _ident PUIS on persiste le snapshot
+        # (source=="hub") : le repli hors ligne — client comme reportlab — retrouve
+        # le logo sans aucun fetch. Rang 0 du helper = snapshot (offline) / injection
+        # harnais ; sinon chaîne en ligne client>projet>org (org DU PROJET).
+        _logo_b64 = _resolve_report_logo_base64(projet, _ident, jwt_token)
+        if _logo_b64:
+            _ident = dict(_ident)
+            _ident["logo_base64"] = _logo_b64
+        if _ident_source == "hub":
+            try:
+                _cc = get_conn(); _ccur = _cc.cursor()
+                _persist_hub_identity_snapshot(_ccur, projet.get("id"), _ident)
+                _cc.commit(); _ccur.close(); _cc.close()
+            except Exception:
+                pass  # best-effort
 
         sections_groups = OrderedDict()
         for l in lignes:
@@ -3653,38 +3708,12 @@ def register_ad_budget_routes(get_conn):
             title_cell.append(Paragraph(_nom_projet.upper(), nom_titre_style))
         title_cell.append(Paragraph("Rapport de budget — " + _rev_lbl, sous_titre_style))
 
-        # Sprint DT-56 D5 — white-label PDF officiel.
-        # Priorité du logo en haut du rapport :
-        #   1. logo du CLIENT lié (projet.client_id non-NULL + client a un
-        #      logo_base64 récupéré via hub_service cross-service)
-        #   2. logo HISTORIQUE du projet (ad_budget.projets.logo_base64 —
-        #      compat anciens projets sans client formel)
-        #   3. logo de l'ORG du projet (HUB Info entreprise / R2) — défaut
-        #      white-label : chaque org voit SON logo (multi-tenant).
-        #   4. Placeholder NEUTRE (aucun logo) — décision Simon : JAMAIS Adision.
-        # Échec gracieux : si un fetch Ad HUB plante (network/401/timeout),
-        # on retombe sur le rang suivant plutôt que de casser l'export PDF.
-        # jwt_token est fourni par l'appelant (route) ; None -> pas de fetch
-        # HUB -> logo neutre (jamais de crash).
-        # rang 2 (défaut) : logo du projet — Phase 6 : depuis le hub (logo_url R2,
-        # source unique) au lieu de la colonne locale logo_base64. Best-effort :
-        # échec -> "" -> on retombe sur rang 3 (org) / neutre (le logo ne crashe jamais).
-        chosen_logo_base64 = _fetch_logo_b64_from_url(_ident.get("logo_url"))
-        # rang 1 : logo du client lié — PRIME sur le logo projet.
-        if projet.get("client_id") and jwt_token:
-            try:
-                client_data = hub_service.fetch_client(jwt_token, int(projet["client_id"]))
-                if client_data and client_data.get("logo_base64"):
-                    chosen_logo_base64 = client_data["logo_base64"]
-            except hub_service.HubServiceError as e:
-                print(
-                    f"[ad-bud PDF] fetch_client {projet['client_id']} échec, "
-                    f"fallback org/neutre : {e}",
-                    flush=True,
-                )
-        # rang 3 — défaut white-label : logo de l'org du projet (jamais Adision).
-        if not chosen_logo_base64 and jwt_token:
-            chosen_logo_base64 = fetch_org_logo_base64(jwt_token, projet.get("organization_id"))
+        # LOGO (haut-gauche) : déjà résolu plus haut par _resolve_report_logo_base64
+        # et rangé dans _ident['logo_base64'] (MÊME base64 que le moteur client, via
+        # le snapshot exposé). Priorité appliquée par le helper : client lié > logo
+        # projet (hub logo_url) > logo org DU PROJET > placeholder NEUTRE (jamais
+        # Adision — décision Simon). Ici on ne fait plus que dessiner.
+        chosen_logo_base64 = _ident.get("logo_base64", "")
         logo_flowable = build_pdf_logo(chosen_logo_base64)
         # Logo plus grand (180pt) → colonnes latérales 190pt pour l'accommoder
         # avec une petite marge ; centre = total_w - 380 (~147pt portrait,
