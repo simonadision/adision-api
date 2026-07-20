@@ -112,7 +112,17 @@ def run_all(save_diffs=True):
     for fx_path in sorted(paths):
         name = os.path.basename(fx_path)[:-5]
         fx = json.load(open(fx_path, encoding="utf-8"))
-        master = render_reportlab(fx)
+        try:
+            master = render_reportlab(fx)
+        except Exception as e:  # noqa: BLE001
+            # Le moteur SERVI (reportlab) plante sur cet input (ex. R13 : rangee
+            # plus haute qu'une page -> LayoutError, reportlab ne scinde pas une
+            # rangee). On le RAPPORTE comme divergence (jsPDF, lui, la scinde).
+            emsg = str(e).splitlines()[0][:120]
+            print(f"\n  ── {name} ──\n    [X  ] REPORTLAB CRASH : {type(e).__name__}: {emsg}")
+            results.append((name, {"ok": False, "reportlab_crash": emsg,
+                                   "texte": {"ok": False}, "layout": {"ok": False}, "visuel": {"ok": False}}))
+            continue
         cand = _render_jspdf(fx_path)
         res = C.compare(master, cand, base_anchors=REPORT_ANCHORS)
         if save_diffs:

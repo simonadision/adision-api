@@ -70,6 +70,10 @@ def axis_layout(master_bytes, cand_bytes, anchors):
     for label, needle in anchors:
         pm = _first_pos(dm, needle)
         pc = _first_pos(dc, needle)
+        if pm is None and pc is None:
+            # Absente des DEUX cotes (ex. « TOTAL GÉNÉRAL » quand avec_prix=false)
+            # -> ce n'est pas une divergence, on ignore cette ancre.
+            continue
         if pm is None or pc is None:
             rows.append({"ancre": label, "etat": "ABSENTE",
                          "master": pm, "cand": pc})
