@@ -18,7 +18,7 @@ import re
 from datetime import date
 
 import httpx
-from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Cookie, Depends, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from psycopg.rows import dict_row
 from typing import Optional
@@ -30,6 +30,7 @@ from reportlab.lib.units import cm, mm
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from modules import hub_service
+from modules import budget_fingerprint
 from modules.auth_jwt import SESSION_COOKIE_NAME, make_jwt_deps, _extract_bearer
 from modules.ad_budget_api import (
     build_pdf_logo, _load_and_authorize_projet, draw_adflo_footer,
@@ -117,6 +118,43 @@ def _logo_flowable_for_org(org, max_width=150):
     build_pdf_logo('') -> "" (placeholder NEUTRE, jamais Adision — décision Simon,
     cohérent multi-tenant)."""
     return build_pdf_logo(_org_logo_base64(org) or "", max_width=max_width)
+
+
+def _devis_snapshot(projet, devis, ident, montant):
+    """Snapshot proposition_devis (dict) — SANS reportlab. Source unique du bloc
+    poussé au hub, partagée entre le rendu reportlab (_build_devis) et l'émission
+    RELAIS (le client fournit les octets, le serveur ne génère plus le PDF).
+    montant_avant_taxes = le quantitatif (le prix du devis EST le quantitatif)."""
+    def _lines(txt):
+        return [ln.strip() for ln in (txt or "").split("\n") if ln.strip()]
+    m = float(montant or 0)
+    tps = round(m * 0.05, 2)
+    tvq = round(m * 0.09975, 2)
+    _ident = ident or {}
+    _devis = devis or {}
+    return {
+        "schema_version": 1,
+        "report_type": "proposition_devis",
+        "project": {"central_project_id": projet.get("ad_hub_project_id"),
+                    "nom": _ident.get("nom")},
+        "revision": {"no": projet.get("revision_no", 0),
+                     "label": projet.get("revision_label") or "Originale"},
+        "options": {"arrondi_dollar": bool(projet.get("arrondi_dollar"))},
+        "totaux": {
+            "sous_total_mat": None, "sous_total_mo": None, "sous_total_st": None,
+            "montant_avant_taxes": round(m, 2),
+            "tps": tps, "tvq": tvq,
+            "montant_apres_taxes": round(m + tps + tvq, 2),
+        },
+        "heures": {"mo": None, "contremaitre": None, "total": None},
+        "admin_profit": {"mode": None, "details": []},
+        "regroupements_csi": [],
+        "devis": {
+            "destinataire_contact": _ident.get("contact_client"),
+            "travaux_inclus": _lines(_devis.get("travaux_inclus")),
+            "travaux_non_inclus": _lines(_devis.get("travaux_non_inclus")),
+        },
+    }
 
 
 # Format date fr-CA SANS dépendance babel (pas dans requirements.txt) ni locale
@@ -325,19 +363,27 @@ def register_ad_devis_routes(get_conn):
         user=Depends(jwt_user),
         authorization: Optional[str] = Header(None),
         session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
-        montant: float = 0,
-        couleur: str = "adision",
-        revision_choice: Optional[str] = None,
-        date_devis: Optional[str] = None,
+        pdf: UploadFile = File(...),
+        montant: float = Form(0),
+        couleur: str = Form("adision"),
+        revision_choice: Optional[str] = Form(None),
+        date_devis: Optional[str] = Form(None),
+        empreinte: Optional[str] = Form(None),
+        force: bool = Form(False),
     ):
-        """Émet la PROPOSITION/DEVIS vers l'Espace Rapports HUB
-        (report_type='proposition_devis', montant_avant_taxes = le quantitatif).
-        Mécanique de révision (option A) identique au rapport : si la révision a
-        déjà été émise ET que le budget a changé depuis, on demande à l'user
-        (choice_required) ; 'new' bumpe, 'correction' remplace. dirty -> FALSE.
+        """Émission RELAIS (Option B) : le CLIENT construit les octets PDF (jsPDF),
+        le serveur les RELAIE au HUB. Reportlab n'intervient PLUS ici (il reste le
+        repli ?pdf_engine=reportlab et la référence de fidélité du harnais).
 
-        Phase D-v2b pré-requis — session_cookie pour le re-extract manuel
-        (proxy hub). _load_and_authorize_projet reste APRÈS extraction."""
+        - Contrôle de bon sens : les octets DOIVENT être un PDF (%PDF) de taille
+          plausible — sinon 400 clair, jamais 500.
+        - EMPREINTE du budget : le client envoie l'empreinte SHA-256 de l'état
+          qu'il a dessiné. Le serveur recalcule l'empreinte de l'état COURANT et
+          compare : identiques -> émission silencieuse ; différentes ->
+          divergence_required (on INFORME, on ne bloque pas ; `force=true` émet
+          quand même). L'empreinte FIGÉE est conservée avec le PDF émis (audit).
+        - Mécanique de révision (option A) inchangée. Reste BLOQUÉ hors ligne /
+          projet non lié (pousse vers le hub)."""
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
         jwt_token = _extract_bearer(authorization, None, session_cookie)
         conn = get_conn()
@@ -345,17 +391,45 @@ def register_ad_devis_routes(get_conn):
         try:
             cur.execute("SELECT * FROM ad_budget.projets WHERE id = %s", (projet_id,))
             projet = cur.fetchone()
+            if not projet:
+                raise HTTPException(status_code=404, detail="Projet introuvable")
+            devis = _load_devis(cur, projet_id) or {}
+            cur.execute("SELECT * FROM ad_budget.budget_lignes WHERE projet_id = %s AND actif = TRUE",
+                        (projet_id,))
+            lignes_actives = cur.fetchall()
         finally:
             cur.close()
             conn.close()
-        if not projet:
-            raise HTTPException(status_code=404, detail="Projet introuvable")
         hub_pid = projet.get("ad_hub_project_id")
         if not hub_pid:
-            raise HTTPException(status_code=400,
-                                detail="Projet non lié à un projet HUB")
+            raise HTTPException(status_code=400, detail="Projet non lié à un projet HUB")
 
-        # Mécanique de révision (option A) — choix user si budget changé.
+        # ── Contrôle de bon sens sur les octets reçus (jamais un 500) ──────────
+        pdf_bytes = pdf.file.read()
+        if not pdf_bytes.startswith(b"%PDF"):
+            raise HTTPException(status_code=400,
+                                detail="Le fichier reçu n'est pas un PDF (%PDF absent). "
+                                       "Régénérez l'aperçu puis réémettez.")
+        if len(pdf_bytes) < 1000 or len(pdf_bytes) > 25_000_000:
+            raise HTTPException(status_code=400,
+                                detail=f"Taille de PDF implausible ({len(pdf_bytes)} o). "
+                                       "Régénérez l'aperçu puis réémettez.")
+
+        # ── Empreinte du budget : état COURANT recalculé + comparaison ─────────
+        empreinte_courante = budget_fingerprint.fingerprint_from_current_state(projet, lignes_actives)
+        divergent = bool(empreinte and empreinte != empreinte_courante)
+        if divergent and not force:
+            # ON INFORME, ON NE BLOQUE PAS : le client propose « régénérer » ou
+            # « émettre quand même » (force=true). Aucun état modifié ici.
+            return {
+                "divergence_required": True,
+                "message": ("Ce devis a été construit à partir d'un état du budget qui a CHANGÉ "
+                            "depuis. Le régénérer avant d'émettre, ou l'émettre tel quel ?"),
+                "empreinte_recue": empreinte,
+                "empreinte_courante": empreinte_courante,
+            }
+
+        # ── Mécanique de révision (option A) — choix user si budget changé ─────
         rev_no = projet.get("revision_no", 0)
         rev_label = projet.get("revision_label") or "Originale"
         needs_choice = bool(projet.get("emitted_at_current_revision")
@@ -369,17 +443,16 @@ def register_ad_devis_routes(get_conn):
             conn = get_conn()
             cur = conn.cursor()
             try:
-                cur.execute(
-                    "UPDATE ad_budget.projets SET revision_no = %s, "
-                    "revision_label = %s, updated_at = NOW() WHERE id = %s",
-                    (rev_no, rev_label, projet_id))
+                cur.execute("UPDATE ad_budget.projets SET revision_no = %s, revision_label = %s, "
+                            "updated_at = NOW() WHERE id = %s", (rev_no, rev_label, projet_id))
                 conn.commit()
             finally:
                 cur.close()
                 conn.close()
 
-        buf, snapshot, _ident_source = _build_devis(projet_id, montant, couleur, jwt_token, date_devis, user=user)
-        pdf_bytes = buf.getvalue()
+        # ── Snapshot (sans reportlab) + relais des octets CLIENT au hub ────────
+        _ident, _ident_source = _resolve_identity_with_snapshot(projet, jwt_token, {})
+        snapshot = _devis_snapshot(projet, devis, _ident, montant)
         fields = {
             "report_type": "proposition_devis",
             "revision_no": rev_no,
@@ -390,6 +463,11 @@ def register_ad_devis_routes(get_conn):
             "generated_by": user.get("id"),
             "generated_by_nom": user.get("nom") or user.get("email"),
             "snapshot_data": json.dumps(snapshot, default=str),
+            # EMPREINTE conservée avec le PDF émis (audit). budget_fingerprint =
+            # état que le PDF prétend représenter (client, ou courant si absent).
+            "budget_fingerprint": empreinte or empreinte_courante,
+            "budget_fingerprint_current": empreinte_courante,
+            "budget_divergent": divergent,
         }
         try:
             result = hub_service.post_report(jwt_token, int(hub_pid), pdf_bytes, fields)
@@ -410,6 +488,7 @@ def register_ad_devis_routes(get_conn):
             "report_type": "proposition_devis",
             "revision_no": rev_no,
             "revision_label": rev_label,
+            "budget_divergent": divergent,
             "hub": result,
         }
 
@@ -698,37 +777,9 @@ def register_ad_devis_routes(get_conn):
         doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
         buf.seek(0)
 
-        # Snapshot proposition_devis : montant_avant_taxes = le quantitatif (le
-        # prix du devis EST le quantitatif). Bloc devis rempli ; totaux détaillés
-        # (mat/mo/st, heures, A&P) restent côté rapport de calcul (null ici).
-        def _lines(txt):
-            return [ln.strip() for ln in (txt or "").split("\n") if ln.strip()]
-        m = float(montant or 0)
-        tps = round(m * 0.05, 2)
-        tvq = round(m * 0.09975, 2)
-        snapshot = {
-            "schema_version": 1,
-            "report_type": "proposition_devis",
-            "project": {"central_project_id": projet.get("ad_hub_project_id"),
-                        "nom": _ident.get("nom")},
-            "revision": {"no": projet.get("revision_no", 0),
-                         "label": projet.get("revision_label") or "Originale"},
-            "options": {"arrondi_dollar": bool(projet.get("arrondi_dollar"))},
-            "totaux": {
-                "sous_total_mat": None, "sous_total_mo": None, "sous_total_st": None,
-                "montant_avant_taxes": round(m, 2),
-                "tps": tps, "tvq": tvq,
-                "montant_apres_taxes": round(m + tps + tvq, 2),
-            },
-            "heures": {"mo": None, "contremaitre": None, "total": None},
-            "admin_profit": {"mode": None, "details": []},
-            "regroupements_csi": [],
-            "devis": {
-                "destinataire_contact": _ident.get("contact_client"),
-                "travaux_inclus": _lines(devis.get("travaux_inclus")),
-                "travaux_non_inclus": _lines(devis.get("travaux_non_inclus")),
-            },
-        }
+        # Snapshot proposition_devis — source unique partagée (helper module-level,
+        # aussi utilisé par l'émission relais sans reportlab).
+        snapshot = _devis_snapshot(projet, devis, _ident, montant)
         return buf, snapshot, _ident_source
 
     return router

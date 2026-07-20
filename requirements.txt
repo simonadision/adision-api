@@ -12,6 +12,9 @@ reportlab
 # par reportlab pour l'embarquage PNG, explicité ici car on l'importe.
 pillow
 pyjwt
+# python-multipart : requis par FastAPI pour File/Form (émission RELAIS du devis,
+# POST multipart des octets PDF construits par le client — modules/ad_devis_api.py).
+python-multipart
 # PyMuPDF (fitz) : lecture/rendu PDF pour le harnais pré-push. REQUIS par
 # tests/test_pdf_critical.py (page_count) ET tests/test_devis_fidelity.py
 # (extraction texte + rendu image pour le diff jsPDF↔reportlab). Etait importe
