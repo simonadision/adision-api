@@ -115,13 +115,24 @@ def run_all(save_diffs=True):
         try:
             master = render_reportlab(fx)
         except Exception as e:  # noqa: BLE001
-            # Le moteur SERVI (reportlab) plante sur cet input (ex. R13 : rangee
-            # plus haute qu'une page -> LayoutError, reportlab ne scinde pas une
-            # rangee). On le RAPPORTE comme divergence (jsPDF, lui, la scinde).
-            emsg = str(e).splitlines()[0][:120]
-            print(f"\n  ── {name} ──\n    [X  ] REPORTLAB CRASH : {type(e).__name__}: {emsg}")
-            results.append((name, {"ok": False, "reportlab_crash": emsg,
-                                   "texte": {"ok": False}, "layout": {"ok": False}, "visuel": {"ok": False}}))
+            # Le moteur SERVI (reportlab) PLANTE sur cet input (ex. R13 : rangee
+            # plus haute qu'une page -> LayoutError ; reportlab ne scinde pas une
+            # rangee). Ce cas ne peut PAS etre juge en FIDELITE (la reference
+            # s'ecroule) -> on le reclasse en ROBUSTESSE : le moteur CLIENT doit
+            # rendre sans planter un PDF valide. Exclu du bilan de fidelite.
+            emsg = str(e).splitlines()[0][:100]
+            try:
+                cand = _render_jspdf(fx_path)
+                import fitz  # noqa: E402
+                d = fitz.open(stream=cand, filetype="pdf")
+                ok_robuste = cand[:5] == b"%PDF-" and d.page_count >= 1
+                print(f"\n  ── {name} ── (ROBUSTESSE, hors fidelite)")
+                print(f"    reportlab PLANTE : {type(e).__name__}: {emsg}")
+                print(f"    [{'OK ' if ok_robuste else 'X  '}] jsPDF rend un PDF valide de {d.page_count} page(s) sans crash")
+            except Exception as e2:  # noqa: BLE001
+                ok_robuste = False
+                print(f"\n  ── {name} ── (ROBUSTESSE)\n    [X  ] jsPDF a AUSSI echoue : {e2}")
+            results.append((name, {"ok": ok_robuste, "robustness": True, "reportlab_crash": emsg}))
             continue
         cand = _render_jspdf(fx_path)
         res = C.compare(master, cand, base_anchors=REPORT_ANCHORS)
@@ -131,9 +142,16 @@ def run_all(save_diffs=True):
         _fmt_case(name, res)
         results.append((name, res))
 
-    n_ok = sum(1 for _, r in results if r["ok"])
+    # Bilan FIDELITE = sur les temoins JUGEABLES (hors cas de robustesse ou la
+    # reference reportlab s'ecroule). Robustesse rapportee a part.
+    fidelite = [(n, r) for n, r in results if not r.get("robustness")]
+    robust = [(n, r) for n, r in results if r.get("robustness")]
+    n_ok = sum(1 for _, r in fidelite if r["ok"])
     print(f"\n{'='*64}")
-    print(f"  BILAN FIDELITE RAPPORT : {n_ok}/{len(results)} temoins verts sur 3 axes")
+    print(f"  BILAN FIDELITE RAPPORT : {n_ok}/{len(fidelite)} temoins jugeables verts sur 3 axes")
+    if robust:
+        rob_ok = sum(1 for _, r in robust if r["ok"])
+        print(f"  ROBUSTESSE (reportlab plante) : {rob_ok}/{len(robust)} rendus jsPDF valides — {[n for n, _ in robust]}")
     if save_diffs:
         print(f"  Diffs visuels : {diff_dir}")
     print(f"{'='*64}")
@@ -145,7 +163,9 @@ def main():
     print(f"[bascule] moteur_defaut={bascule.get('default_engine')} strict={strict} "
           f"-> {'BLOQUANT' if strict else 'RAPPORT SEUL (coexistence)'}")
     n_ok, results = run_all()
-    all_green = results and n_ok == len(results)
+    # Vert = tous les temoins JUGEABLES verts + tous les cas de robustesse OK.
+    # (R01 portrait reste hors perimetre tant que le portrait n'est pas traite.)
+    all_green = bool(results) and all(r["ok"] for _, r in results)
     if strict:
         if not all_green:
             print("  [X] MODE STRICT : des temoins divergent -> pre-push BLOQUE.")
@@ -157,9 +177,10 @@ def main():
 
 def test_report_fidelity_gate():
     _bascule, strict = _load_bascule()
-    n_ok, results = run_all(save_diffs=False)
+    _n_ok, results = run_all(save_diffs=False)
     if strict:
-        assert results and n_ok == len(results), "fidelite rapport jsPDF<->reportlab hors tolerance (mode strict)"
+        assert results and all(r["ok"] for _, r in results), \
+            "fidelite/robustesse rapport jsPDF<->reportlab hors tolerance (mode strict)"
 
 
 if __name__ == "__main__":
