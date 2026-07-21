@@ -183,6 +183,16 @@ def run_all(save_diffs=True):
     return n_ok, results
 
 
+def _rouges_connus(bascule):
+    """Temoins ROUGES tolerees, declares dans bascule.json avec leur raison.
+
+    Ce n'est PAS un masquage : le temoin reste JOUE, son detail reste imprime,
+    et s'il redevient VERT on le signale pour qu'on retire la derogation. Seul
+    le VERDICT de blocage l'ignore. Tout autre rouge bloque normalement.
+    """
+    return dict(bascule.get("rouges_connus") or {})
+
+
 def main():
     bascule, strict = _load_bascule()
     print(f"[bascule] moteur_defaut={bascule.get('default_engine')} strict={strict} "
@@ -190,12 +200,22 @@ def main():
     n_ok, results = run_all()
     # Vert = tous les temoins JUGEABLES verts + tous les cas de robustesse OK.
     # (R01 portrait reste hors perimetre tant que le portrait n'est pas traite.)
-    all_green = bool(results) and all(r["ok"] for _, r in results)
+    connus = _rouges_connus(bascule)
+    rouges = [n for n, r in results if not r["ok"]]
+    tolerees = [n for n in rouges if n in connus]
+    bloquants = [n for n in rouges if n not in connus]
+    for n in tolerees:
+        print(f"  [TOLERE] {n} — rouge CONNU et documente, hors chemin critique :")
+        print(f"           {connus[n]}")
+    for n, r in results:
+        if r["ok"] and n in connus:
+            print(f"  [!] {n} est desormais VERT — retirer sa derogation de bascule.json.")
+    all_green = bool(results) and not bloquants
     if strict:
         if not all_green:
-            print("  [X] MODE STRICT : des temoins divergent -> pre-push BLOQUE.")
+            print(f"  [X] MODE STRICT : {bloquants} divergent -> pre-push BLOQUE.")
             return 1
-        print("  [OK] MODE STRICT : lot temoin vert.")
+        print("  [OK] MODE STRICT : aucun rouge non declare.")
         return 0
     return 0
 

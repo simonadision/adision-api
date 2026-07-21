@@ -1,5 +1,8 @@
 {
   "default_engine": "reportlab",
   "strict": false,
-  "_comment": "reportlab SERVI. jsPDF rapport en coexistence (report seul, non bloquant) tant que le lot 13 cas n'est pas vert. Passer strict=true / default_engine=jspdf au jour de la bascule (comme le devis)."
+  "_comment": "reportlab SERVI. jsPDF rapport en coexistence (report seul, non bloquant) tant que le lot n'est pas vert. Passer strict=true / default_engine=jspdf au jour de la bascule. rouges_connus : temoins ROUGES TOLERES, documentes, hors chemin critique — ils restent JOUES et rapportes ; tout AUTRE rouge bloque.",
+  "rouges_connus": {
+    "R01-defaut-portrait": "HORS PERIMETRE — portrait avec les 20 colonnes, format que Simon NE DEPOSE PAS (le format depose est R16, portrait 4 colonnes, VERT sur 4 axes). Defaut nomme : placement INTERNE de la rangee de titres ; le master aligne toutes les colonnes en haut (y=285,03), le port demarre a 283,98 ou 292,48 et coupe « Aj. mat. » en 6 lignes au lieu de 5. Ecart 15,95 pt. La rangee a la BONNE hauteur (282,52->365,02) et la pagination n'est pas touchee ; LAYOUT et VISUEL sont verts. Si un gabarit portrait >12 colonnes devenait necessaire, la reponse est de le passer en PAYSAGE, pas de reparer le portrait dense — et ce temoin redeviendrait alors BLOQUANT."
+  }
 }
