@@ -4,8 +4,12 @@ reportlab servi (_build_projet_report).
 Pour CHAQUE temoin (packages/report-pdf/harness/fixtures/R*.json) :
   - construit le master reportlab (moteur SERVI) via report_fidelity.reportlab_ref,
   - construit le candidat jsPDF via `node harness/render.mjs`,
-  - compare sur 3 axes (texte multiset / ancrage layout / diff visuel flou),
-    memes tolerances que le devis (8 pt / 3 %), NON negociables.
+  - compare sur 4 axes (texte multiset / ancrage layout / CELLULES / diff
+    visuel flou), memes tolerances que le devis (8 pt / 3 %), NON negociables.
+
+L'axe CELLULES (report_fidelity/corps_anchors.py) a ete ajoute parce que l'axe
+layout n'ancre que 5 chaines fixes et ne voit AUCUNE cellule de table : un
+decalage de cellule lui est invisible (cf. R01, 5,5 pt, vert a tort).
 
 Chaque temoin porte ses OPTIONS de rendu + une date figee (today) -> master et
 candidat portent la MEME « Date du jour ».
@@ -32,6 +36,7 @@ except Exception:  # noqa: BLE001
     pass
 
 from tests.report_fidelity.reportlab_ref import render_reportlab  # noqa: E402
+from tests.report_fidelity.corps_anchors import axis_cellules  # noqa: E402
 from tests.devis_fidelity import compare as C  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -91,6 +96,20 @@ def _fmt_case(name, res):
             print(f"           · {r['ancre']}: Δx={r['dx']} Δy={r['dy']} (p{r['page_m']}->p{r['page_c']})")
         elif r.get("etat") == "ABSENTE":
             print(f"           · {r['ancre']}: ABSENTE (m={r['master']} c={r['cand']})")
+    c = res.get("cellules")
+    if c:
+        cd = c["detail"]
+        n = next((r.get("info") for r in cd if r["ancre"] == "cellules_appariees"), 0)
+        pc_ = next((r for r in cd if r["ancre"] == "pire_cellule"), None)
+        pire = max(abs(pc_["dx"]), abs(pc_["dy"])) if pc_ and "dx" in pc_ else 0
+        print(f"    [{mark(c['ok'])}] CELLULES: {n} appariees | pire ecart={pire:.1f}pt"
+              f" (tol {C.TOL_LAYOUT_PT}pt)")
+        for r in cd:
+            if r.get("etat"):
+                print(f"           · {r['ancre']}: {r['etat']} "
+                      f"(m={r['master']} c={r['cand']})")
+            elif "dx" in r and not r.get("ok"):
+                print(f"           · {r['ancre']}: Δx={r['dx']} Δy={r['dy']} {r.get('quoi','')}")
     vd = v["detail"]
     fr = ", ".join(f"p{p['page']}={p['frac']*100:.1f}%" for p in vd["pages"])
     print(f"    [{mark(v['ok'])}] VISUEL  : {fr} (tol {C.TOL_VISUAL_FRAC*100:.0f}%) pages {vd['n_cand']}/{vd['n_master']}")
@@ -136,6 +155,12 @@ def run_all(save_diffs=True):
             continue
         cand = _render_jspdf(fx_path)
         res = C.compare(master, cand, base_anchors=REPORT_ANCHORS)
+        # 4e axe : CELLULES. L'axe layout n'ancre que 5 chaines fixes et ne voit
+        # AUCUNE cellule de table (cf. corps_anchors.py). Sans lui, un decalage
+        # de cellule reste invisible et le lot est vert a tort.
+        ok_c, det_c = axis_cellules(master, cand, C.TOL_LAYOUT_PT)
+        res["cellules"] = {"ok": ok_c, "detail": det_c}
+        res["ok"] = res["ok"] and ok_c
         if save_diffs:
             for i, d in enumerate(res.get("_diffs", [])):
                 d.save(os.path.join(diff_dir, f"{name}_p{i}_diff.png"))
@@ -148,7 +173,7 @@ def run_all(save_diffs=True):
     robust = [(n, r) for n, r in results if r.get("robustness")]
     n_ok = sum(1 for _, r in fidelite if r["ok"])
     print(f"\n{'='*64}")
-    print(f"  BILAN FIDELITE RAPPORT : {n_ok}/{len(fidelite)} temoins jugeables verts sur 3 axes")
+    print(f"  BILAN FIDELITE RAPPORT : {n_ok}/{len(fidelite)} temoins jugeables verts sur 4 axes")
     if robust:
         rob_ok = sum(1 for _, r in robust if r["ok"])
         print(f"  ROBUSTESSE (reportlab plante) : {rob_ok}/{len(robust)} rendus jsPDF valides — {[n for n, _ in robust]}")
