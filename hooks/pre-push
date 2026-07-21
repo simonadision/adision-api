@@ -44,6 +44,19 @@ if command -v node >/dev/null 2>&1 && [ -d "../adision-monorepo/packages/devis-p
     echo "[pre-push] ÉCHEC fidélité devis (moteur servi = jsPDF) — push BLOQUÉ." >&2
     exit 1
   fi
+  # Fidélité RAPPORT jsPDF↔reportlab. BASCULÉ le 2026-07-21 : jsPDF est le moteur
+  # SERVI du rapport (bascule.json default_engine=jspdf, strict=true).
+  #
+  # ⚠️ CE BLOC MANQUAIT. bascule.json était passé à strict=true, mais le hook
+  # n'appelait QUE le harnais du DEVIS : le portillon du rapport ne s'exécutait
+  # jamais au push et ne bloquait donc RIEN. Un drapeau « bloquant » que la
+  # chaîne n'exécute pas est un gate DÉCORATIF — exactement le défaut corrigé
+  # sur le devis. Le script gère lui-même le report-only si strict=false.
+  echo "[pre-push] Fidélité rapport jsPDF↔reportlab (moteur servi)…"
+  if ! python tests/test_report_fidelity.py; then
+    echo "[pre-push] ÉCHEC fidélité rapport (moteur servi = jsPDF) — push BLOQUÉ." >&2
+    exit 1
+  fi
   # Accord cross-langage de l'EMPREINTE budget (Python == JS). Si les deux
   # implémentations divergent d'un octet, toute émission signalerait une fausse
   # dérive -> bloquant (même garde node/monorepo).
@@ -53,6 +66,6 @@ if command -v node >/dev/null 2>&1 && [ -d "../adision-monorepo/packages/devis-p
     exit 1
   fi
 else
-  echo "[pre-push] (node/monorepo absent — fidélité devis + accord empreinte sautés, non bloquant)"
+  echo "[pre-push] (node/monorepo absent — fidélité devis+rapport et accord empreinte sautés, non bloquant)"
 fi
 echo "[pre-push] OK — chemins critiques verts."
