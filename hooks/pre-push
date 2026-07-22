@@ -55,6 +55,12 @@ if command -v node >/dev/null 2>&1 && [ -d "../adision-monorepo/packages/devis-p
   # Blocage PROUVÉ EN SITUATION le 2026-07-21 : régression volontaire dans le
   # moteur (FRAME_PAD 6 -> 15) -> ce hook a refusé le push ; moteur restauré ->
   # push accepté. Le gate n'est pas supposé bloquant, il a été vu bloquer.
+  echo "[pre-push] Parité du seuil de détention (hub ↔ Ad BUD)…"
+  if ! python tests/check_detention_seuil.py; then
+    echo "[pre-push] ÉCHEC parité du seuil de détention — push BLOQUÉ." >&2
+    exit 1
+  fi
+
   echo "[pre-push] Fidélité rapport jsPDF↔reportlab (moteur servi)…"
   if ! python tests/test_report_fidelity.py; then
     echo "[pre-push] ÉCHEC fidélité rapport (moteur servi = jsPDF) — push BLOQUÉ." >&2

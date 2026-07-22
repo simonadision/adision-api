@@ -997,11 +997,20 @@ def _authorize_projet(projet, user, mode):
     raise HTTPException(status_code=404, detail="Projet introuvable")
 
 
-# Seuil d'inactivité au-delà duquel une détention est réputée abandonnée. DOIT
-# rester aligné sur celui du hub (projects_api.patch_project_detention) : le hub
-# tranche la PRISE, ce gate tranche l'ÉCRITURE. Deux seuils divergents feraient
-# accepter des écritures que le hub refuse, ou l'inverse.
-SEUIL_DETENTION = timedelta(minutes=15)
+# ═══════════════════════════════════════════════════════════════════════════
+# SEUIL D'INACTIVITÉ DE LA DÉTENTION — miroir de la source unique du hub.
+#
+# Le hub tranche la PRISE (adision-app-api/modules/projects_api.py :
+# SEUIL_DETENTION_MINUTES) ; ce gate tranche l'ÉCRITURE. Deux services, deux
+# dépôts, deux processus Python : la constante ne peut pas être partagée
+# littéralement. Deux seuils divergents feraient accepter ici des écritures que
+# le hub refuse, ou l'inverse — et le trou serait SILENCIEUX.
+#
+# La divergence est donc rendue DÉTECTABLE, pas documentée :
+# tests/check_detention_seuil.py lit les deux fichiers et échoue si les
+# valeurs ne concordent plus. Il tourne au pré-push.
+SEUIL_DETENTION_MINUTES = 15
+SEUIL_DETENTION = timedelta(minutes=SEUIL_DETENTION_MINUTES)
 
 
 def _load_and_authorize_projet(get_conn, projet_id, user, mode, check_lock=True):
