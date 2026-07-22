@@ -1057,7 +1057,33 @@ def _load_and_authorize_projet(get_conn, projet_id, user, mode, check_lock=True)
     # L'EXPIRATION est calculée à la lecture, jamais par un cron : une détention
     # dont le dernier battement date de plus de SEUIL_DETENTION est réputée
     # abandonnée et ne bloque plus personne.
-    if check_lock and mode == "write" and projet and projet.get("detenteur_id") is not None:
+    # ⚠ GATE NEUTRALISÉ LE 2026-07-22 — NE PAS LE RÉACTIVER SANS CORRIGER LA CLÉ.
+    #
+    # DÉFAUT CONSTATÉ EN PRODUCTION : le détenteur était BLOQUÉ SUR SON PROPRE
+    # PROJET. `detenteur_id` porte l'id HUB (app_central.users.id = 1 pour
+    # simon@adision.ca), tandis que `user["id"]` vaut ici l'id AD BUD (= 4) :
+    # deux espaces d'identifiants distincts, jamais égaux. Toute écriture du
+    # détenteur légitime repartait en 409 « Projet détenu par simon@adision.ca —
+    # demandez-lui de le fermer », c'est-à-dire en lui demandant de se fermer le
+    # projet à lui-même.
+    #
+    # C'est la TROISIÈME occurrence de cette classe de défaut (cf. me:4 / me:1 de
+    # l'étape 3, et la clé du cache d'identité) : une valeur écrite dans un
+    # espace d'identifiants et relue dans un autre.
+    #
+    # Comparer sur `detenteur_nom` ne corrigerait rien : le hub y met
+    # `nom_complet or nom or email`, donc une chaîne d'AFFICHAGE, pas une clé.
+    # La correction demande une clé stable et commune aux deux services — un
+    # `detenteur_email` porté par le hub ET le miroir. Elle exige une migration,
+    # elle ne s'improvise pas dans un correctif à chaud.
+    #
+    # En attendant, le gate NE BLOQUE PLUS : on revient au comportement d'avant
+    # l'étape 1 pour les écritures. La détention continue d'être posée, relevée
+    # et AFFICHÉE (la présence fonctionne, le nom est là, le coup de fil aussi) ;
+    # seule la contrainte serveur est suspendue. Mieux vaut un modèle
+    # incomplet et annoncé qu'un modèle qui empêche tout le monde de travailler.
+    _DETENTION_GATE_ACTIF = False
+    if _DETENTION_GATE_ACTIF and check_lock and mode == "write" and projet and projet.get("detenteur_id") is not None:
         moi = user.get("id") if isinstance(user, dict) else None
         if projet.get("detenteur_id") != moi:
             derniere = projet.get("derniere_activite")
