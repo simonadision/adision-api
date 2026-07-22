@@ -5,7 +5,7 @@ import os
 import re
 import unicodedata
 from collections import OrderedDict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -997,6 +997,13 @@ def _authorize_projet(projet, user, mode):
     raise HTTPException(status_code=404, detail="Projet introuvable")
 
 
+# Seuil d'inactivité au-delà duquel une détention est réputée abandonnée. DOIT
+# rester aligné sur celui du hub (projects_api.patch_project_detention) : le hub
+# tranche la PRISE, ce gate tranche l'ÉCRITURE. Deux seuils divergents feraient
+# accepter des écritures que le hub refuse, ou l'inverse.
+SEUIL_DETENTION = timedelta(minutes=15)
+
+
 def _load_and_authorize_projet(get_conn, projet_id, user, mode, check_lock=True):
     """Charge le projet {projet_id} sur une connexion DÉDIÉE (fermée aussitôt
     via try/finally — aucune fuite de connexion, même sur un rejet 403/404)
@@ -1007,7 +1014,8 @@ def _load_and_authorize_projet(get_conn, projet_id, user, mode, check_lock=True)
     try:
         cur = conn.cursor(row_factory=dict_row)
         cur.execute(
-            "SELECT user_id, organization_id, is_verrouille FROM ad_budget.projets "
+            "SELECT user_id, organization_id, is_verrouille, detenteur_id, "
+            "detenteur_nom, derniere_activite FROM ad_budget.projets "
             "WHERE id = %s",
             (projet_id,),
         )
@@ -1028,6 +1036,33 @@ def _load_and_authorize_projet(get_conn, projet_id, user, mode, check_lock=True)
             status_code=409,
             detail="Projet verrouillé — déverrouillez-le pour le modifier.",
         )
+    # DÉTENTION (étape 1 du modèle « verrou + miroir ») — ORTHOGONALE au verrou.
+    # Le verrou ci-dessus est une GÈLE : il bloque tout le monde. La détention,
+    # elle, laisse écrire SON DÉTENTEUR et met les autres en lecture seule.
+    #
+    # C'est ICI que la lecture seule devient EFFECTIVE. Les sorties anticipées du
+    # front (App.jsx) sont du confort : elles ne protègent rien contre un onglet
+    # resté ouvert avec un état périmé. Cette ligne, oui — et comme les 17 gates
+    # d'écriture passent par cette fonction, aucun endpoint n'est oublié.
+    #
+    # L'EXPIRATION est calculée à la lecture, jamais par un cron : une détention
+    # dont le dernier battement date de plus de SEUIL_DETENTION est réputée
+    # abandonnée et ne bloque plus personne.
+    if check_lock and mode == "write" and projet and projet.get("detenteur_id") is not None:
+        moi = user.get("id") if isinstance(user, dict) else None
+        if projet.get("detenteur_id") != moi:
+            derniere = projet.get("derniere_activite")
+            encore_actif = (
+                derniere is not None
+                and (datetime.now(timezone.utc) - derniere) < SEUIL_DETENTION
+            )
+            if encore_actif:
+                raise HTTPException(
+                    status_code=409,
+                    detail=("Projet détenu par "
+                            + str(projet.get("detenteur_nom") or "un autre utilisateur")
+                            + " — demandez-lui de le fermer, ou reprenez-le."),
+                )
     # Retourne le projet autorisé (user_id, organization_id, is_verrouille) — les
     # chemins qui résolvent un catalogue cross-service DOIVENT utiliser
     # projet.organization_id (org du PROJET), pas l'org du JWT (Loi 25).
@@ -3001,6 +3036,72 @@ def register_ad_budget_routes(get_conn):
         cur.close()
         conn.close()
         return {"status": "updated"}
+
+    @router.patch("/projets/{projet_id}/detention")
+    def patch_projet_detention(projet_id: int, data: dict, user=Depends(jwt_user),
+                               authorization: Optional[str] = Header(None),
+                               session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
+        """Détention projet — PROXY vers le hub (source unique, migration 111)
+        PUIS mise à jour du MIROIR local dans la même requête.
+
+        Body : {"action": "prendre" | "battement" | "rendre" | "forcer"}.
+
+        POURQUOI UN MIROIR ET PAS UN LOOKUP LIVE : le gate d'écriture
+        (_load_and_authorize_projet) est traversé par les 17 endpoints d'écriture.
+        Un aller-retour cross-service à chaque écriture serait payé sur le chemin
+        chaud. Le miroir est écrit ici, dans la foulée du hub, donc il n'est
+        jamais en retard sur une action venue d'Ad BUD.
+
+        check_lock=False : prendre ou rendre la détention n'est pas une écriture
+        de CONTENU. Sans ça, un projet détenu par un autre interdirait de… le
+        reprendre. Le gate d'autorisation (org/propriétaire) reste, lui, appliqué.
+        """
+        _load_and_authorize_projet(get_conn, projet_id, user, "write", check_lock=False)
+        action = str((data or {}).get("action") or "").strip()
+
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        cur.execute("SELECT ad_hub_project_id FROM ad_budget.projets WHERE id = %s", (projet_id,))
+        prow = cur.fetchone()
+        if not prow:
+            cur.close(); conn.close()
+            raise HTTPException(status_code=404, detail="Projet not found")
+        hub_pid = prow.get("ad_hub_project_id")
+
+        resultat = None
+        if hub_pid is not None:
+            try:
+                jwt_token = _extract_bearer(authorization, None, session_cookie)
+                resultat = hub_service.patch_project_detention(jwt_token, int(hub_pid), action)
+            except hub_service.HubServiceError as e:
+                cur.close(); conn.close()
+                sc = e.status_code or 502
+                # Le 409 « détenu par X » DOIT remonter tel quel : le nom du
+                # détenteur est l'information qui permet le coup de fil.
+                status = sc if sc in (400, 401, 403, 404, 409) else 502
+                raise HTTPException(status_code=status, detail=e.detail)
+            except HTTPException:
+                cur.close(); conn.close()
+                raise
+        else:
+            # Budget AUTONOME (sans lien hub) : détention purement locale, même
+            # sémantique. Comportement calqué sur le verrou, qui a le même repli.
+            cur.close(); conn.close()
+            raise HTTPException(status_code=409,
+                                detail="Détention indisponible : ce budget n'est pas rattaché à un projet Ad HUB.")
+
+        try:
+            cur.execute(
+                "UPDATE ad_budget.projets SET detenteur_id = %s, detenteur_nom = %s, "
+                "detenu_depuis = %s, derniere_activite = %s, updated_at = NOW() "
+                "WHERE id = %s",
+                (resultat.get("detenteur_id"), resultat.get("detenteur_nom"),
+                 resultat.get("detenu_depuis"), resultat.get("derniere_activite"), projet_id),
+            )
+            conn.commit()
+        finally:
+            cur.close(); conn.close()
+        return resultat
 
     @router.patch("/projets/{projet_id}/verrou")
     def toggle_projet_verrou(projet_id: int, data: dict, user=Depends(jwt_user),

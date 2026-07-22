@@ -1,0 +1,176 @@
+code|metier|qualification|taux_col17|groupe
+BRIQUETEUR_C|Briqueteur-maçon|Compagnon|84.60|metier
+BRIQUETEUR_A1|Briqueteur-maçon|Apprenti période 1|53.87|metier
+BRIQUETEUR_A2|Briqueteur-maçon|Apprenti période 2|61.32|metier
+BRIQUETEUR_A3|Briqueteur-maçon|Apprenti période 3|72.51|metier
+CALORIFUGEUR_C|Calorifugeur|Compagnon|83.76|metier
+CALORIFUGEUR_A1|Calorifugeur|Apprenti période 1|53.34|metier
+CALORIFUGEUR_A2|Calorifugeur|Apprenti période 2|60.70|metier
+CALORIFUGEUR_A3|Calorifugeur|Apprenti période 3|71.78|metier
+CARRELEUR_C|Carreleur|Compagnon|84.58|metier
+CARRELEUR_A1|Carreleur|Apprenti période 1|53.83|metier
+CARRELEUR_A2|Carreleur|Apprenti période 2|61.30|metier
+CARRELEUR_A3|Carreleur|Apprenti période 3|72.47|metier
+CHARPENTIER_C|Charpentier-menuisier|Compagnon|84.64|metier
+CHARPENTIER_A1|Charpentier-menuisier|Apprenti période 1|53.87|metier
+CHARPENTIER_A2|Charpentier-menuisier|Apprenti période 2|61.33|metier
+CHARPENTIER_A3|Charpentier-menuisier|Apprenti période 3|72.54|metier
+CHAUDRONNIER_C|Chaudronnier|Compagnon|83.97|metier
+CHAUDRONNIER_A1|Chaudronnier|Apprenti période 1|53.54|metier
+CHAUDRONNIER_A2|Chaudronnier|Apprenti période 2|60.91|metier
+CHAUDRONNIER_A3|Chaudronnier|Apprenti période 3|71.97|metier
+CIMENTIER_C|Cimentier-applicateur|Compagnon|82.91|metier
+CIMENTIER_A1|Cimentier-applicateur|Apprenti période 1|60.16|metier
+CIMENTIER_A2|Cimentier-applicateur|Apprenti période 2|71.08|metier
+COUVREUR_C|Couvreur|Compagnon|87.82|metier
+COUVREUR_A1|Couvreur|Apprenti période 1|63.73|metier
+COUVREUR_A2|Couvreur|Apprenti période 2|75.34|metier
+ELECTRICIEN_C|Électricien|Compagnon|86.02|metier
+ELECTRICIEN_A1|Électricien|Apprenti période 1|47.46|metier
+ELECTRICIEN_A2|Électricien|Apprenti période 2|54.98|metier
+ELECTRICIEN_A3|Électricien|Apprenti période 3|62.50|metier
+ELECTRICIEN_A4|Électricien|Apprenti période 4|73.79|metier
+FERBLANTIER_C|Ferblantier|Compagnon|85.12|metier
+FERBLANTIER_A1|Ferblantier|Apprenti période 1|54.14|metier
+FERBLANTIER_A2|Ferblantier|Apprenti période 2|61.66|metier
+FERBLANTIER_A3|Ferblantier|Apprenti période 3|72.93|metier
+ARMATURE_C|Poseur d'armature du béton|Compagnon|87.29|metier
+ARMATURE_A|Poseur d'armature du béton|Apprenti|74.83|metier
+FRIGORISTE_HALO|Frigoriste (halocarbure)|Compagnon|87.66|metier
+FRIGORISTE_C|Frigoriste|Compagnon|83.97|metier
+FRIGORISTE_A1|Frigoriste|Apprenti période 1|46.23|metier
+FRIGORISTE_A2|Frigoriste|Apprenti période 2|53.60|metier
+FRIGORISTE_A3|Frigoriste|Apprenti période 3|60.95|metier
+FRIGORISTE_A4|Frigoriste|Apprenti période 4|72.01|metier
+GRUTIER_A_C|Grutier classe A|Compagnon|83.77|metier
+GRUTIER_A_A1|Grutier classe A|Apprenti période 1|60.58|metier
+GRUTIER_A_A2|Grutier classe A|Apprenti période 2|71.72|metier
+GRUTIER_B_C|Grutier classe B|Compagnon|80.55|metier
+GRUTIER_B_A1|Grutier classe B|Apprenti période 1|58.34|metier
+GRUTIER_B_A2|Grutier classe B|Apprenti période 2|68.98|metier
+INSTALL_SECU_C|Installateur de systèmes de sécurité|Compagnon|70.45|metier
+INSTALL_SECU_A1|Installateur de systèmes de sécurité|Apprenti période 1|45.51|metier
+INSTALL_SECU_A2|Installateur de systèmes de sécurité|Apprenti période 2|51.52|metier
+INSTALL_SECU_A3|Installateur de systèmes de sécurité|Apprenti période 3|60.53|metier
+MECA_ASCENSEUR_C|Mécanicien d'ascenseurs|Compagnon|91.93|metier
+MECA_ASCENSEUR_A1|Mécanicien d'ascenseurs|Apprenti période 1|49.81|metier
+MECA_ASCENSEUR_A2|Mécanicien d'ascenseurs|Apprenti période 2|58.05|metier
+MECA_ASCENSEUR_A3|Mécanicien d'ascenseurs|Apprenti période 3|66.30|metier
+MECA_ASCENSEUR_A4|Mécanicien d'ascenseurs|Apprenti période 4|78.65|metier
+MECA_ASCENSEUR_A5|Mécanicien d'ascenseurs|Apprenti période 5|78.65|metier
+MECA_CHANTIER_C|Mécanicien de chantier|Compagnon|84.03|metier
+MECA_CHANTIER_A1|Mécanicien de chantier|Apprenti période 1|53.60|metier
+MECA_CHANTIER_A2|Mécanicien de chantier|Apprenti période 2|60.98|metier
+MECA_CHANTIER_A3|Mécanicien de chantier|Apprenti période 3|72.05|metier
+MECA_LOURDES_C|Mécanicien de machines lourdes|Compagnon|81.93|metier
+MECA_LOURDES_A1|Mécanicien de machines lourdes|Apprenti période 1|52.40|metier
+MECA_LOURDES_A2|Mécanicien de machines lourdes|Apprenti période 2|59.56|metier
+MECA_LOURDES_A3|Mécanicien de machines lourdes|Apprenti période 3|70.29|metier
+MECA_PROFEU_C|Mécanicien protection-incendie|Compagnon|84.15|metier
+MECA_PROFEU_A1|Mécanicien protection-incendie|Apprenti période 1|46.33|metier
+MECA_PROFEU_A2|Mécanicien protection-incendie|Apprenti période 2|53.71|metier
+MECA_PROFEU_A3|Mécanicien protection-incendie|Apprenti période 3|61.08|metier
+MECA_PROFEU_A4|Mécanicien protection-incendie|Apprenti période 4|72.16|metier
+MONTEUR_ASS_C|Monteur-assembleur|Compagnon|87.41|metier
+MONTEUR_ASS_A1|Monteur-assembleur|Apprenti période 1|55.69|metier
+MONTEUR_ASS_A2|Monteur-assembleur|Apprenti période 2|63.39|metier
+MONTEUR_ASS_A3|Monteur-assembleur|Apprenti période 3|74.95|metier
+VITRIER_C|Monteur mécanicien (vitrier)|Compagnon|84.27|metier
+VITRIER_A1|Monteur mécanicien (vitrier)|Apprenti période 1|53.60|metier
+VITRIER_A2|Monteur mécanicien (vitrier)|Apprenti période 2|61.04|metier
+VITRIER_A3|Monteur mécanicien (vitrier)|Apprenti période 3|72.20|metier
+OP_LOURD_AA_C|Opérateur d'équipement lourd classe AA|Compagnon|80.89|metier
+OP_LOURD_AA_A|Opérateur d'équipement lourd classe AA|Apprenti|69.42|metier
+OP_LOURD_A_C|Opérateur d'équipement lourd classe A|Compagnon|78.66|metier
+OP_LOURD_A_A|Opérateur d'équipement lourd classe A|Apprenti|67.51|metier
+OP_LOURD_B_C|Opérateur d'équipement lourd classe B|Compagnon|76.90|metier
+OP_LOURD_B_A|Opérateur d'équipement lourd classe B|Apprenti|66.02|metier
+OP_PELLES_AA_C|Opérateur de pelles mécaniques AA|Compagnon|85.70|metier
+OP_PELLES_AA_A|Opérateur de pelles mécaniques AA|Apprenti|73.48|metier
+OP_PELLES_A_C|Opérateur de pelles mécaniques A|Compagnon|83.37|metier
+OP_PELLES_A_A|Opérateur de pelles mécaniques A|Apprenti|71.51|metier
+OP_PELLES_B_C|Opérateur de pelles mécaniques B|Compagnon|81.03|metier
+OP_PELLES_B_A|Opérateur de pelles mécaniques B|Apprenti|69.52|metier
+OP_PBETON_42M_C|Opér. pompe à béton (mât de distribution) -42 M|Compagnon|78.51|metier
+OP_PBETON_42M_A|Opér. pompe à béton (mât de distribution) -42 M|Apprenti|67.27|metier
+OP_PBETON_42P_C|Opér. pompe à béton (mât de distribution) +42 M|Compagnon|81.51|metier
+OP_PBETON_42P_A|Opér. pompe à béton (mât de distribution) +42 M|Apprenti|69.82|metier
+OP_PBETON_50P_C|Opér. pompe à béton (mât de distribution) +50 M|Compagnon|83.00|metier
+OP_PBETON_50P_A|Opér. pompe à béton (mât de distribution) +50 M|Apprenti|71.07|metier
+OP_PBETON_58P_C|Opér. pompe à béton (mât de distribution) +58 M|Compagnon|86.01|metier
+OP_PBETON_58P_A|Opér. pompe à béton (mât de distribution) +58 M|Apprenti|73.63|metier
+OP_PBETON_63P_C|Opér. pompe à béton (mât de distribution) +63 M|Compagnon|91.10|metier
+OP_PBETON_63P_A|Opér. pompe à béton (mât de distribution) +63 M|Apprenti|77.97|metier
+PARQUETEUR_C|Parqueteur-sableur|Compagnon|84.64|metier
+PARQUETEUR_A1|Parqueteur-sableur|Apprenti période 1|53.87|metier
+PARQUETEUR_A2|Parqueteur-sableur|Apprenti période 2|61.33|metier
+PARQUETEUR_A3|Parqueteur-sableur|Apprenti période 3|72.54|metier
+PEINTRE_C|Peintre|Compagnon|80.26|metier
+PEINTRE_A1|Peintre|Apprenti période 1|51.14|metier
+PEINTRE_A2|Peintre|Apprenti période 2|58.18|metier
+PEINTRE_A3|Peintre|Apprenti période 3|68.77|metier
+PLATRIER_C|Plâtrier|Compagnon|81.80|metier
+PLATRIER_A1|Plâtrier|Apprenti période 1|52.20|metier
+PLATRIER_A2|Plâtrier|Apprenti période 2|59.36|metier
+PLATRIER_A3|Plâtrier|Apprenti période 3|70.13|metier
+POSEUR_SOUPLES_C|Poseur de revêtements souples|Compagnon|82.91|metier
+POSEUR_SOUPLES_A1|Poseur de revêtements souples|Apprenti période 1|52.80|metier
+POSEUR_SOUPLES_A2|Poseur de revêtements souples|Apprenti période 2|60.10|metier
+POSEUR_SOUPLES_A3|Poseur de revêtements souples|Apprenti période 3|71.04|metier
+POSEUR_SYSINT_C|Poseur de systèmes intérieurs|Compagnon|85.14|metier
+POSEUR_SYSINT_A1|Poseur de systèmes intérieurs|Apprenti période 1|54.37|metier
+POSEUR_SYSINT_A2|Poseur de systèmes intérieurs|Apprenti période 2|61.83|metier
+POSEUR_SYSINT_A3|Poseur de systèmes intérieurs|Apprenti période 3|73.03|metier
+TIREUR_PL_C|Tireur de joints (plâtrier)|Compagnon|80.50|metier
+TIREUR_PL_A1|Tireur de joints (plâtrier)|Apprenti période 1|51.39|metier
+TIREUR_PL_A2|Tireur de joints (plâtrier)|Apprenti période 2|58.46|metier
+TIREUR_PL_A3|Tireur de joints (plâtrier)|Apprenti période 3|69.03|metier
+TIREUR_PE_C|Tireur de joints (peintre)|Compagnon|80.45|metier
+TIREUR_PE_A1|Tireur de joints (peintre)|Apprenti période 1|51.26|metier
+TIREUR_PE_A2|Tireur de joints (peintre)|Apprenti période 2|58.32|metier
+TIREUR_PE_A3|Tireur de joints (peintre)|Apprenti période 3|68.92|metier
+TUYAUTEUR_C|Tuyauteur|Compagnon|84.40|metier
+TUYAUTEUR_A1|Tuyauteur|Apprenti période 1|46.60|metier
+TUYAUTEUR_A2|Tuyauteur|Apprenti période 2|53.98|metier
+TUYAUTEUR_A3|Tuyauteur|Apprenti période 3|61.34|metier
+TUYAUTEUR_A4|Tuyauteur|Apprenti période 4|72.41|metier
+CHEF_EQUIPE_CHARP|Chef d'équipe (charpentier-menuisier)|Chef d'équipe|90.60|metier
+CHEF_GROUPE_CHARP|Chef de groupe (charpentier-menuisier)|Chef de groupe|92.09|metier
+OCC_CHAUFFEUR_VAPEUR|Chauffeur de chaudière à vapeur|NULL|69.45|occupation
+OCC_CHAUFFEUR_4|Chauffeur classe IV|NULL|62.81|occupation
+OCC_COMMIS|Commis|NULL|51.62|occupation
+OCC_COND_CAMION_AA|Conducteur de camion classe AA|NULL|73.60|occupation
+OCC_COND_CAMION_A|Conducteur de camion classe A|NULL|71.33|occupation
+OCC_COND_CAMION_B|Conducteur de camion classe B|NULL|70.26|occupation
+OCC_COND_CAMION_C|Conducteur de camion classe C|NULL|69.47|occupation
+OCC_GARDIEN|Gardien|NULL|41.16|occupation
+OCC_HOMME_SERVICE_ML|Homme de service sur machines lourdes|NULL|67.85|occupation
+OCC_MAGASINIER|Magasinier|NULL|59.51|occupation
+OCC_MANOEUVRE_JOURN|Manœuvre (journalier)|NULL|70.05|occupation
+OCC_MANOEUVRE_PIPE|Manœuvre (pipeline)|NULL|69.89|occupation
+OCC_MANOEUVRE_COUVERT|Manœuvre (travaux de couverture)|NULL|71.35|occupation
+OCC_MANOEUVRE_MACO|Manœuvre (maçonnerie)|NULL|73.34|occupation
+OCC_MANOEUVRE_DECON|Manœuvre en décontamination|NULL|77.55|occupation
+OCC_MANOEUVRE_SPEC|Manœuvre spécialisé|NULL|71.02|occupation
+OCC_MANOEUVRE_CARR|Manœuvre spécialisé (carreleur)|NULL|72.38|occupation
+OCC_MANOEUVRE_COUV|Manœuvre spécialisé (couverture)|NULL|72.32|occupation
+OCC_LEVAGE_A|Opér. d'appareils de levage classe A|NULL|75.29|occupation
+OCC_LEVAGE_B|Opér. d'appareils de levage classe B|NULL|72.59|occupation
+OCC_GENERATRICE|Opérateur de génératrice|NULL|71.36|occupation
+OCC_POMPES_COMP|Opér. de pompes et compresseurs|NULL|72.83|occupation
+OCC_POMPES_LIGNE|Opér. de pompes et compr. (pompe à ligne)|NULL|72.83|occupation
+OCC_USINES|Opérateur d'usines fixes ou mobiles|NULL|74.15|occupation
+OCC_PNEUS_DEBOSS|Préposé aux pneus et débosselage de machines lourdes|NULL|75.19|occupation
+OCC_SOUDEUR|Soudeur|NULL|79.05|occupation
+OCC_SOUDEUR_PIPELINE|Soudeur de pipeline et de distribution|NULL|84.25|occupation
+OCC_SOUDEUR_TUYAU|Soudeur en tuyauterie|NULL|84.40|occupation
+OCC_GASFITTER|Spécialiste en branchement d'immeubles (gas fitter)|NULL|83.31|occupation
+NS_AGENT_SST|Agent de prévention SST|NULL|107.28|non_syndique
+NS_ESTIMATEUR|Estimateur|NULL|149.55|non_syndique
+NS_GERANT_PROJET|Gérant de projet|NULL|139.32|non_syndique
+NS_INGENIEUR|Ingénieur|NULL|150.19|non_syndique
+NS_PERS_AUX|Personnel auxiliaire|NULL|56.10|non_syndique
+NS_SURINTENDANT|Surintendant de chantier|NULL|140.68|non_syndique
+NS_TECH_IMMO_JR|Technicien en immotique (junior)|NULL|91.75|non_syndique
+NS_TECH_IMMO|Technicien en immotique|NULL|109.04|non_syndique
+NS_TECH_ADMIN|Technicien en administration|NULL|100.44|non_syndique

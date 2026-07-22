@@ -199,6 +199,19 @@ def toggle_project_verrou(jwt_token: str, hub_project_id: int, lock: bool) -> di
     return data or {}
 
 
+def patch_project_detention(jwt_token: str, hub_project_id: int, action: str) -> dict:
+    """Détention projet (étape 1) — le hub est la SOURCE UNIQUE :
+    PATCH /api/projects/{id}/detention. `action` ∈ prendre|battement|rendre|forcer.
+
+    Retourne {detenteur_id, detenteur_nom, detenu_depuis, derniere_activite,
+    a_moi, reprise_par_un_autre}. Lève HubServiceError sur non-2xx — notamment
+    409 « Projet détenu par X », que l'appelant DOIT propager tel quel : le nom
+    du détenteur est l'information utile, pas le code."""
+    path = f"/api/projects/{int(hub_project_id)}/detention"
+    raw = _hub_request("PATCH", path, jwt_token, json_body={"action": str(action)})
+    return raw or {}
+
+
 def soft_delete_project(jwt_token: str, project_id: int) -> None:
     """Soft-delete un projet Ad HUB via DELETE /api/projects/{id}.
 
