@@ -1828,11 +1828,23 @@ def register_ad_budget_routes(get_conn):
                 proj = cur.fetchone()
                 if not proj:
                     raise HTTPException(status_code=404, detail="Projet introuvable")
-                if proj["user_id"] != user["id"]:
-                    raise HTTPException(
-                        status_code=403,
-                        detail="Ce projet ne vous appartient pas",
-                    )
+                # ── PORTE FERMÉE (mode=existing uniquement) ──────────────────
+                # Ce chemin AJOUTE DES LIGNES à un budget qui existe déjà. Le
+                # contrôle en place ne vérifiait que la PROPRIÉTÉ du projet :
+                # un import Ad VIU pouvait donc écrire dans un budget qu'un
+                # collègue détient — exactement le conflit que le modèle
+                # « un détient, les autres lisent » existe pour éviter. La
+                # détention protège le PROJET, pas l'interface qui l'attaque.
+                #
+                # _load_and_authorize_projet applique d'un coup les trois
+                # contrôles et les garde alignés avec les 17 autres chemins
+                # d'écriture : périmètre (org/propriétaire/superviseur), gel
+                # éditorial (is_verrouille) et détention (courriel normalisé).
+                # Dupliquer ces règles ici les ferait diverger.
+                #
+                # ⚠ mode=new N'EST PAS gaté, et c'est volontaire : le projet
+                # n'existe pas encore, il ne peut être détenu par personne.
+                _load_and_authorize_projet(get_conn, int(project_id_in), user, "write")
 
             project_id = proj["id"]
 
