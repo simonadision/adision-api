@@ -42,3 +42,13 @@ COMMENT ON COLUMN ad_budget.projets.detenu_depuis IS
     'MIROIR du debut de detention.';
 COMMENT ON COLUMN ad_budget.projets.derniere_activite IS
     'MIROIR du dernier battement. Sert au calcul d''expiration (15 min) a la lecture.';
+
+-- ── CORRECTIF 2026-07-22 : miroir de detenteur_email ────────────────────────
+-- C'est CETTE colonne que lit le gate d'écriture, et non detenteur_id — voir
+-- l'explication complète dans la migration 111 du hub. Le miroir porte le même
+-- type et la même normalisation que la source.
+ALTER TABLE ad_budget.projets
+    ADD COLUMN IF NOT EXISTS detenteur_email TEXT NULL;
+
+COMMENT ON COLUMN ad_budget.projets.detenteur_email IS
+    'MIROIR de la CLE de detention. Compare a user[email] par _load_and_authorize_projet.';

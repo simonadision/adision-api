@@ -1024,7 +1024,7 @@ def _load_and_authorize_projet(get_conn, projet_id, user, mode, check_lock=True)
         cur = conn.cursor(row_factory=dict_row)
         cur.execute(
             "SELECT user_id, organization_id, is_verrouille, detenteur_id, "
-            "detenteur_nom, derniere_activite FROM ad_budget.projets "
+            "detenteur_nom, detenteur_email, derniere_activite FROM ad_budget.projets "
             "WHERE id = %s",
             (projet_id,),
         )
@@ -1082,10 +1082,15 @@ def _load_and_authorize_projet(get_conn, projet_id, user, mode, check_lock=True)
     # et AFFICHÉE (la présence fonctionne, le nom est là, le coup de fil aussi) ;
     # seule la contrainte serveur est suspendue. Mieux vaut un modèle
     # incomplet et annoncé qu'un modèle qui empêche tout le monde de travailler.
-    _DETENTION_GATE_ACTIF = False
-    if _DETENTION_GATE_ACTIF and check_lock and mode == "write" and projet and projet.get("detenteur_id") is not None:
-        moi = user.get("id") if isinstance(user, dict) else None
-        if projet.get("detenteur_id") != moi:
+    # RÉACTIVÉ le 2026-07-22 — la comparaison porte désormais sur le COURRIEL.
+    # detenteur_id est inutilisable ici : le hub y écrit l'id app_central, ce
+    # gate lit l'id local Ad BUD, et les deux ne sont jamais égaux (le détenteur
+    # se voyait refuser ses propres écritures). Le courriel est la seule clé que
+    # les deux services partagent. Normalisé des deux côtés (trim + minuscules).
+    detenteur = (projet or {}).get("detenteur_email") if projet else None
+    if check_lock and mode == "write" and detenteur:
+        moi = ((user.get("email") if isinstance(user, dict) else None) or "").strip().lower()
+        if detenteur.strip().lower() != moi:
             derniere = projet.get("derniere_activite")
             encore_actif = (
                 derniere is not None
@@ -1095,7 +1100,7 @@ def _load_and_authorize_projet(get_conn, projet_id, user, mode, check_lock=True)
                 raise HTTPException(
                     status_code=409,
                     detail=("Projet détenu par "
-                            + str(projet.get("detenteur_nom") or "un autre utilisateur")
+                            + str(projet.get("detenteur_nom") or detenteur)
                             + " — demandez-lui de le fermer, ou reprenez-le."),
                 )
     # Retourne le projet autorisé (user_id, organization_id, is_verrouille) — les
@@ -3128,9 +3133,10 @@ def register_ad_budget_routes(get_conn):
         try:
             cur.execute(
                 "UPDATE ad_budget.projets SET detenteur_id = %s, detenteur_nom = %s, "
-                "detenu_depuis = %s, derniere_activite = %s, updated_at = NOW() "
-                "WHERE id = %s",
+                "detenteur_email = %s, detenu_depuis = %s, derniere_activite = %s, "
+                "updated_at = NOW() WHERE id = %s",
                 (resultat.get("detenteur_id"), resultat.get("detenteur_nom"),
+                 resultat.get("detenteur_email"),
                  resultat.get("detenu_depuis"), resultat.get("derniere_activite"), projet_id),
             )
             conn.commit()
