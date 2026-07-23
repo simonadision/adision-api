@@ -725,12 +725,25 @@ def _apply_master_template(
     # Même logique de résolution que _resolve_taux_default (taux_horaires_api)
     # — garder synchronisé. ad_budget_prix_moyens est aliasé `pm` : le JOIN
     # sur taux_horaires (qui a aussi une colonne `id`) rendrait `id` ambigu.
+    # ⚠ AUCUNE VALEUR MONÉTAIRE NE VIENT DU VESTIGE (décision 2026-07, option 2).
+    # ad_budget_prix_moyens est figée depuis le 5 mai 2026 : ses prix n'ont vu
+    # passer ni le flywheel, ni les taux courants, ni l'escompte client. La
+    # STRUCTURE (section, description, unité) garde sa valeur — un estimateur qui
+    # reprend un takeoff doit retrouver les divisions angle-mort qu'Ad VIU ne lit
+    # pas. Le PRIX, lui, mentirait : `prix_unitaire` est donc seedé à 0.
+    #
+    # Le seul champ monétaire issu du vestige était pm.prix_unitaire. `taux_horaire`
+    # vient de `taux_horaires` (t.taux_col17, taux ACTIF du métier) — source vivante,
+    # identique à l'auto-fill D5 d'une ligne manuelle, donc conservé. qte et
+    # ajustement_pct sont déjà des littéraux 0. Résultat : une ligne seedée se
+    # comporte EXACTEMENT comme une ligne manuelle vide (qte=0, prix=0 → sous-total
+    # matériaux 0 ; heures=0 → MO 0 ; ST 0 → total 0), sans cas particulier.
     sql = (
         "INSERT INTO ad_budget.budget_lignes "
         "(projet_id, source_item_id, section, description, unite, "
         " prix_unitaire, qte, ajustement_pct, note, actif, taux_horaire) "
         "SELECT %s, pm.id, pm.section, pm.description, "
-        "       COALESCE(pm.unite, 'global'), COALESCE(pm.prix_unitaire, 0), "
+        "       COALESCE(pm.unite, 'global'), 0, "  # prix_unitaire = 0 (jamais du vestige)
         "       0, 0, COALESCE(pm.note, ''), TRUE, COALESCE(t.taux_col17, 0) "
         "FROM ad_budget.ad_budget_prix_moyens pm "
         "LEFT JOIN ad_budget.csi_division_default_metier dm "
