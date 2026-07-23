@@ -1628,6 +1628,15 @@ def register_ad_budget_routes(get_conn):
         hub_ids = [r.get("ad_hub_project_id") for r in rows if r.get("ad_hub_project_id") is not None]
         meta = hub_service.fetch_revision_meta(jwt_token, hub_ids) if jwt_token else {}
         for r in rows:
+            # est_proprietaire : calculé ICI, dans l'espace ad_budget, le SEUL où
+            # p.user_id (propriétaire) et user["id"] (JWT provisionné) coexistent.
+            # Même comparaison que _authorize_projet::is_owner. Le front N'A PAS de
+            # source sûre : son user.id vient de /auth/me (espace HUB), distinct de
+            # p.user_id (ad_budget) — les comparer serait le piège d'ids (hub 758 !=
+            # Ad BUD 278). On lui renvoie donc un booléen déjà tranché.
+            r["est_proprietaire"] = (
+                r.get("user_id") is not None and r.get("user_id") == user.get("id")
+            )
             hid = r.get("ad_hub_project_id")
             m = meta.get(str(hid)) if hid is not None else None
             if m:
