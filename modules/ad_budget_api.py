@@ -1320,27 +1320,6 @@ def register_ad_budget_routes(get_conn):
         conn.close()
         return rows
 
-    @router.post("/item")
-    def create_item(data: dict):
-        conn = get_conn()
-        cur = conn.cursor(row_factory=dict_row)
-        cur.execute("""
-            INSERT INTO ad_budget.ad_budget_prix_moyens
-            (section, description, unite, prix_unitaire)
-            VALUES (%s, %s, %s, %s)
-            RETURNING id
-        """, (
-            data["section"],
-            data["description"],
-            data["unite"],
-            data["prix_unitaire"]
-        ))
-        row = cur.fetchone()
-        conn.commit()
-        cur.close()
-        conn.close()
-        return {"status": "created", "id": row["id"]}
-
     @router.get("/search")
     def search_budget(q: str = ""):
         conn = get_conn()
@@ -1383,55 +1362,6 @@ def register_ad_budget_routes(get_conn):
         if not row:
             raise HTTPException(status_code=404, detail="Item not found")
         return row
-
-    @router.put("/item/{item_id}")
-    def update_item(item_id: int, data: dict):
-        conn = get_conn()
-        cur = conn.cursor()
-        fields = []
-        values = []
-        for field in ["section", "description", "unite", "prix_unitaire", "", "division", "note"]:
-            if field in data:
-                fields.append(f"{field} = %s")
-                values.append(data[field])
-        if not fields:
-            cur.close()
-            conn.close()
-            return {"error": "No fields to update"}
-        sql = f"UPDATE ad_budget.ad_budget_prix_moyens SET {', '.join(fields)} WHERE id = %s"
-        values.append(item_id)
-        cur.execute(sql, values)
-        conn.commit()
-        cur.close()
-        conn.close()
-        return {"status": "updated"}
-
-    @router.delete("/item/{item_id}")
-    def delete_item(item_id: int):
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("DELETE FROM ad_budget.ad_budget_prix_moyens WHERE id = %s", (item_id,))
-        conn.commit()
-        cur.close()
-        conn.close()
-        return {"status": "deleted"}
-
-    @router.delete("/items")
-    def delete_items(data: dict):
-        ids = data.get("ids", [])
-        if not ids:
-            return {"error": "No IDs provided"}
-        conn = get_conn()
-        cur = conn.cursor()
-        placeholders = ','.join(['%s'] * len(ids))
-        cur.execute(f"""
-            DELETE FROM ad_budget.ad_budget_prix_moyens WHERE id IN ({placeholders})
-        """, ids)
-        deleted_count = cur.rowcount
-        conn.commit()
-        cur.close()
-        conn.close()
-        return {"status": "deleted", "count": deleted_count}
 
     # ══════════════════════════════════════════════════════════
     # ADMIN — BD MAÎTRE (CRUD gardé par rôle admin via JWT)
