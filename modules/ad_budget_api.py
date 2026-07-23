@@ -956,6 +956,35 @@ def _resolve_report_logo_base64(projet, ident, jwt_token):
     return chosen or ""
 
 
+def _projets_scope_where(user, scope):
+    """WHERE + params de la LISTE de projets, selon l'onglet demandé.
+
+    scope='mine' : mes projets — p.user_id = jwt.id (espace ad_budget).
+    scope='org'  : TOUS ceux de l'ORGANISATION ACTIVE, JAMAIS au-delà
+                   (p.organization_id = org du JWT). Pas d'org active -> repli
+                   sur les siens (l'onglet "tous" ne peut rien montrer d'autre).
+    scope absent : comportement HISTORIQUE (compat des appelants legacy) —
+                   super_admin voit tout, org_admin voit org, sinon les siens.
+
+    org comparée en UUID (même espace des deux côtés). user_id en espace
+    ad_budget — jamais mêlé à l'id hub (piège d'ids : user_id 61 != id hub 582).
+    """
+    uid = user["id"]
+    org = user.get("organization_id")
+    if scope == "mine":
+        return ["p.user_id = %s"], [uid]
+    if scope == "org":
+        if org is None:
+            return ["p.user_id = %s"], [uid]
+        return ["p.organization_id = %s"], [org]
+    # scope absent -> compat historique
+    if user.get("platform_role") == "super_admin":
+        return ["TRUE"], []
+    if user.get("org_role") == "admin" and org is not None:
+        return ["(p.user_id = %s OR p.organization_id = %s)"], [uid, org]
+    return ["p.user_id = %s"], [uid]
+
+
 def _authorize_projet(projet, user, mode):
     """Contrôle d'accès centralisé à un projet Ad BUD (PHASE 3A multi-tenant).
 
@@ -965,12 +994,15 @@ def _authorize_projet(projet, user, mode):
              org_role, organization_id.
     mode   : 'read' ou 'write'.
 
-    LECTURE  : propriétaire OU super_admin OU superviseur.
-    ÉCRITURE : propriétaire OU super_admin (jamais superviseur — un
-               org_role='admin' supervise en lecture seule).
+    LECTURE  : propriétaire OU super_admin OU MEMBRE de l'organisation du projet.
+    ÉCRITURE : idem — mais GOUVERNÉE PAR LA DÉTENTION en aval
+               (_load_and_authorize_projet). Un membre qui ne détient pas le
+               projet est refusé par le 409 de détention, pas ici. C'est le
+               modèle verrou+miroir : un seul détient et écrit, les autres
+               consultent. « Lire n'est pas modifier » : ouvrir un projet de
+               collègue le montre en consultation ; éditer exige la détention.
     Lève 404 si le projet est inexistant OU hors du périmètre visible (on ne
-    révèle pas l'existence d'un projet d'une autre organisation). Lève 403 si
-    le projet est visible mais l'écriture refusée (superviseur en mode 'write').
+    révèle pas l'existence d'un projet d'une AUTRE organisation).
     """
     if projet is None:
         raise HTTPException(status_code=404, detail="Projet introuvable")
@@ -978,35 +1010,34 @@ def _authorize_projet(projet, user, mode):
     is_owner = projet["user_id"] == user["id"]
     is_super_admin = user.get("platform_role") == "super_admin"
 
-    # Superviseur : org_role='admin' ET les DEUX organization_id non-NULL et
-    # égaux. La double non-nullité est CRITIQUE — sans elle, NULL == NULL
-    # ferait tout matcher (aujourd'hui presque tous les organization_id sont
-    # NULL).
+    # MEMBRE de l'organisation du projet : les DEUX organization_id non-NULL et
+    # ÉGAUX. La double non-nullité est CRITIQUE — sans elle, NULL == NULL
+    # ferait tout matcher.
+    # ⚠ Le vieux commentaire « aujourd'hui presque tous les organization_id sont
+    # NULL » est PÉRIMÉ et MESURÉ FAUX (2026-07 : peuplé sur 12/12 projets). Il
+    # induisait en erreur — retiré.
     # Comparaison via str() : projet_org est un uuid.UUID (psycopg3 adapte la
-    # colonne UUID), user_org est une str (le JWT sérialise l'UUID en chaîne) —
-    # un `uuid.UUID == str` renvoie toujours False. On normalise les deux côtés.
+    # colonne UUID), user_org une str (le JWT sérialise l'UUID) — un
+    # `uuid.UUID == str` renvoie toujours False. On normalise les deux côtés.
+    # (org = même espace des deux côtés ; on ne mêle JAMAIS user_id ad_budget et
+    #  id hub — piège d'ids attrapé quatre fois : user_id 61 != id hub 582.)
     user_org = user.get("organization_id")
     projet_org = projet.get("organization_id")
-    is_supervisor = (
-        user.get("org_role") == "admin"
-        and user_org is not None
+    is_member = (
+        user_org is not None
         and projet_org is not None
         and str(projet_org) == str(user_org)
     )
 
     if is_owner or is_super_admin:
         return  # accès total (lecture + écriture)
-    if mode == "read" and is_supervisor:
-        return  # superviseur : lecture seule
-    if is_supervisor:
-        # mode 'write' : projet VISIBLE mais non modifiable -> 403.
-        raise HTTPException(
-            status_code=403,
-            detail="Lecture seule : vous ne pouvez pas modifier le projet "
-                   "d'un autre utilisateur de votre organisation",
-        )
-    # Ni propriétaire, ni super_admin, ni superviseur du périmètre : projet
-    # hors périmètre -> 404 (ne pas révéler son existence).
+    if is_member:
+        # Lecture ET écriture passent ICI. L'écriture réelle est tranchée EN AVAL
+        # par la détention (409 si un autre détient). Consultation par défaut,
+        # édition après reprise du verrou.
+        return
+    # Ni propriétaire, ni super_admin, ni membre de l'org du projet -> 404
+    # (ne pas révéler l'existence d'un projet d'une autre organisation).
     raise HTTPException(status_code=404, detail="Projet introuvable")
 
 
@@ -1547,6 +1578,7 @@ def register_ad_budget_routes(get_conn):
     @router.get("/projets")
     def get_projets(
         user=Depends(jwt_user),
+        scope: Optional[str] = None,
         statut: Optional[str] = None,
         type_batiment: Optional[str] = None,
         region: Optional[str] = None,
@@ -1555,26 +1587,12 @@ def register_ad_budget_routes(get_conn):
         authorization: Optional[str] = Header(None),
         session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
     ):
-        # Toujours filtrer sur le user du JWT — l'éventuel ?user_id= en query
-        # est ignoré (un user ne voit que ses propres projets).
-        # Sprint A : nouveaux query params pour la liste filtrée. Par défaut,
-        # les projets 'archive' sont masqués (sauf si include_archived=true ou
-        # si on demande explicitement statut=archive).
-        # PHASE 3A — périmètre de visibilité :
-        #   super_admin                       -> tous les projets ;
-        #   org_role='admin' + organization_id -> ses projets + ceux de son
-        #       organisation (vue superviseur, lecture seule) ;
-        #   sinon                             -> ses propres projets (legacy).
-        if user.get("platform_role") == "super_admin":
-            where = ["TRUE"]
-            params = []
-        elif (user.get("org_role") == "admin"
-              and user.get("organization_id") is not None):
-            where = ["(p.user_id = %s OR p.organization_id = %s)"]
-            params = [user["id"], user["organization_id"]]
-        else:
-            where = ["p.user_id = %s"]
-            params = [user["id"]]
+        # PÉRIMÈTRE — DEUX ONGLETS (2026-07) :
+        #   scope='mine' -> mes projets ; scope='org' -> ceux de l'ORG ACTIVE.
+        # Le `?user_id=` que le front envoyait était IGNORÉ (vestige trompeur) :
+        # remplacé par ce `scope` explicite. Voir _projets_scope_where.
+        # Les projets d'une AUTRE organisation ne sont visibles dans AUCUN onglet.
+        where, params = _projets_scope_where(user, scope)
         # Statut = PROPRE Ad BUD (cycle de vie local) -> filtre LOCAL, aucun appel hub.
         if statut:
             where.append("p.statut = %s")
