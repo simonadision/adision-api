@@ -48,3 +48,7 @@ Thumbs.db
 # Scripts perso avec secrets en clair (TODO: refactorer pour utiliser .env)
 import_railway.py
 import_budget.py
+
+# secrets locaux (scrub Chantier 1)
+.env.local.ps1
+!.env.local.ps1.example

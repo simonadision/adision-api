@@ -1,9 +1,10 @@
-# Lancement local Ad BUD API sur port 8000, BD locale adision (schéma ad_budget).
-# api.py lit DATABASE_URL via os.environ ; on l'injecte ici, pas via .env
-# (le .env Railway prod ne doit pas écraser ce override).
+# Lancement local Ad BUD API sur port 8000, BD locale adision (schema ad_budget).
+# Secrets locaux dans .env.local.ps1 (NON suivi, cf .gitignore) ; copier depuis .env.local.ps1.example.
 Set-Location -Path $PSScriptRoot
-$env:DATABASE_URL = "postgresql://postgres:6268605Ss@localhost:5432/adision"
-# JWT_SECRET identique à celui d'Ad MAT / Ad App pour SSO cross-app.
-# api.py ne charge pas dotenv, on l'injecte ici.
-$env:JWT_SECRET = "wCwMbfSFxaErBjsdazQZsHWaqeeL2HYRWo9Dl0I+XqM="
-& "$PSScriptRoot\venv\Scripts\python.exe" -m uvicorn api:app --reload --port 8000
+$localEnv = Join-Path $PSScriptRoot ".env.local.ps1"
+if (-not (Test-Path $localEnv)) {
+    Write-Error "Manque .env.local.ps1 (copier .env.local.ps1.example). Aucun secret en dur ici."
+    exit 1
+}
+. $localEnv
+& "$PSScriptRoot/venv/Scripts/python.exe" -m uvicorn api:app --reload --port 8000

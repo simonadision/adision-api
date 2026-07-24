@@ -18,7 +18,12 @@ from modules.auth_jwt import make_jwt_deps
 import os
 import secrets
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:6268605Ss@localhost:5432/Adision")
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL absente : variable d'environnement requise "
+        "(fallback en dur retire — Chantier 1, hygiene des secrets)."
+    )
 
 
 def _sqlalchemy_url(url: str) -> str:
