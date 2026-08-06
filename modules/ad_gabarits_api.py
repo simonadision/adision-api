@@ -223,6 +223,7 @@ def register_ad_gabarits_routes(get_conn):
             cur.execute(
                 """
                 SELECT g.id, g.nom, g.description, g.created_at, g.updated_at,
+                       g.created_by, g.created_by_email,
                        COUNT(DISTINCT s.id)  AS nb_sections,
                        COUNT(DISTINCT ss.id) AS nb_sous_sections,
                        COUNT(l.id)           AS nb_lignes,
@@ -282,14 +283,19 @@ def register_ad_gabarits_routes(get_conn):
             raise HTTPException(status_code=404, detail="Gabarit introuvable")
         return g
 
-    def _copy_gabarit_to_org(cur, master, target_org, push_id):
+    def _copy_gabarit_to_org(cur, master, target_org, push_id, by_email=None):
         """Deep-copy d'un gabarit master vers target_org (copie indépendante,
-        traçable). Réutilise _full_gabarit (lecture arbre) + _replace_structure."""
+        traçable). Réutilise _full_gabarit (lecture arbre) + _replace_structure.
+        L'auteur affiché chez la cible est CELUI QUI POUSSE (super_admin) : la
+        copie n'a pas d'auteur dans l'org cliente, et laisser « — » cacherait
+        d'où elle vient."""
         cur.execute(
             "INSERT INTO ad_budget.gabarits "
-            "(organization_id, nom, description, est_master, source_master_gabarit_id, push_id) "
-            "VALUES (%s, %s, %s, FALSE, %s, %s) RETURNING id",
-            (target_org, master["nom"], master.get("description"), master["id"], push_id))
+            "(organization_id, nom, description, est_master, source_master_gabarit_id, push_id, "
+            " created_by_email) "
+            "VALUES (%s, %s, %s, FALSE, %s, %s, %s) RETURNING id",
+            (target_org, master["nom"], master.get("description"), master["id"], push_id,
+             by_email))
         new_id = cur.fetchone()["id"]
         _replace_structure(cur, new_id, _full_gabarit(cur, master["id"]))
         return new_id
@@ -371,7 +377,8 @@ def register_ad_gabarits_routes(get_conn):
                         carried_default_users = [r["user_id"] for r in cur.fetchall()]
                         cur.execute("DELETE FROM ad_budget.gabarits WHERE id = ANY(%s)", (existing,))
                         replaced = len(existing)
-                    new_id = _copy_gabarit_to_org(cur, master, target_org, push_id)
+                    new_id = _copy_gabarit_to_org(cur, master, target_org, push_id,
+                                                  by_email=su.get("email"))
                     new_ids.append(new_id)
                     inserted = 1
                     # Le défaut survit au re-push : on le re-pointe vers la copie
@@ -509,9 +516,11 @@ def register_ad_gabarits_routes(get_conn):
         cur = conn.cursor(row_factory=dict_row)
         try:
             cur.execute(
-                "INSERT INTO ad_budget.gabarits (organization_id, nom, description) "
-                "VALUES (%s, %s, %s) RETURNING id",
-                (org, nom, (data.get("description") or "").strip() or None),
+                "INSERT INTO ad_budget.gabarits "
+                "(organization_id, nom, description, created_by, created_by_email) "
+                "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                (org, nom, (data.get("description") or "").strip() or None,
+                 user.get("id"), user.get("email")),
             )
             gid = cur.fetchone()["id"]
             if data.get("sections"):
@@ -564,6 +573,46 @@ def register_ad_gabarits_routes(get_conn):
             cur.close()
             conn.close()
 
+    @router.patch("/gabarits/{gabarit_id}")
+    def rename_gabarit(gabarit_id: int, data: dict, user=Depends(jwt_user)):
+        """RENOMMER (et/ou re-décrire) SANS toucher à la structure.
+
+        Le PUT remplace tout l'arbre dès que la clé `sections` est présente ;
+        renommer depuis la bibliothèque, où l'arbre n'est PAS chargé, passerait
+        donc par un PUT dont on devrait deviner le contenu. Ce PATCH ne touche
+        QUE l'en-tête. Champs omis = inchangés (vrai PATCH partiel : `description`
+        absente ne l'efface pas, contrairement au PUT)."""
+        org = _org(user)
+        sets, params = [], []
+        if "nom" in data:
+            nom = (data.get("nom") or "").strip()
+            if not nom:
+                raise HTTPException(status_code=400, detail="Nom du gabarit requis")
+            sets.append("nom=%s")
+            params.append(nom[:200])
+        if "description" in data:
+            sets.append("description=%s")
+            params.append((data.get("description") or "").strip() or None)
+        if not sets:
+            raise HTTPException(status_code=400, detail="Rien à modifier (nom et/ou description)")
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            _load_gabarit_scoped(cur, gabarit_id, org)  # scope strict → 404 hors org
+            cur.execute(
+                f"UPDATE ad_budget.gabarits SET {', '.join(sets)}, updated_at=NOW() "
+                "WHERE id=%s AND organization_id=%s",
+                (*params, gabarit_id, org),
+            )
+            conn.commit()
+            return {"status": "updated"}
+        except HTTPException:
+            conn.rollback()
+            raise
+        finally:
+            cur.close()
+            conn.close()
+
     @router.delete("/gabarits/{gabarit_id}")
     def delete_gabarit(gabarit_id: int, user=Depends(jwt_user)):
         org = _org(user)
@@ -592,10 +641,14 @@ def register_ad_gabarits_routes(get_conn):
         try:
             g = _load_gabarit_scoped(cur, gabarit_id, org)
             sections = _full_gabarit(cur, gabarit_id)
+            # L'auteur de la COPIE est celui qui duplique — pas l'auteur de
+            # l'original (la copie est un gabarit neuf, indépendant).
             cur.execute(
-                "INSERT INTO ad_budget.gabarits (organization_id, nom, description) "
-                "VALUES (%s, %s, %s) RETURNING id",
-                (org, (g["nom"] + " (copie)")[:200], g["description"]),
+                "INSERT INTO ad_budget.gabarits "
+                "(organization_id, nom, description, created_by, created_by_email) "
+                "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                (org, (g["nom"] + " (copie)")[:200], g["description"],
+                 user.get("id"), user.get("email")),
             )
             gid = cur.fetchone()["id"]
             _replace_structure(cur, gid, sections)
@@ -686,9 +739,11 @@ def register_ad_gabarits_routes(get_conn):
                 for i, dc in enumerate(div_order)
             ]
             cur.execute(
-                "INSERT INTO ad_budget.gabarits (organization_id, nom, description) "
-                "VALUES (%s, %s, %s) RETURNING id",
-                (org, nom, (data.get("description") or "").strip() or None),
+                "INSERT INTO ad_budget.gabarits "
+                "(organization_id, nom, description, created_by, created_by_email) "
+                "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                (org, nom, (data.get("description") or "").strip() or None,
+                 user.get("id"), user.get("email")),
             )
             gid = cur.fetchone()["id"]
             _replace_structure(cur, gid, structure)
