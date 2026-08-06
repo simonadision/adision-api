@@ -34,6 +34,17 @@ Lib/
 Include/
 Scripts/
 pyvenv.cfg
+
+# ⚠ `Scripts/` ci-dessus vise le venv Windows — mais git tourne ici avec
+# core.ignorecase=true, donc il attrapait AUSSI `scripts/`, le dossier des
+# scripts de validation du projet. Resultat : 29 scripts de preuve invisibles,
+# dont ceux que des messages de commit citaient comme preuve. Un « 8/8 PASS »
+# qui renvoie a un fichier absent du depot ne prouve rien a personne d'autre.
+# On re-inclut le dossier, on re-ignore son contenu, puis on garde les seuls
+# validate_* — ceux que CLAUDE.md exige avant un livre.
+!scripts/
+scripts/*
+!scripts/validate_*.py
 scraper/Lib/
 scraper/Include/
 scraper/Scripts/
