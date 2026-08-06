@@ -310,6 +310,20 @@ def register_ad_gabarits_routes(get_conn):
                 detail = r.json().get("detail") or f"HTTP {r.status_code}"
             except Exception:  # noqa: BLE001
                 detail = f"HTTP {r.status_code}"
+            # UNE PANNE RELAYÉE DOIT LAISSER UNE TRACE ICI, PAS SEULEMENT
+            # LÀ-BAS. Un 5xx d'Ad EST remonté en HTTPException n'est plus une
+            # exception non rattrapée : le filet de api.py ne le voit pas, et
+            # les journaux d'Ad BUD n'affichaient qu'un « 500 Internal Server
+            # Error » nu (constaté le 6 août 2026 — il a fallu aller lire les
+            # journaux de l'AUTRE service pour trouver la cause). On nomme donc
+            # ici le service, la route et ce qu'il a répondu. Les 4xx sont des
+            # refus normaux et attendus — verrou, division tenue, code inconnu ;
+            # les journaliser en erreur noierait les vraies pannes.
+            if r.status_code >= 500:
+                logger.error(
+                    "titres CSI : Ad EST a répondu %s sur %s %s (params=%s) — %s",
+                    r.status_code, method, chemin, params, detail,
+                )
             raise HTTPException(status_code=r.status_code, detail=detail)
         return r.json()
 

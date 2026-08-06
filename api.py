@@ -1,5 +1,24 @@
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+# ── JOURNALISATION — POSÉE ICI, PAS SUPPOSÉE ─────────────────────────────────
+# Les modules écrivent avec `logging.getLogger(__name__)`. Uvicorn ne configure
+# QUE ses propres loggers (`uvicorn`, `uvicorn.error`, `uvicorn.access`) : le
+# root restait sans handler, et les nôtres ne sortaient que par le filet de
+# secours de la stdlib (`logging.lastResort`) — un comportement par défaut sur
+# lequel on ne veut pas parier quand c'est le seul indice d'une panne.
+#
+# Le 6 août 2026, une panne relayée d'Ad EST n'a laissé AUCUNE ligne dans les
+# journaux d'Ad BUD : il a fallu aller lire ceux de l'autre service. Une trace
+# qui dépend d'un défaut de la bibliothèque n'est pas une trace.
+#
+# WARNING et non INFO : ça couvre exactement warning + error + exception, sans
+# noyer les journaux sous une ligne par requête httpx.
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
