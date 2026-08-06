@@ -212,6 +212,203 @@ def register_ad_gabarits_routes(get_conn):
         out = _fetch_csi_filtered(" 00 00")
         return {"divisions": out if out is not None else []}
 
+    # ─── Titres personnalisés de section CSI ──────────────────────────────
+    #
+    # LE CODE CSI EST L'IDENTITÉ, IL NE SE MODIFIE JAMAIS. Ces routes ne
+    # touchent que l'étiquette affichée : `budget_lignes.section` n'est
+    # jamais réécrite par ici, donc regroupements, totaux, filtres du PDF
+    # et export vers Ad CON continuent de voir exactement les mêmes codes.
+    #
+    # LE STOCKAGE EST CHEZ AD EST, ET C'EST VOULU. Les deux modules
+    # affichent les MÊMES libellés depuis la MÊME table (app_est.csi_sections,
+    # relayée juste au-dessus par _fetch_csi_filtered). Tenir un deuxième
+    # jeu de titres ici obligerait Simon à renommer deux fois la même
+    # section, et les deux modules divergeraient au premier oubli. Ad BUD
+    # relaie donc, comme il relaie déjà la taxonomie.
+    #
+    # L'AUTORISATION PROJET SE FAIT ICI, PAS LÀ-BAS : la base d'Ad EST ne
+    # voit pas ad_budget.projets. On passe par _load_and_authorize_projet
+    # (org + verrou + détention) AVANT de relayer, et Ad EST ajoute le
+    # scope organisation, qui lui est absolu.
+    def _refs_du_projet(cur, projet_id):
+        """(ref projet, ref gabarit d'origine) au format attendu par Ad EST.
+
+        Le préfixe « ad_bud: » n'est pas décoratif : les projets d'Ad BUD
+        sont numérotés en SERIAL dans ad_budget, ceux d'Ad EST en UUID dans
+        app_est. Sans préfixe, les deux se disputeraient la même clé.
+        """
+        cur.execute(
+            "SELECT p.source_gabarit_id, g.nom AS gabarit_nom "
+            "FROM ad_budget.projets p "
+            "LEFT JOIN ad_budget.gabarits g ON g.id = p.source_gabarit_id "
+            "WHERE p.id = %s",
+            (projet_id,),
+        )
+        row = cur.fetchone()
+        gab = row.get("source_gabarit_id") if row else None
+        nom = row.get("gabarit_nom") if row else None
+        return f"ad_bud:{projet_id}", (f"ad_bud:{gab}" if gab else None), nom
+
+    def _autoriser_portee(portee, data, user, org):
+        """Autorise l'écriture d'un titre à cette portée, et rend la ref Ad EST.
+
+        C'est LA garde côté Ad BUD : Ad EST ne voit pas ad_budget, il ne
+        pourra vérifier que l'organisation. Tout ce qui touche un budget ou
+        un gabarit se prouve donc ici, avec les mêmes fonctions que
+        n'importe quelle autre écriture du module — aucune porte parallèle.
+        """
+        if portee == "organisation":
+            return ""
+        if portee == "projet":
+            projet_id = data.get("projet_id")
+            if not projet_id:
+                raise HTTPException(status_code=400, detail="projet_id requis")
+            # "write" : renommer une section EST une écriture. Un budget gelé
+            # ou tenu par un collègue se refuse ici, comme une saisie de ligne.
+            _load_and_authorize_projet(get_conn, int(projet_id), user, "write")
+            return f"ad_bud:{int(projet_id)}"
+        if portee == "gabarit":
+            gabarit_id = data.get("gabarit_id")
+            if not gabarit_id:
+                raise HTTPException(status_code=400, detail="gabarit_id requis")
+            conn = get_conn()
+            cur = conn.cursor(row_factory=dict_row)
+            try:
+                _load_gabarit_scoped(cur, int(gabarit_id), org)  # scope strict org
+            finally:
+                cur.close()
+                conn.close()
+            return f"ad_bud:{int(gabarit_id)}"
+        raise HTTPException(status_code=400, detail=f"Portée inconnue : {portee}")
+
+    # `corps` et non `json` : le module importe déjà json, et un paramètre du
+    # même nom le masquerait silencieusement dans cette fonction.
+    def _relais_est(method, chemin, jwt_token, *, params=None, corps=None):
+        """Relaie vers Ad EST en portant le jeton de l'appelant.
+
+        Les erreurs d'Ad EST sont retransmises AVEC leur code : un 404
+        « code CSI inconnu » doit arriver tel quel à l'écran, pas déguisé
+        en 502. Seule l'indisponibilité du service devient un 502.
+        """
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                r = client.request(
+                    method,
+                    f"{EST_API_URL}{chemin}",
+                    params=params,
+                    json=corps,
+                    headers={"Authorization": f"Bearer {jwt_token}"},
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("titres CSI : Ad EST injoignable : %s", e)
+            raise HTTPException(
+                status_code=502,
+                detail="Service des titres CSI (Ad EST) indisponible.",
+            )
+        if r.status_code >= 400:
+            try:
+                detail = r.json().get("detail") or f"HTTP {r.status_code}"
+            except Exception:  # noqa: BLE001
+                detail = f"HTTP {r.status_code}"
+            raise HTTPException(status_code=r.status_code, detail=detail)
+        return r.json()
+
+    @router.get("/csi-titres")
+    def lire_csi_titres(projet_id: Optional[int] = None,
+                        gabarit_id: Optional[int] = None,
+                        authorization: Optional[str] = Header(None),
+                        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
+                        user=Depends(jwt_user)):
+        org = _org(user)
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
+        params = {}
+        gabarit_nom = None
+        if projet_id is not None:
+            # Lecture : mode "read" — consulter les titres d'un budget gelé
+            # ou tenu par un collègue reste normal.
+            _load_and_authorize_projet(get_conn, projet_id, user, "read")
+            conn = get_conn()
+            cur = conn.cursor(row_factory=dict_row)
+            try:
+                p_ref, g_ref, gabarit_nom = _refs_du_projet(cur, projet_id)
+            finally:
+                cur.close()
+                conn.close()
+            params["projet"] = p_ref
+            if g_ref:
+                params["gabarit"] = g_ref
+        if gabarit_id is not None:
+            conn = get_conn()
+            cur = conn.cursor(row_factory=dict_row)
+            try:
+                g = _load_gabarit_scoped(cur, gabarit_id, org)
+                gabarit_nom = g.get("nom")
+            finally:
+                cur.close()
+                conn.close()
+            params["gabarit"] = f"ad_bud:{gabarit_id}"
+        out = _relais_est("GET", "/reference/csi-titres", jwt_token, params=params)
+        # Ad EST ne peut pas nommer un gabarit d'Ad BUD — il ne voit pas
+        # ad_budget. On complète ici, pour que le bouton de remontée puisse
+        # dire vers QUOI il pousse au lieu d'un « le gabarit » anonyme.
+        if gabarit_nom:
+            out["gabarit_nom"] = gabarit_nom
+        return out
+
+    @router.put("/csi-titres")
+    def poser_csi_titre(data: dict,
+                        authorization: Optional[str] = Header(None),
+                        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
+                        user=Depends(jwt_user)):
+        org = _org(user)
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
+        portee = (data.get("portee") or "").strip()
+        ref = _autoriser_portee(portee, data, user, org)
+        return _relais_est(
+            "PUT", "/reference/csi-titres", jwt_token,
+            corps={"portee": portee, "ref": ref,
+                  "code": data.get("code"), "titre": data.get("titre")},
+        )
+
+    @router.delete("/csi-titres")
+    def retour_csi_titre_officiel(portee: str, code: str,
+                                  projet_id: Optional[int] = None,
+                                  gabarit_id: Optional[int] = None,
+                                  authorization: Optional[str] = Header(None),
+                                  session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
+                                  user=Depends(jwt_user)):
+        org = _org(user)
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
+        ref = _autoriser_portee(
+            portee, {"projet_id": projet_id, "gabarit_id": gabarit_id}, user, org
+        )
+        params = {"portee": portee, "code": code}
+        if ref:
+            params["ref"] = ref
+        return _relais_est("DELETE", "/reference/csi-titres", jwt_token, params=params)
+
+    @router.post("/csi-titres/remontee")
+    def remonter_csi_titre(data: dict,
+                           authorization: Optional[str] = Header(None),
+                           session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
+                           user=Depends(jwt_user)):
+        """Pousse un titre de budget vers son gabarit, ou vers l'organisation.
+
+        Route séparée du PUT parce qu'elle n'écrit PAS là où on travaille :
+        on est dans un budget, elle pose le titre ailleurs — et vers
+        l'organisation, elle le pose pour Ad BUD ET Ad EST. Un renommage
+        ordinaire ne doit pas pouvoir déclencher ça au passage.
+        """
+        org = _org(user)
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
+        cible = (data.get("cible_portee") or "").strip()
+        ref = _autoriser_portee(cible, data, user, org)
+        return _relais_est(
+            "POST", "/reference/csi-titres/remontee", jwt_token,
+            corps={"code": data.get("code"), "titre": data.get("titre"),
+                  "cible_portee": cible, "cible_ref": ref},
+        )
+
     # ─── CRUD ─────────────────────────────────────────────────────────────
     @router.get("/gabarits")
     def list_gabarits(user=Depends(jwt_user)):
@@ -847,6 +1044,17 @@ def register_ad_gabarits_routes(get_conn):
                         else:
                             _insert_manual(cur, projet_id, sec_code, desc)
                             inserted += 1
+            # D'OÙ VIENT CE BUDGET. Sans ce lien, un budget né d'un gabarit
+            # ne peut pas hériter des titres de section personnalisés qui y
+            # ont été posés, ni les lui remonter. COALESCE : le PREMIER
+            # gabarit inséré reste l'origine, comme dans Ad EST
+            # (apply_template garde COALESCE(source_template_id, …)).
+            cur.execute(
+                "UPDATE ad_budget.projets "
+                "SET source_gabarit_id = COALESCE(source_gabarit_id, %s) "
+                "WHERE id = %s",
+                (gabarit_id, projet_id),
+            )
             conn.commit()
             return {"status": "inserted", "nb_lignes": inserted, "warnings": warnings}
         except HTTPException:
