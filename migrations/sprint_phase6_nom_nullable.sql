@@ -9,6 +9,20 @@
 -- Idempotent : DROP NOT NULL sur une colonne déjà nullable = no-op (rejoué sans
 -- effet). Réversible : ALTER COLUMN nom SET NOT NULL (mais ne PAS réintroduire ;
 -- la colonne est DROPpée en Phase 7).
+--
+-- 7 août 2026 — garde ajoutée pour l'INSTALLATION NEUVE. `projets` n'était
+-- créée par AUCUN fichier du dépôt ; elle l'est maintenant par
+-- 000_rattrapage_socle.sql, qui la pose dans sa forme d'AUJOURD'HUI — donc
+-- SANS `nom`, supprimée en Phase 7B. Sur une base vide, l'ALTER nu échouait
+-- ici et cassait la chaîne. En production la migration est déjà inscrite dans
+-- schema_migrations : elle n'est plus jamais rejouée, la garde n'y change rien.
 -- ════════════════════════════════════════════════════════════════════
 
-ALTER TABLE ad_budget.projets ALTER COLUMN nom DROP NOT NULL;
+DO $phase6$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'ad_budget' AND table_name = 'projets'
+                 AND column_name = 'nom') THEN
+        ALTER TABLE ad_budget.projets ALTER COLUMN nom DROP NOT NULL;
+    END IF;
+END $phase6$;
