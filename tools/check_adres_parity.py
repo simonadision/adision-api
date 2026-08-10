@@ -49,6 +49,10 @@ REQUIRED_IN_BOTH = [
     # Avis d'addenda : envoi manuel ciblé (oui + sans réponse, jamais non), confirmation.
     ("Avis d'addenda", "avis d'addenda (point 8) — bouton + modale ciblée + confirmation"),
     ("avis-addenda", "appel backend de l'avis d'addenda (cibles + envoi)"),
+    # Fusion des 2 courriels AO/GED (brief 10 août 2026) : les destinataires
+    # déjà invités reçoivent un avis de documents partagés, jamais un renvoi
+    # de l'invitation complète ni le courriel séparé document_share_api.
+    ("avis-documents-partages", "appel backend de l'avis de documents partagés (Cas B)"),
 ]
 
 
