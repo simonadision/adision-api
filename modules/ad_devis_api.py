@@ -499,6 +499,11 @@ def register_ad_devis_routes(get_conn):
             "budget_fingerprint": empreinte or empreinte_courante,
             "budget_fingerprint_current": empreinte_courante,
             "budget_divergent": divergent,
+            # Titre affiché dans Espace Rapports (Simon 2026-08-12) — même repli
+            # que calcul_quantitatif : pas de champ "titre" libre côté devis,
+            # NOM DU PROJET utilisé pour que « Propositions & Devis » affiche un
+            # libellé lisible plutôt qu'une ligne nue.
+            "titre": snapshot["project"]["nom"],
         }
         try:
             result = hub_service.post_report(jwt_token, int(hub_pid), pdf_bytes, fields)

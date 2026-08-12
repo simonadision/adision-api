@@ -4940,6 +4940,12 @@ def register_ad_budget_routes(get_conn):
             "generated_by": user.get("id"),
             "generated_by_nom": user.get("nom") or user.get("email"),
             "snapshot_data": json.dumps(snapshot, default=str),
+            # Titre affiché dans Espace Rapports (Simon 2026-08-12) : Ad BUD n'a
+            # pas de champ "titre du document" libre comme Ad FAC -> repli sur
+            # le NOM DU PROJET (identifiant naturel côté HUB), pour que chaque
+            # ligne « Rapports de calcul » affiche un libellé lisible au lieu
+            # d'une ligne nue avec juste le badge de révision.
+            "titre": snapshot["project"]["nom"],
         }
         try:
             result = hub_service.post_report(jwt_token, int(hub_pid), pdf_bytes, fields)
