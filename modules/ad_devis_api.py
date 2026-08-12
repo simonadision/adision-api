@@ -49,12 +49,28 @@ def _frca_num(value):
     return f"{v:,.2f}".replace(",", " ").replace(".", ",")
 
 
+# Catégorie GED EXCLUE de la liste « Documents consultés » du devis (Simon
+# 2026-08-12) : les soumissions sous-traitants sont des documents PRIVÉS/
+# INTERNES (prix coûtants, marges) — jamais un nom de fichier qui laisserait
+# deviner leur existence ne doit apparaître dans un document envoyé au
+# CLIENT. Comparaison insensible à la casse/aux espaces (nom de catégorie
+# système = "Soumission", cf. ad_res_recipient_api.WHITELIST_CATEGORIES côté
+# HUB — Soumission en est explicitement absente, même logique ici).
+_DEVIS_EXCLUDED_CATEGORY_NAMES = {"soumission", "soumissions"}
+
+
 def _flatten_doc_names(tree) -> list:
-    """Aplati l'arbre GED (categories>disciplines>documents) en liste de noms."""
+    """Aplati l'arbre GED (categories>disciplines>documents) en liste de noms
+    sélectionnables pour « Documents consultés » du devis. Catégorie
+    Soumission (sous-traitants) TOUJOURS exclue — cf.
+    _DEVIS_EXCLUDED_CATEGORY_NAMES."""
     out = []
     if not isinstance(tree, dict):
         return out
     for cat in tree.get("categories", []) or []:
+        cat_name = (cat.get("name") or "").strip().lower()
+        if cat_name in _DEVIS_EXCLUDED_CATEGORY_NAMES:
+            continue
         for disc in cat.get("disciplines", []) or []:
             for d in disc.get("documents", []) or []:
                 nm = d.get("display_name") or d.get("filename")
@@ -236,13 +252,28 @@ def register_ad_devis_routes(get_conn):
             print(f"[devis] fetch_organization échec: {e}", flush=True)
         # Documents GED du projet HUB lié — non bloquant.
         documents = []
+        _documents_fetch_ok = False
         ad_hub_pid = projet.get("ad_hub_project_id")
         if ad_hub_pid:
             try:
                 tree = hub_service.fetch_project_documents(jwt_token, int(ad_hub_pid))
                 documents = _flatten_doc_names(tree)
+                _documents_fetch_ok = True
             except Exception as e:  # noqa: BLE001
                 print(f"[devis] fetch_project_documents échec: {e}", flush=True)
+        # Purge défensive (Simon 2026-08-12) : un devis SAUVEGARDÉ avant ce
+        # correctif peut encore contenir une soumission sous-traitant cochée
+        # (catégorie désormais absente de `documents`, cf.
+        # _DEVIS_EXCLUDED_CATEGORY_NAMES). On ne se fie pas qu'au picker
+        # frontend pour l'empêcher de réapparaître -> on intersecte AUSSI ici
+        # avec la liste déjà filtrée, donc même une sélection historique privée
+        # ne peut plus ni se pré-cocher, ni voyager jusqu'au PDF (devisForm.
+        # documents est initialisé depuis CE champ côté front). Uniquement si
+        # le fetch GED a RÉUSSI (_documents_fetch_ok) : un hub injoignable ne
+        # doit jamais faire disparaître une sélection légitime à l'écran.
+        if devis and devis.get("documents") and _documents_fetch_ok:
+            _allowed = set(documents)
+            devis["documents"] = [d for d in devis["documents"] if d in _allowed]
         return {
             "devis": devis,  # null si pas encore créé
             "entreprise": {
