@@ -19,6 +19,7 @@ from psycopg.types.json import Json
 from modules import con_service, hub_service, mat_service, typ_service
 from modules.ad_budget_constants import AD_VIU_BLINDSPOT_DIVISIONS
 from modules.aggregates import adapt_budget_lines, compute_aggregates, _js_round
+from modules.lots_calc import compute_lot_totals
 from modules.auth_jwt import SESSION_COOKIE_NAME, _extract_bearer, make_jwt_deps
 from modules.taux_horaires_api import (
     _load_taux_default_map,
@@ -5107,8 +5108,8 @@ def register_ad_budget_routes(get_conn):
         cur.execute("""
             INSERT INTO ad_budget.budget_lignes
             (projet_id, source_item_id, section, description, unite, prix_unitaire, qte, ajustement_pct, note, actif,
-             item_id_ad_mat, ad_hub_pending_id, taux_horaire)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             item_id_ad_mat, ad_hub_pending_id, taux_horaire, lot_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """, (
             projet_id,
@@ -5124,6 +5125,7 @@ def register_ad_budget_routes(get_conn):
             data.get("item_id_ad_mat"),
             data.get("ad_hub_pending_id"),
             taux_horaire,
+            data.get("lot_id") or None,
         ))
         row = cur.fetchone()
         conn.commit()
@@ -5796,6 +5798,10 @@ def register_ad_budget_routes(get_conn):
         for field in [
             "section", "description", "unite", "prix_unitaire", "qte",
             "ajustement_pct", "note", "actif",
+            # Lot (regroupement physique, ex. "AB DEL") — orthogonal à `section`
+            # (code CSI). NULL = ligne hors-lot. Permet de déplacer une ligne
+            # d'un lot à l'autre (drag & drop UI) ou de la détacher (null).
+            "lot_id",
             # Ventilation tri-axiale matériel / main-d'œuvre / sous-traitant.
             # prix_unitaire conserve son nom mais représente le coût matériel.
             "heures", "taux_horaire", "cout_sous_traitant", "sous_traitant_nom",
@@ -5843,7 +5849,7 @@ def register_ad_budget_routes(get_conn):
                 val = data[field]
                 # contact_id : "" / 0 / null → NULL (UUID nullable ; évite un
                 # cast "" → uuid qui planterait). Délier = renvoyer null.
-                if field == "sous_traitant_contact_id":
+                if field in ("sous_traitant_contact_id", "lot_id"):
                     val = val or None
                 elif field in (
                     "prix_unitaire_override", "heures_manuelles",
@@ -5966,6 +5972,230 @@ def register_ad_budget_routes(get_conn):
         _mark_budget_dirty_if_emitted(projet_id)  # suppression de ligne -> snapshot
         _push_budget_snapshot(get_conn, projet_id, authorization, session_cookie)  # pipeline Ad ANA (fire-and-forget)
         return {"status": "deleted"}
+
+    # ─────────────────────────────────────────────────────────────────
+    # LOTS — regroupement PHYSIQUE de lignes budgétaires (ex. "AB DEL",
+    # "CD DEL", "CS H"...), ORTHOGONAL aux sections CSI (corps de métier).
+    # Structure à 2 niveaux : Projet > Lot > Lignes (pas de sous-niveau par
+    # logement individuel). `lot_id` est NULLABLE sur budget_lignes : un
+    # projet SANS lot continue de fonctionner exactement comme avant
+    # (lignes "hors-lot"), aucune régression. Cf. migrations/sprint_lots.sql.
+    # ─────────────────────────────────────────────────────────────────
+
+    @router.get("/projets/{projet_id}/lots")
+    def get_lots(projet_id: int, user=Depends(jwt_user)):
+        """Liste les lots du projet avec leur sous-total. Le sous-total est
+        TOUJOURS recalculé à la volée (compute_lot_totals), jamais stocké —
+        il ne peut donc jamais diverger d'un prix modifié après coup."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        cur.execute("SELECT arrondi_dollar FROM ad_budget.projets WHERE id = %s", (projet_id,))
+        projet = cur.fetchone() or {}
+        cur.execute(
+            "SELECT id, nom, nb_logements, ordre FROM ad_budget.lots "
+            "WHERE projet_id = %s ORDER BY ordre, id",
+            (projet_id,),
+        )
+        lots = cur.fetchall()
+        cur.execute(
+            "SELECT lot_id, actif, qte, prix_unitaire, ajust_materiaux, heures, "
+            "taux_horaire, ajust_main_oeuvre, sous_traitant_montant, ajust_sous_traitant, "
+            "ajustement_pct, unite, heures_manuelles FROM ad_budget.budget_lignes "
+            "WHERE projet_id = %s",
+            (projet_id,),
+        )
+        lignes = cur.fetchall()
+        cur.close()
+        conn.close()
+        result = compute_lot_totals(lignes, lots, projet.get("arrondi_dollar"))
+        result["projet_id"] = projet_id
+        return result
+
+    @router.post("/projets/{projet_id}/lots")
+    def create_lot(projet_id: int, data: dict, user=Depends(jwt_user)):
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        nom = (data.get("nom") or "").strip()
+        if not nom:
+            raise HTTPException(status_code=400, detail="Le nom du lot est requis")
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        ordre = data.get("ordre")
+        if ordre is None:
+            # Ajout à la suite : après le dernier lot existant.
+            cur.execute(
+                "SELECT COALESCE(MAX(ordre), -1) + 1 AS n FROM ad_budget.lots WHERE projet_id = %s",
+                (projet_id,),
+            )
+            ordre = cur.fetchone()["n"]
+        cur.execute(
+            "INSERT INTO ad_budget.lots (projet_id, nom, nb_logements, ordre) "
+            "VALUES (%s, %s, %s, %s) RETURNING *",
+            (projet_id, nom, data.get("nb_logements"), ordre),
+        )
+        lot = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"status": "created", "lot": lot}
+
+    @router.put("/projets/{projet_id}/lots/{lot_id}")
+    def update_lot(projet_id: int, lot_id: int, data: dict, user=Depends(jwt_user)):
+        """Renommer / ajuster nb_logements / repositionner un lot (mutation
+        unitaire — le glisser-déposer en masse passe par /lots/reorder)."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        fields = []
+        values = []
+        if "nom" in data:
+            nom = (data["nom"] or "").strip()
+            if not nom:
+                raise HTTPException(status_code=400, detail="Le nom du lot est requis")
+            fields.append("nom = %s")
+            values.append(nom)
+        if "nb_logements" in data:
+            fields.append("nb_logements = %s")
+            values.append(data["nb_logements"])
+        if "ordre" in data:
+            fields.append("ordre = %s")
+            values.append(data["ordre"])
+        if not fields:
+            return {"status": "noop"}
+        fields.append("updated_at = NOW()")
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        values.extend([lot_id, projet_id])
+        cur.execute(
+            f"UPDATE ad_budget.lots SET {', '.join(fields)} WHERE id = %s AND projet_id = %s RETURNING *",
+            values,
+        )
+        lot = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+        if not lot:
+            raise HTTPException(status_code=404, detail="Lot introuvable")
+        return {"status": "updated", "lot": lot}
+
+    @router.post("/projets/{projet_id}/lots/reorder")
+    def reorder_lots(projet_id: int, data: dict, user=Depends(jwt_user)):
+        """Réordonnancement en masse (glisser-déposer) :
+        data = {"ordre": [{"id": 10, "ordre": 0}, {"id": 20, "ordre": 1}, ...]}."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        items = data.get("ordre") or []
+        conn = get_conn()
+        cur = conn.cursor()
+        for it in items:
+            cur.execute(
+                "UPDATE ad_budget.lots SET ordre = %s, updated_at = NOW() WHERE id = %s AND projet_id = %s",
+                (it.get("ordre"), it.get("id"), projet_id),
+            )
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"status": "reordered", "nb": len(items)}
+
+    @router.delete("/projets/{projet_id}/lots/{lot_id}")
+    def delete_lot(projet_id: int, lot_id: int, user=Depends(jwt_user)):
+        """Supprime le LOT, jamais ses lignes — elles redeviennent "hors-lot"
+        (ON DELETE SET NULL sur budget_lignes.lot_id, cf. sprint_lots.sql).
+        Supprimer les lignes elles-mêmes reste un choix explicite séparé."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM ad_budget.lots WHERE id = %s AND projet_id = %s", (lot_id, projet_id))
+        nb = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        if not nb:
+            raise HTTPException(status_code=404, detail="Lot introuvable")
+        return {"status": "deleted"}
+
+    @router.post("/projets/{projet_id}/lots/{lot_id}/duplicate")
+    def duplicate_lot(projet_id: int, lot_id: int, data: Optional[dict] = None,
+                      user=Depends(jwt_user),
+                      authorization: Optional[str] = Header(None),
+                      session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
+        """PHASE 2 — duplication de lot = COPIE PROFONDE INDÉPENDANTE. Toutes
+        les lignes du lot source (description, code CSI, quantité, prix
+        unitaire, unité, ventilation mat/mo/st, ajustements, liens
+        Ad MAT/Ad TYP...) sont recopiées dans un NOUVEAU lot. Aucun lien
+        conservé avec le lot d'origine : modifier une valeur dans la copie ne
+        change RIEN au lot source (cf. tests/test_lots_calc.py, test_08).
+
+        Pattern SQL repris du précédent POST /projets/{id}/duplicate
+        (INSERT…SELECT, cf. plus haut dans ce fichier) mais étendu à la LISTE
+        COMPLÈTE des colonnes de valeur actuelles de budget_lignes : ce
+        précédent (et /reviser-projet, toujours vivant) en oubliaient
+        plusieurs — prix_unitaire_st notamment — ce qui aurait fait perdre le
+        prix d'une ligne tarifée au sous-traitant par prix unitaire plutôt
+        que par montant forfaitaire.
+        """
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        data = data or {}
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        cur.execute(
+            "SELECT id, nom, nb_logements, ordre FROM ad_budget.lots WHERE id = %s AND projet_id = %s",
+            (lot_id, projet_id),
+        )
+        src = cur.fetchone()
+        if not src:
+            cur.close()
+            conn.close()
+            raise HTTPException(status_code=404, detail="Lot introuvable")
+        nom = (data.get("nom") or f"{src['nom']} (copie)").strip()
+        try:
+            # Décale les lots suivants pour insérer la copie juste après la source.
+            cur.execute(
+                "UPDATE ad_budget.lots SET ordre = ordre + 1 WHERE projet_id = %s AND ordre > %s",
+                (projet_id, src["ordre"]),
+            )
+            cur.execute(
+                "INSERT INTO ad_budget.lots (projet_id, nom, nb_logements, ordre) "
+                "VALUES (%s, %s, %s, %s) RETURNING *",
+                (projet_id, nom, src["nb_logements"], src["ordre"] + 1),
+            )
+            new_lot = cur.fetchone()
+            cur.execute(
+                """
+                INSERT INTO ad_budget.budget_lignes
+                  (projet_id, lot_id, source_item_id, section, description, unite, prix_unitaire, qte,
+                   ajustement_pct, note, actif, source_file, type_source,
+                   heures, taux_horaire, cout_sous_traitant, sous_traitant_nom,
+                   ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant, sous_traitant_type, sous_traitant_montant,
+                   source_viu_analysis_id, source_viu_item_id, item_id_ad_mat, ad_hub_pending_id, sous_traitant_contact_id,
+                   source_typ_code, source_typ_snapshot_at,
+                   prix_unitaire_override, heures_manuelles, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
+                   qte_override, taux_horaire_override, ajust_materiaux_override, ajust_main_oeuvre_override,
+                   ajust_sous_traitant_override, sous_traitant_montant_override,
+                   prix_unitaire_st, prix_unitaire_st_override)
+                SELECT %s, %s, source_item_id, section, description, unite, prix_unitaire, qte,
+                   ajustement_pct, note, actif, source_file, type_source,
+                   heures, taux_horaire, cout_sous_traitant, sous_traitant_nom,
+                   ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant, sous_traitant_type, sous_traitant_montant,
+                   source_viu_analysis_id, source_viu_item_id, item_id_ad_mat, ad_hub_pending_id, sous_traitant_contact_id,
+                   source_typ_code, source_typ_snapshot_at,
+                   prix_unitaire_override, heures_manuelles, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
+                   qte_override, taux_horaire_override, ajust_materiaux_override, ajust_main_oeuvre_override,
+                   ajust_sous_traitant_override, sous_traitant_montant_override,
+                   prix_unitaire_st, prix_unitaire_st_override
+                FROM ad_budget.budget_lignes
+                WHERE projet_id = %s AND lot_id = %s
+                """,
+                (projet_id, new_lot["id"], projet_id, lot_id),
+            )
+            nb_lignes = cur.rowcount
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cur.close()
+            conn.close()
+        _mark_budget_dirty_if_emitted(projet_id)  # nouvelles lignes -> snapshot
+        _push_budget_snapshot(get_conn, projet_id, authorization, session_cookie)  # pipeline Ad ANA (fire-and-forget)
+        return {"status": "duplicated", "lot": new_lot, "nb_lignes_copiees": nb_lignes}
 
     @router.get("/projets/{projet_id}/total")
     def get_projet_total(projet_id: int, user=Depends(jwt_user)):
