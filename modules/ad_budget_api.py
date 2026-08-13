@@ -3513,19 +3513,80 @@ def register_ad_budget_routes(get_conn):
         return {"refreshed": refreshed, "nb": len(refreshed)}
 
     @router.get("/projets/{projet_id}/export")
-    def export_projet_excel(projet_id: int, user=Depends(jwt_user),
+    def export_projet_excel(projet_id: int, mode: str = "global", user=Depends(jwt_user),
                             authorization: Optional[str] = Header(None), session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
         # PHASE 3A — authentification + autorisation (lecture : export = lecture).
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         # Phase 7A — identité depuis le hub : on ne lit plus le nom local.
-        cur.execute("SELECT ad_hub_project_id FROM ad_budget.projets WHERE id = %s", (projet_id,))
+        cur.execute("SELECT ad_hub_project_id, arrondi_dollar FROM ad_budget.projets WHERE id = %s", (projet_id,))
         projet = cur.fetchone()
         if not projet:
             cur.close()
             conn.close()
             raise HTTPException(status_code=404, detail="Projet not found")
+
+        # Phase 4 (Lot) — mode="par_lot" : feuille de VENTILATION PAR LOT
+        # (Lot | Nb logements | Nb lignes | Sous-total), sous-totaux ET grand
+        # total EXCLUSIVEMENT issus de compute_lot_totals (lots_calc.py) —
+        # jamais recalculés ici, pour ne jamais diverger de l'écran (Vue par
+        # lot) ni de GET /lots. mode="global" (défaut) = comportement
+        # INCHANGÉ (branche ci-dessous, intacte).
+        if mode == "par_lot":
+            cur.execute(
+                "SELECT id, nom, nb_logements, ordre FROM ad_budget.lots "
+                "WHERE projet_id = %s ORDER BY ordre, id",
+                (projet_id,),
+            )
+            lots = cur.fetchall()
+            cur.execute(
+                "SELECT id, description, a_completer, lot_id, actif, qte, prix_unitaire, ajust_materiaux, heures, "
+                "taux_horaire, ajust_main_oeuvre, sous_traitant_montant, ajust_sous_traitant, "
+                "ajustement_pct, unite, heures_manuelles FROM ad_budget.budget_lignes "
+                "WHERE projet_id = %s",
+                (projet_id,),
+            )
+            lignes_calc = cur.fetchall()
+            cur.close()
+            conn.close()
+            result = compute_lot_totals(lignes_calc, lots, projet.get("arrondi_dollar"))
+
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Ventilation par lot"
+            ws.append(["Lot", "Nb logements", "Nb lignes", "Sous-total"])
+            for lot in result["lots"]:
+                ws.append([lot["nom"], lot["nb_logements"], lot["nb_lignes"], lot["sous_total"]])
+            if result["hors_lot"]["nb_lignes"] > 0:
+                ws.append(["Hors lot", "", result["hors_lot"]["nb_lignes"], result["hors_lot"]["sous_total"]])
+            ws.append([])
+            ws.append(["", "", "GRAND TOTAL", result["grand_total"]])
+
+            # Phase C+D (Lot) — rappel des lignes "à compléter" (créées par
+            # multi-lot SANS copier la quantité, cf. compute_lot_totals) ENCORE
+            # à quantité vide au moment de l'export. Avertissement, jamais un
+            # blocage : l'export se produit dans tous les cas.
+            if result["a_completer"]:
+                ws.append([])
+                ws.append(["RAPPEL — LIGNES À COMPLÉTER AVANT SOUMISSION"])
+                for item in result["a_completer"]:
+                    ws.append([
+                        f"Ligne {item['description']} (lot {item['lot_nom']}) — "
+                        f"quantité à compléter — dernier rappel avant soumission",
+                    ])
+
+            buf = io.BytesIO()
+            wb.save(buf)
+            buf.seek(0)
+            safe_nom = "".join(c if c.isalnum() or c in "-_ " else "_" for c in (_hub_project_name(projet, authorization, session_cookie) or "projet")).strip() or "projet"
+            filename = f"{safe_nom}_par_lot.xlsx"
+            return StreamingResponse(
+                buf,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+
         cur.execute("""
             SELECT section, description, unite, qte, prix_unitaire,
                    ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
@@ -3607,6 +3668,131 @@ def register_ad_budget_routes(get_conn):
             buf,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @router.get("/projets/{projet_id}/pdf-lots")
+    def export_projet_pdf_lots(projet_id: int, user=Depends(jwt_user),
+                               authorization: Optional[str] = Header(None), session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
+        """Phase 4 (Lot) — export PDF « Ventilation par lot ». Trappe de
+        secours reportlab pour le moteur SERVI par défaut côté client
+        (jsPDF, @adision/report-pdf::buildLotVentilationPdf) : document
+        SIMPLE et INDÉPENDANT du rapport de calcul détaillé (_build_projet_report),
+        table Lot -> sous-total uniquement, jamais le détail ligne par ligne
+        CSI imbriqué (cf. commentaire de buildLotVentilationPdf.js). Les
+        sous-totaux et le grand total viennent EXCLUSIVEMENT de
+        compute_lot_totals (lots_calc.py) — aucune divergence possible avec
+        l'écran (Vue par lot) ni avec GET /lots.
+        """
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        cur.execute("SELECT ad_hub_project_id, arrondi_dollar, revision_label FROM ad_budget.projets WHERE id = %s", (projet_id,))
+        projet = cur.fetchone()
+        if not projet:
+            cur.close()
+            conn.close()
+            raise HTTPException(status_code=404, detail="Projet not found")
+        cur.execute(
+            "SELECT id, nom, nb_logements, ordre FROM ad_budget.lots "
+            "WHERE projet_id = %s ORDER BY ordre, id",
+            (projet_id,),
+        )
+        lots = cur.fetchall()
+        cur.execute(
+            "SELECT id, description, a_completer, lot_id, actif, qte, prix_unitaire, ajust_materiaux, heures, "
+            "taux_horaire, ajust_main_oeuvre, sous_traitant_montant, ajust_sous_traitant, "
+            "ajustement_pct, unite, heures_manuelles FROM ad_budget.budget_lignes "
+            "WHERE projet_id = %s",
+            (projet_id,),
+        )
+        lignes_calc = cur.fetchall()
+        cur.close()
+        conn.close()
+        result = compute_lot_totals(lignes_calc, lots, projet.get("arrondi_dollar"))
+        nom_projet = _hub_project_name(projet, authorization, session_cookie) or "Projet"
+
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(
+            buf, pagesize=letter,
+            leftMargin=1.5 * cm, rightMargin=1.5 * cm, topMargin=1.5 * cm, bottomMargin=1.5 * cm,
+        )
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle("LotTitle", parent=styles["Title"], fontSize=15, alignment=0)
+        sub_style = ParagraphStyle("LotSub", parent=styles["Normal"], fontSize=9, textColor=colors.HexColor("#475569"))
+
+        rows = [["Lot", "Nb logements", "Nb lignes", "Sous-total"]]
+        for lot in result["lots"]:
+            rows.append([
+                lot["nom"],
+                str(lot["nb_logements"]) if lot["nb_logements"] is not None else "—",
+                str(lot["nb_lignes"]),
+                f"{lot['sous_total']:,.2f} $".replace(",", " ").replace(".", ","),
+            ])
+        if result["hors_lot"]["nb_lignes"] > 0:
+            rows.append([
+                "Hors lot", "—", str(result["hors_lot"]["nb_lignes"]),
+                f"{result['hors_lot']['sous_total']:,.2f} $".replace(",", " ").replace(".", ","),
+            ])
+        rows.append(["", "", "GRAND TOTAL", f"{result['grand_total']:,.2f} $".replace(",", " ").replace(".", ",")])
+
+        table = Table(rows, colWidths=[6 * cm, 3 * cm, 2.5 * cm, 3.5 * cm], repeatRows=1)
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e3a8a")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+            ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+            ("LINEABOVE", (0, -1), (-1, -1), 1, colors.black),
+            ("FONTSIZE", (0, 0), (-1, -1), 10),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ]))
+
+        story = [
+            Paragraph(nom_projet.upper(), title_style),
+            Paragraph(f"Ventilation par lot — {projet.get('revision_label') or 'Originale'}", sub_style),
+            Spacer(1, 18),
+            table,
+        ]
+
+        # Phase C+D (Lot) — rappel des lignes "à compléter" ENCORE à quantité
+        # vide au moment de l'export (avertissement, jamais un blocage —
+        # l'export se produit dans tous les cas, cf. commentaire compute_lot_totals).
+        if result["a_completer"]:
+            warn_title_style = ParagraphStyle(
+                "LotWarnTitle", parent=styles["Normal"], fontSize=11,
+                textColor=colors.HexColor("#92400e"), fontName="Helvetica-Bold",
+            )
+            warn_rows = [[
+                f"Ligne {item['description']} (lot {item['lot_nom']}) — "
+                f"quantité à compléter — dernier rappel avant soumission",
+            ] for item in result["a_completer"]]
+            warn_table = Table(warn_rows, colWidths=[15 * cm])
+            warn_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fef3c7")),
+                ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#92400e")),
+                ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#fde68a")),
+                ("LINEBELOW", (0, 0), (-1, -2), 0.5, colors.HexColor("#fde68a")),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ]))
+            story += [
+                Spacer(1, 22),
+                Paragraph("⚠ Rappel — lignes à compléter avant soumission", warn_title_style),
+                Spacer(1, 6),
+                warn_table,
+            ]
+
+        doc.build(story)
+        buf.seek(0)
+        safe_nom = "".join(c if c.isalnum() or c in "-_ " else "_" for c in nom_projet).strip() or "projet"
+        return StreamingResponse(
+            buf,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{safe_nom}_ventilation_par_lot.pdf"'},
         )
 
     @router.get("/projets/{projet_id}/pdf")
@@ -5108,8 +5294,8 @@ def register_ad_budget_routes(get_conn):
         cur.execute("""
             INSERT INTO ad_budget.budget_lignes
             (projet_id, source_item_id, section, description, unite, prix_unitaire, qte, ajustement_pct, note, actif,
-             item_id_ad_mat, ad_hub_pending_id, taux_horaire, lot_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             item_id_ad_mat, ad_hub_pending_id, taux_horaire, lot_id, a_completer)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """, (
             projet_id,
@@ -5126,6 +5312,12 @@ def register_ad_budget_routes(get_conn):
             data.get("ad_hub_pending_id"),
             taux_horaire,
             data.get("lot_id") or None,
+            # Phase C (workflow avancé Lot) — copie multi-lot SANS quantité :
+            # posé par le front (creerLigneApres) UNIQUEMENT sur les lignes
+            # créées avec qté forcée à vide dans les lots cochés, jamais sur
+            # la ligne d'origine. Cf. lots_calc.compute_lot_totals pour la
+            # sortie automatique du badge/rappel dès qu'une quantité est saisie.
+            bool(data.get("a_completer", False)),
         ))
         row = cur.fetchone()
         conn.commit()
@@ -5999,7 +6191,7 @@ def register_ad_budget_routes(get_conn):
         )
         lots = cur.fetchall()
         cur.execute(
-            "SELECT lot_id, actif, qte, prix_unitaire, ajust_materiaux, heures, "
+            "SELECT id, description, a_completer, lot_id, actif, qte, prix_unitaire, ajust_materiaux, heures, "
             "taux_horaire, ajust_main_oeuvre, sous_traitant_montant, ajust_sous_traitant, "
             "ajustement_pct, unite, heures_manuelles FROM ad_budget.budget_lignes "
             "WHERE projet_id = %s",
@@ -6038,6 +6230,56 @@ def register_ad_budget_routes(get_conn):
         cur.close()
         conn.close()
         return {"status": "created", "lot": lot}
+
+    @router.post("/projets/{projet_id}/lots/from-hors-lot")
+    def create_lot_from_hors_lot(projet_id: int, data: dict, user=Depends(jwt_user)):
+        """PHASE A (workflow avancé Lot) — convertit "Hors lot" en premier
+        lot RÉEL : crée le lot avec ce nom, puis réassigne EN UNE SEULE
+        REQUÊTE (UPDATE en masse, pas ligne par ligne) toutes les lignes
+        actuellement hors-lot (lot_id IS NULL) vers ce nouveau lot.
+
+        "Hors lot" n'est JAMAIS supprimé comme concept : la section reste
+        disponible, vide, pour de futures lignes non assignées — cf.
+        lignesByLot (front) qui l'affiche même à 0 élément dès qu'au moins
+        un lot existe.
+
+        ordre = MIN(ordre existant) - 1 (jamais 0 fixe) : le lot converti se
+        place TOUJOURS en premier, qu'il soit converti avant ou après la
+        création d'autres lots — fidèle à "Hors lot était en pratique son
+        premier lot réel" (brief Simon).
+        """
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        nom = (data.get("nom") or "").strip()
+        if not nom:
+            raise HTTPException(status_code=400, detail="Le nom du lot est requis")
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute(
+                "SELECT COALESCE(MIN(ordre), 0) - 1 AS n FROM ad_budget.lots WHERE projet_id = %s",
+                (projet_id,),
+            )
+            ordre = cur.fetchone()["n"]
+            cur.execute(
+                "INSERT INTO ad_budget.lots (projet_id, nom, nb_logements, ordre) "
+                "VALUES (%s, %s, %s, %s) RETURNING *",
+                (projet_id, nom, data.get("nb_logements"), ordre),
+            )
+            lot = cur.fetchone()
+            cur.execute(
+                "UPDATE ad_budget.budget_lignes SET lot_id = %s "
+                "WHERE projet_id = %s AND lot_id IS NULL",
+                (lot["id"], projet_id),
+            )
+            nb_reassignees = cur.rowcount
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cur.close()
+            conn.close()
+        return {"status": "created", "lot": lot, "nb_lignes_reassignees": nb_reassignees}
 
     @router.put("/projets/{projet_id}/lots/{lot_id}")
     def update_lot(projet_id: int, lot_id: int, data: dict, user=Depends(jwt_user)):
@@ -6130,9 +6372,22 @@ def register_ad_budget_routes(get_conn):
         plusieurs — prix_unitaire_st notamment — ce qui aurait fait perdre le
         prix d'une ligne tarifée au sous-traitant par prix unitaire plutôt
         que par montant forfaitaire.
+
+        PHASE B (workflow avancé Lot) — data.avec_quantites (bool, défaut
+        TRUE = comportement ci-dessus, INCHANGÉ) :
+          - True  : copie identique (déjà garanti ci-dessus).
+          - False : copie la STRUCTURE (description, code CSI, prix
+            unitaire, taux horaire, PU sous-traitant...) mais remet à 0 les
+            TROIS champs qui pilotent une quantité (qte, heures,
+            sous_traitant_montant) — sous_total du nouveau lot ≈ 0 tant que
+            rien n'est saisi (mat = qte×prix, mo = heures×taux, st = montant
+            — les trois s'annulent). Les flags *_override correspondants
+            sont remis à FALSE (une valeur à 0 qui resterait "override"
+            bloquerait un futur resync Ad TYP/Ad MAT).
         """
         _load_and_authorize_projet(get_conn, projet_id, user, "write")
         data = data or {}
+        avec_quantites = data.get("avec_quantites", True) is not False
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         cur.execute(
@@ -6145,6 +6400,15 @@ def register_ad_budget_routes(get_conn):
             conn.close()
             raise HTTPException(status_code=404, detail="Lot introuvable")
         nom = (data.get("nom") or f"{src['nom']} (copie)").strip()
+        # Expressions SELECT des colonnes "quantité" — IDENTIQUES au nom de
+        # colonne (donc SQL byte-identique à avant) quand avec_quantites=True ;
+        # littéral neutre sinon. Jamais de valeur utilisateur interpolée ici.
+        sel_qte = "qte" if avec_quantites else "0"
+        sel_heures = "heures" if avec_quantites else "0"
+        sel_heures_manuelles = "heures_manuelles" if avec_quantites else "FALSE"
+        sel_st_montant = "sous_traitant_montant" if avec_quantites else "0"
+        sel_qte_override = "qte_override" if avec_quantites else "FALSE"
+        sel_st_montant_override = "sous_traitant_montant_override" if avec_quantites else "FALSE"
         try:
             # Décale les lots suivants pour insérer la copie juste après la source.
             cur.execute(
@@ -6158,7 +6422,7 @@ def register_ad_budget_routes(get_conn):
             )
             new_lot = cur.fetchone()
             cur.execute(
-                """
+                f"""
                 INSERT INTO ad_budget.budget_lignes
                   (projet_id, lot_id, source_item_id, section, description, unite, prix_unitaire, qte,
                    ajustement_pct, note, actif, source_file, type_source,
@@ -6170,15 +6434,15 @@ def register_ad_budget_routes(get_conn):
                    qte_override, taux_horaire_override, ajust_materiaux_override, ajust_main_oeuvre_override,
                    ajust_sous_traitant_override, sous_traitant_montant_override,
                    prix_unitaire_st, prix_unitaire_st_override)
-                SELECT %s, %s, source_item_id, section, description, unite, prix_unitaire, qte,
+                SELECT %s, %s, source_item_id, section, description, unite, prix_unitaire, {sel_qte},
                    ajustement_pct, note, actif, source_file, type_source,
-                   heures, taux_horaire, cout_sous_traitant, sous_traitant_nom,
-                   ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant, sous_traitant_type, sous_traitant_montant,
+                   {sel_heures}, taux_horaire, cout_sous_traitant, sous_traitant_nom,
+                   ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant, sous_traitant_type, {sel_st_montant},
                    source_viu_analysis_id, source_viu_item_id, item_id_ad_mat, ad_hub_pending_id, sous_traitant_contact_id,
                    source_typ_code, source_typ_snapshot_at,
-                   prix_unitaire_override, heures_manuelles, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
-                   qte_override, taux_horaire_override, ajust_materiaux_override, ajust_main_oeuvre_override,
-                   ajust_sous_traitant_override, sous_traitant_montant_override,
+                   prix_unitaire_override, {sel_heures_manuelles}, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
+                   {sel_qte_override}, taux_horaire_override, ajust_materiaux_override, ajust_main_oeuvre_override,
+                   ajust_sous_traitant_override, {sel_st_montant_override},
                    prix_unitaire_st, prix_unitaire_st_override
                 FROM ad_budget.budget_lignes
                 WHERE projet_id = %s AND lot_id = %s

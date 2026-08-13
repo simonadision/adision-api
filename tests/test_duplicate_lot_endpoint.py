@@ -47,6 +47,7 @@ class _FakeLignesCursor:
     def execute(self, sql, params=None):
         s = self._norm(sql)
         params = params or ()
+        self._db.setdefault("sql_log", []).append(s)
 
         if "select user_id, organization_id, is_verrouille" in s:
             # _load_and_authorize_projet : projet permissif (pas de verrou,
@@ -176,10 +177,27 @@ _USER = {"id": 1, "platform_role": "super_admin", "org_role": "admin",
          "organization_id": None, "nom": "Test"}
 
 
-def _call(duplicate_lot, projet_id, lot_id):
+def _call(duplicate_lot, projet_id, lot_id, data=None):
     with patch.object(B, "_push_budget_snapshot", lambda *a, **k: None):
-        return duplicate_lot(projet_id, lot_id, data=None, user=_USER,
+        return duplicate_lot(projet_id, lot_id, data=data, user=_USER,
                               authorization=None, session_cookie=None)
+
+
+def _insert_select_sql(db):
+    """Le texte NORMALISÉ (espaces compressés, minuscule) de l'unique
+    INSERT…SELECT de duplicate_lot, capturé par _FakeLignesCursor.execute."""
+    matches = [s for s in db.get("sql_log", [])
+               if "insert into ad_budget.budget_lignes" in s and "select" in s]
+    assert len(matches) == 1, matches
+    return matches[0]
+
+
+def _select_clause(sql):
+    """Isole la liste de colonnes DU SELECT (le côté VALEUR, celui qui varie
+    selon avec_quantites) -- distinct de la liste de colonnes de l'INSERT
+    (le côté NOM, TOUJOURS composé des vrais noms de colonnes, inchangé dans
+    les deux modes) pour ne pas faire matcher un assert sur le mauvais côté."""
+    return sql.split(" select %s, %s, ", 1)[1].split(" from ad_budget.budget_lignes", 1)[0]
 
 
 def test_lot_vide_ne_copie_aucune_ligne_meme_avec_des_lignes_hors_lot_et_dans_un_autre_lot():
@@ -230,7 +248,54 @@ def test_lot_non_vide_copie_bien_ses_lignes_independamment():
     assert {l["prix_unitaire"] for l in source} == {100, 20}, "la source a bougé -- pas indépendant"
 
 
+def test_avec_quantites_defaut_sql_identique_a_avant_phase_b():
+    """PHASE B (workflow avancé Lot) — non-régression : data=None (comme
+    avant Phase B) ou data={"avec_quantites": True} explicite -> le SELECT
+    utilise les VRAIS noms de colonnes qte/heures/sous_traitant_montant
+    (jamais un littéral 0), exactement le comportement "copie identique"
+    déjà garanti par les deux tests ci-dessus."""
+    lots = [{"id": 10, "projet_id": 290, "nom": "AB DEL", "nb_logements": 12, "ordre": 0}]
+    lignes = [_ligne(1, 290, 10, description="A", prix_unitaire=100, qte=10, heures=5, sous_traitant_montant=30)]
+    for data in (None, {"avec_quantites": True}):
+        db = _make_db(lots, lignes)
+        duplicate_lot = _get_duplicate_lot(lambda: _FakeLignesConn(db))
+        _call(duplicate_lot, 290, 10, data=data)
+        sel = _select_clause(_insert_select_sql(db))
+        assert "prix_unitaire, qte, ajustement_pct" in sel, sel
+        assert "type_source, heures, taux_horaire, cout_sous_traitant" in sel, sel
+        assert "sous_traitant_type, sous_traitant_montant, source_viu_analysis_id" in sel, sel
+        assert "prix_unitaire_override, heures_manuelles, item_ad_mat_scope" in sel, sel
+        assert "qte_override, taux_horaire_override, ajust_materiaux_override" in sel, sel
+        assert "ajust_sous_traitant_override, sous_traitant_montant_override, prix_unitaire_st" in sel, sel
+
+
+def test_sans_quantites_zero_qte_heures_montant_st_structure_preservee():
+    """PHASE B — avec_quantites=False : qte/heures/sous_traitant_montant
+    (+ leurs flags override, + heures_manuelles) remis à un littéral neutre
+    dans le SELECT -- jamais le nom de colonne source (donc sous_total du
+    nouveau lot = 0 quelle que soit la ligne source). Le reste de la
+    structure (description, section, prix_unitaire, taux_horaire,
+    prix_unitaire_st...) reste une VRAIE colonne copiée."""
+    lots = [{"id": 10, "projet_id": 290, "nom": "AB DEL", "nb_logements": 12, "ordre": 0}]
+    lignes = [_ligne(1, 290, 10, description="A", prix_unitaire=100, qte=10, heures=5, sous_traitant_montant=30)]
+    db = _make_db(lots, lignes)
+    duplicate_lot = _get_duplicate_lot(lambda: _FakeLignesConn(db))
+    _call(duplicate_lot, 290, 10, data={"avec_quantites": False})
+    sel = _select_clause(_insert_select_sql(db))
+    assert "prix_unitaire, 0, ajustement_pct" in sel, sel
+    assert "type_source, 0, taux_horaire, cout_sous_traitant" in sel, sel
+    assert "sous_traitant_type, 0, source_viu_analysis_id" in sel, sel
+    assert "prix_unitaire_override, false, item_ad_mat_scope" in sel, sel
+    assert "false, taux_horaire_override, ajust_materiaux_override" in sel, sel
+    assert "ajust_sous_traitant_override, false, prix_unitaire_st" in sel, sel
+    # Structure préservée : prix_unitaire, taux_horaire, section, description
+    # restent de VRAIES colonnes (jamais remplacées par un littéral).
+    assert sel.startswith("source_item_id, section, description, unite, prix_unitaire,"), sel
+
+
 if __name__ == "__main__":
     test_lot_vide_ne_copie_aucune_ligne_meme_avec_des_lignes_hors_lot_et_dans_un_autre_lot()
     test_lot_non_vide_copie_bien_ses_lignes_independamment()
-    print("2/2 PASS")
+    test_avec_quantites_defaut_sql_identique_a_avant_phase_b()
+    test_sans_quantites_zero_qte_heures_montant_st_structure_preservee()
+    print("4/4 PASS")

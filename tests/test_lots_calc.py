@@ -131,6 +131,48 @@ class TestComputeLotTotals(unittest.TestCase):
         self.assertEqual(r_apres["lots"][0]["sous_total"], 1000.0, "le lot source ne doit pas bouger")
         self.assertEqual(r_apres["lots"][1]["sous_total"], 600.0)
 
+    def test_09_a_completer_absent_par_defaut(self):
+        """Une ligne normale (pas de clé a_completer) -> liste vide, aucune
+        régression pour les lignes/projets existants qui n'ont jamais vu
+        cette colonne."""
+        lots = [{"id": 10, "nom": "AB DEL", "nb_logements": None, "ordre": 0}]
+        lignes = [_ligne(id=1, lot_id=10, qte=1, prix_unitaire=100)]
+        r = compute_lot_totals(lignes, lots)
+        self.assertEqual(r["a_completer"], [])
+
+    def test_10_a_completer_qte_vide_apparait_avec_nom_du_lot(self):
+        lots = [{"id": 10, "nom": "AB DEL", "nb_logements": None, "ordre": 0}]
+        lignes = [_ligne(id=1, lot_id=10, qte=0, prix_unitaire=100,
+                          description="Gypse 1/2", a_completer=True)]
+        r = compute_lot_totals(lignes, lots)
+        self.assertEqual(len(r["a_completer"]), 1)
+        item = r["a_completer"][0]
+        self.assertEqual(item["description"], "Gypse 1/2")
+        self.assertEqual(item["lot_id"], 10)
+        self.assertEqual(item["lot_nom"], "AB DEL")
+
+    def test_11_a_completer_hors_lot_nomme_hors_lot(self):
+        lignes = [_ligne(id=1, lot_id=None, qte=0, prix_unitaire=100,
+                          description="Gypse 1/2", a_completer=True)]
+        r = compute_lot_totals(lignes, [])
+        self.assertEqual(r["a_completer"][0]["lot_nom"], "Hors lot")
+
+    def test_12_a_completer_disparait_des_que_la_quantite_est_saisie(self):
+        """Le badge/rappel est un calcul DYNAMIQUE (a_completer=TRUE ET qte
+        vide) -- aucun état à nettoyer explicitement."""
+        lots = [{"id": 10, "nom": "AB DEL", "nb_logements": None, "ordre": 0}]
+        lignes = [_ligne(id=1, lot_id=10, qte=3, prix_unitaire=100,
+                          description="Gypse 1/2", a_completer=True)]
+        r = compute_lot_totals(lignes, lots)
+        self.assertEqual(r["a_completer"], [])
+
+    def test_13_a_completer_ligne_inactive_exclue(self):
+        lots = [{"id": 10, "nom": "AB DEL", "nb_logements": None, "ordre": 0}]
+        lignes = [_ligne(id=1, lot_id=10, qte=0, prix_unitaire=100,
+                          description="Gypse 1/2", a_completer=True, actif=False)]
+        r = compute_lot_totals(lignes, lots)
+        self.assertEqual(r["a_completer"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
