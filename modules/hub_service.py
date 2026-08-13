@@ -220,8 +220,17 @@ def soft_delete_project(jwt_token: str, project_id: int) -> None:
     ne re-raise pas — sinon on perdrait le contexte de l'erreur Ad BUD
     originale qui doit remonter à l'utilisateur.
 
-    Ad HUB applique un soft-delete (deleted_at = NOW()) côté
-    app_hub.projects — la row reste auditable, juste invisible côté UI.
+    DEPUIS L'INCIDENT DU 2026-08-13, CET APPEL ÉCHOUE PAR CONCEPTION (403).
+    Le hub refuse tout DELETE de projet qui ne provient pas d'Ad HUB
+    (`_garde_suppression_depuis_hub` dans adision-app-api projects_api.py).
+    Six projets de production avaient été perdus parce qu'un module pouvait
+    effacer une fiche hub. La règle est désormais absolue : un projet ne se
+    supprime que depuis Ad HUB.
+
+    Conséquence assumée : si la création Ad BUD échoue après un create hub
+    réussi, le projet hub reste en place au lieu d'être annulé. Un orphelin
+    visible que Simon supprime en deux clics vaut mieux qu'une suppression
+    déclenchée à distance par un module. Le WARNING ci-dessous le signale.
     """
     try:
         _hub_request("DELETE", f"/api/projects/{project_id}", jwt_token)
