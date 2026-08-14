@@ -303,6 +303,21 @@ def _ensure_schema():
             "ALTER TABLE ad_budget.budget_lignes "
             "DROP COLUMN IF EXISTS hors_scope"
         )
+        # === Ratio de production M-O (2026-08-14) ===
+        # Colonnes Production / Unité de production sur la ligne (même ligne
+        # que qté matériaux — pas de lien inter-lignes). production_auto
+        # suit exactement la sémantique déjà en place pour "heures = qté"
+        # sur les lignes hr : TRUE = heures dérivées de qté / production ;
+        # FALSE = override manuel (l'utilisateur a tapé une valeur dans
+        # Heures). Vider le champ Heures repasse production_auto à TRUE.
+        # Pensé pour alimenter Ad TIM plus tard (catalogue de taux de
+        # production réutilisable) — hors scope de ce sprint.
+        cur.execute(
+            "ALTER TABLE ad_budget.budget_lignes "
+            "ADD COLUMN IF NOT EXISTS production_valeur NUMERIC(12,4) DEFAULT NULL, "
+            "ADD COLUMN IF NOT EXISTS production_unite TEXT DEFAULT NULL, "
+            "ADD COLUMN IF NOT EXISTS production_auto BOOLEAN NOT NULL DEFAULT TRUE"
+        )
         conn.commit()
         cur.close()
         conn.close()

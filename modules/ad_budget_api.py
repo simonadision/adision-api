@@ -6022,6 +6022,14 @@ def register_ad_budget_routes(get_conn):
             # Flag override HEURES : posé quand l'user saisit des heures à la main ->
             # la saisie prime sur le défaut « heures=qté » des lignes unité hr.
             "heures_manuelles",
+            # Ratio de production M-O (2026-08-14) : Production (ex. 128) + son
+            # unité (ex. "p2/h"), sur la MÊME ligne que qté — pas de lien
+            # inter-lignes. production_auto suit la même sémantique que
+            # heures_manuelles (TRUE = heures dérivées de qté/production côté
+            # front ; FALSE = override manuel de Heures). Le front envoie déjà
+            # `heures` recalculé, ces 3 champs ne servent qu'à la persistance
+            # + réutilisation future (Ad TIM).
+            "production_valeur", "production_unite", "production_auto",
             # Sprint OVERRIDES GÉNÉRALISATION — flags par champ override-able. La
             # saisie manuelle domine le carnet. Le front peut les envoyer
             # explicitement, mais la pose est AUSSI automatique ci-dessous dès
@@ -6049,7 +6057,7 @@ def register_ad_budget_routes(get_conn):
                     "qte_override", "taux_horaire_override",
                     "ajust_materiaux_override", "ajust_main_oeuvre_override",
                     "ajust_sous_traitant_override", "sous_traitant_montant_override",
-                    "prix_unitaire_st_override",
+                    "prix_unitaire_st_override", "production_auto",
                 ):
                     val = bool(val)
                 fields.append(f"{field} = %s")
