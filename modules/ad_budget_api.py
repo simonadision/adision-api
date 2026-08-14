@@ -4842,6 +4842,7 @@ def register_ad_budget_routes(get_conn):
                     totals_style.append(("LINEABOVE", (0, i), (-1, i), 1, colors.HexColor("#1e3a8a")))
                     totals_style.append(("TOPPADDING", (0, i), (-1, i), 8))
                     totals_style.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#eef4ff")))
+                    totals_style.append(("TEXTCOLOR", (0, i), (-1, i), colors.HexColor("#0F9D7A")))
                 elif kind == "tax":
                     totals_style.append(("LEFTPADDING", (0, i), (0, i), 32))
                     totals_style.append(("FONTSIZE", (0, i), (-1, i), 9))
