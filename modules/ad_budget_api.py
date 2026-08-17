@@ -6393,6 +6393,15 @@ def register_ad_budget_routes(get_conn):
             — les trois s'annulent). Les flags *_override correspondants
             sont remis à FALSE (une valeur à 0 qui resterait "override"
             bloquerait un futur resync Ad TYP/Ad MAT).
+
+        BUG 2026-08-17 (Simon, capture) — production_valeur, production_unite
+        et production_auto (ajoutés le 14 août, cf. api.py::_ensure_schema)
+        étaient absents de la liste ci-dessus : une ligne dupliquée perdait
+        Production/Ratio prod. (placeholder vide) alors que Heures, calculé
+        à partir de ces valeurs côté front AVANT l'écriture, restait correct
+        — d'où l'incohérence observée. Traités comme taux_horaire /
+        prix_unitaire_st (un TAUX, pas une quantité) : copiés tels quels
+        dans les DEUX branches avec_quantites, jamais remis à zéro.
         """
         _load_and_authorize_projet(get_conn, projet_id, user, "write")
         data = data or {}
@@ -6442,7 +6451,8 @@ def register_ad_budget_routes(get_conn):
                    prix_unitaire_override, heures_manuelles, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
                    qte_override, taux_horaire_override, ajust_materiaux_override, ajust_main_oeuvre_override,
                    ajust_sous_traitant_override, sous_traitant_montant_override,
-                   prix_unitaire_st, prix_unitaire_st_override)
+                   prix_unitaire_st, prix_unitaire_st_override,
+                   production_valeur, production_unite, production_auto)
                 SELECT %s, %s, source_item_id, section, description, unite, prix_unitaire, {sel_qte},
                    ajustement_pct, note, actif, source_file, type_source,
                    {sel_heures}, taux_horaire, cout_sous_traitant, sous_traitant_nom,
@@ -6452,7 +6462,8 @@ def register_ad_budget_routes(get_conn):
                    prix_unitaire_override, {sel_heures_manuelles}, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
                    {sel_qte_override}, taux_horaire_override, ajust_materiaux_override, ajust_main_oeuvre_override,
                    ajust_sous_traitant_override, {sel_st_montant_override},
-                   prix_unitaire_st, prix_unitaire_st_override
+                   prix_unitaire_st, prix_unitaire_st_override,
+                   production_valeur, production_unite, production_auto
                 FROM ad_budget.budget_lignes
                 WHERE projet_id = %s AND lot_id = %s
                 """,
