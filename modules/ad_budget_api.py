@@ -140,6 +140,18 @@ SURFACE_GYPSE_TERMS = ["plâtrage", "platrage", "peinture", "papier peint"]
 TPS_RATE = 0.05
 TVQ_RATE = 0.09975
 
+
+def _frca_num(value):
+    # Format fr-CA : séparateur de milliers = ESPACE, décimale = VIRGULE.
+    # Ex. 1234.5 -> "1 234,50". Miroir du formatter identique nommé, imbriqué
+    # dans _build_projet_report — ce niveau module sert les routes qui n'ont
+    # pas ce nid (ex. export_projet_pdf_lots, récap financier).
+    try:
+        v = float(value or 0)
+    except (TypeError, ValueError):
+        v = 0.0
+    return f"{v:,.2f}".replace(",", " ").replace(".", ",")
+
 # === Sprint A : whitelists pour validation des champs projet ===
 ALLOWED_STATUTS = {"brouillon", "adjuge", "complet", "perdu", "archive"}
 ALLOWED_TYPES_BATIMENT = {
@@ -590,6 +602,8 @@ def compute_budget_totals(projet, raw_lines):
     snap_mat = 0.0
     snap_mo = 0.0
     snap_st = 0.0
+    mo_h = 0.0
+    contremaitre_h = 0.0
     for l in raw_lines:
         qte = _effective_qte(l, 0, 0, 0, 0)
         heures = _heures_effectives(l.get("unite"), l.get("heures"), l.get("heures_manuelles"), qte)
@@ -612,6 +626,15 @@ def compute_budget_totals(projet, raw_lines):
         has_st = st_montant > 0
         if qte <= 0 and not has_mo and not has_st:
             continue
+        # Récap des heures (production vs contremaître) — même filtre et même
+        # test de description désaccentuée que _build_projet_report, pour que
+        # le bloc « heures » du récap financier concorde ligne pour ligne avec
+        # le rapport détaillé et l'écran (hoursBreakdown, App.jsx).
+        if heures > 0:
+            if _is_contremaitre(l.get("description")):
+                contremaitre_h += heures
+            else:
+                mo_h += heures
         prix = float(l.get("prix_unitaire") or 0)
         adj = float(l.get("ajustement_pct") or 0)
         st_mat = qte * prix * (1 + ajm / 100)
@@ -660,6 +683,14 @@ def compute_budget_totals(projet, raw_lines):
         "group_subtotals": gsub,
         "group_admin_profit": group_ap,
         "non_grouped_total": non_grouped_total,
+        # Heures — production (MO hors contremaître) vs contremaître, MÊME
+        # source que le bloc heures de _build_projet_report et hoursBreakdown
+        # (App.jsx). Ajouté pour le récap financier de « Ventilation par lot »
+        # (export_projet_pdf_lots) — aucun appelant existant ne lisait ces
+        # clés, ajout non cassant.
+        "heures_mo": mo_h,
+        "heures_contremaitre": contremaitre_h,
+        "heures_total": mo_h + contremaitre_h,
     }
 
 
@@ -3696,17 +3727,28 @@ def register_ad_budget_routes(get_conn):
         """Phase 4 (Lot) — export PDF « Ventilation par lot ». Trappe de
         secours reportlab pour le moteur SERVI par défaut côté client
         (jsPDF, @adision/report-pdf::buildLotVentilationPdf) : document
-        SIMPLE et INDÉPENDANT du rapport de calcul détaillé (_build_projet_report),
-        table Lot -> sous-total uniquement, jamais le détail ligne par ligne
-        CSI imbriqué (cf. commentaire de buildLotVentilationPdf.js). Les
-        sous-totaux et le grand total viennent EXCLUSIVEMENT de
+        SIMPLE, préfixé du RÉCAP FINANCIER en en-tête (brief Simon,
+        18 août 2026) — le même sommaire qu'à l'écran (matériaux/
+        main-d'œuvre incl. heures/sous-traitant, coûtant total,
+        administration et profit, sous-total avant taxes, TPS/TVQ, total
+        avec taxes) suivi de la table Lot -> sous-total, jamais le détail
+        ligne par ligne CSI imbriqué (cf. commentaire de
+        buildLotVentilationPdf.js).
+
+        Les sous-totaux par lot et le grand total viennent EXCLUSIVEMENT de
         compute_lot_totals (lots_calc.py) — aucune divergence possible avec
-        l'écran (Vue par lot) ni avec GET /lots.
+        l'écran (Vue par lot) ni avec GET /lots. Le récap financier vient
+        EXCLUSIVEMENT de compute_budget_totals — le CHEMIN DE CALCUL PARTAGÉ
+        du rapport de calcul détaillé et du prix de vente poussé au hub
+        (cf. docstring de compute_budget_totals) — donc les mêmes chiffres
+        que le bandeau « Récap financier » de l'écran (App.jsx), aux
+        divergences déjà connues et verrouillées près (D3/D4,
+        tests/test_divergences_ecran_rapport.py).
         """
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
-        cur.execute("SELECT ad_hub_project_id, arrondi_dollar, revision_label FROM ad_budget.projets WHERE id = %s", (projet_id,))
+        cur.execute("SELECT * FROM ad_budget.projets WHERE id = %s", (projet_id,))
         projet = cur.fetchone()
         if not projet:
             cur.close()
@@ -3719,7 +3761,7 @@ def register_ad_budget_routes(get_conn):
         )
         lots = cur.fetchall()
         cur.execute(
-            "SELECT id, description, a_completer, lot_id, actif, qte, prix_unitaire, ajust_materiaux, heures, "
+            "SELECT id, section, description, a_completer, lot_id, actif, qte, prix_unitaire, ajust_materiaux, heures, "
             "taux_horaire, ajust_main_oeuvre, sous_traitant_montant, ajust_sous_traitant, "
             "ajustement_pct, unite, heures_manuelles FROM ad_budget.budget_lignes "
             "WHERE projet_id = %s",
@@ -3731,14 +3773,49 @@ def register_ad_budget_routes(get_conn):
         result = compute_lot_totals(lignes_calc, lots, projet.get("arrondi_dollar"))
         nom_projet = _hub_project_name(projet, authorization, session_cookie) or "Projet"
 
+        # Récap financier — chemin PARTAGÉ (compute_budget_totals), sur les
+        # lignes ACTIVES seulement : même filtre que le rapport détaillé
+        # (actifs_seulement par défaut) et que l'écran (activeItems).
+        arr = bool(projet.get("arrondi_dollar"))
+
+        def R(v):
+            return float(_js_round(v)) if arr else v
+
+        raw_lignes_actives = [l for l in lignes_calc if l.get("actif", True)]
+        totals = compute_budget_totals(projet, raw_lignes_actives)
+        coutant_total = result["grand_total"]
+        sous_total_avant_taxes = totals["sous_total_avant_taxes"]
+        admin_profit_total = sous_total_avant_taxes - coutant_total
+        tps_amount = totals["tps"]
+        tvq_amount = totals["tvq"]
+        total_general = totals["total_general"]
+        mat_total = R(totals["snap_mat"])
+        mo_total = R(totals["snap_mo"])
+        st_total = R(totals["snap_st"])
+        mo_h = totals["heures_mo"]
+        contremaitre_h = totals["heures_contremaitre"]
+
         buf = io.BytesIO()
         doc = SimpleDocTemplate(
             buf, pagesize=letter,
             leftMargin=1.5 * cm, rightMargin=1.5 * cm, topMargin=1.5 * cm, bottomMargin=1.5 * cm,
         )
+        total_w = letter[0] - 3 * cm
         styles = getSampleStyleSheet()
         title_style = ParagraphStyle("LotTitle", parent=styles["Title"], fontSize=15, alignment=0)
         sub_style = ParagraphStyle("LotSub", parent=styles["Normal"], fontSize=9, textColor=colors.HexColor("#475569"))
+        recap_title_style = ParagraphStyle("RecapTitle", parent=styles["Normal"], fontSize=12, fontName="Helvetica-Bold", textColor=colors.HexColor("#1e3a8a"))
+        card_label_mat_style = ParagraphStyle("CardLabelMat", parent=styles["Normal"], fontSize=8, fontName="Helvetica-Bold", textColor=colors.HexColor("#1e3a8a"))
+        card_label_mo_style = ParagraphStyle("CardLabelMo", parent=styles["Normal"], fontSize=8, fontName="Helvetica-Bold", textColor=colors.HexColor("#c62828"))
+        card_label_st_style = ParagraphStyle("CardLabelSt", parent=styles["Normal"], fontSize=8, fontName="Helvetica-Bold", textColor=colors.HexColor("#047857"))
+        card_value_style = ParagraphStyle("CardValue", parent=styles["Normal"], fontSize=13, fontName="Helvetica-Bold", textColor=colors.black)
+        card_hours_style = ParagraphStyle("CardHours", parent=styles["Normal"], fontSize=8, textColor=colors.HexColor("#475569"))
+
+        def _h(v):
+            # fr-CA, pas de décimale inutile si entier — même format que le
+            # bloc heures de _build_projet_report.
+            s = f"{v:,.0f}" if float(v).is_integer() else f"{v:,.1f}"
+            return s.replace(",", " ").replace(".", ",")
 
         rows = [["Lot", "Nb logements", "Nb lignes", "Sous-total"]]
         for lot in result["lots"]:
@@ -3772,9 +3849,104 @@ def register_ad_budget_routes(get_conn):
         story = [
             Paragraph(nom_projet.upper(), title_style),
             Paragraph(f"Ventilation par lot — {projet.get('revision_label') or 'Originale'}", sub_style),
-            Spacer(1, 18),
-            table,
+            Spacer(1, 16),
         ]
+
+        # ── RÉCAP FINANCIER — 3 cartes (Mat/MO/ST) + pipeline de synthèse.
+        #    Gaté sur lignes_calc non vide, MÊME condition que l'écran
+        #    (« Le bloc ne dépend plus de lignes.length > 0 [pour la barre
+        #    Budget du projet] ... seules les cartes et la ligne de synthèse
+        #    restent conditionnelles », App.jsx) — un projet sans lignes
+        #    n'affiche pas un récap à zéro. ──
+        if lignes_calc:
+            card_rows = [
+                [Paragraph("MATÉRIAUX", card_label_mat_style), Paragraph("MAIN-D'ŒUVRE", card_label_mo_style), Paragraph("SOUS-TRAITANT", card_label_st_style)],
+                [
+                    Paragraph(f"{_frca_num(mat_total)} $", card_value_style),
+                    Paragraph(f"{_frca_num(mo_total)} $", card_value_style),
+                    Paragraph(f"{_frca_num(st_total)} $", card_value_style),
+                ],
+            ]
+            if (mo_h + contremaitre_h) > 0:
+                card_rows.append([
+                    "",
+                    Paragraph(
+                        f"MO : {_h(mo_h)} h · Contremaître : {_h(contremaitre_h)} h · Total : {_h(mo_h + contremaitre_h)} h",
+                        card_hours_style,
+                    ),
+                    "",
+                ])
+            third_w = total_w / 3
+            cards_table = Table(card_rows, colWidths=[third_w, third_w, third_w])
+            cards_table.setStyle(TableStyle([
+                ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
+                ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#e2e8f0")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 10),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]))
+
+            pipeline_rows = [["Coûtant total", f"{_frca_num(coutant_total)} $"]]
+            pipeline_kinds = ["plain"]
+            # Même seuil que l'écran (App.jsx : (sousTotalAvantTaxes - grandTotal) > 0.005).
+            if admin_profit_total > 0.005:
+                pipeline_rows.append(["Administration et profit", f"{_frca_num(admin_profit_total)} $"])
+                pipeline_kinds.append("admin")
+            pipeline_rows.append(["Sous-total avant taxes", f"{_frca_num(sous_total_avant_taxes)} $"])
+            pipeline_kinds.append("subtotal_taxes")
+            pipeline_rows.append([f"TPS {TPS_RATE * 100:g}%", f"{_frca_num(tps_amount)} $"])
+            pipeline_kinds.append("tax")
+            pipeline_rows.append([f"TVQ {TVQ_RATE * 100:g}%", f"{_frca_num(tvq_amount)} $"])
+            pipeline_kinds.append("tax")
+            pipeline_rows.append(["TOTAL avec taxes", f"{_frca_num(total_general)} $"])
+            pipeline_kinds.append("grand")
+
+            pipeline_style = [
+                ("LEFTPADDING", (0, 0), (-1, -1), 12),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                ("FONTSIZE", (0, 0), (-1, -1), 10),
+                ("BOX", (0, 0), (-1, -1), 0.4, colors.grey),
+            ]
+            for i, kind in enumerate(pipeline_kinds):
+                if kind == "admin":
+                    pipeline_style.append(("LEFTPADDING", (0, i), (0, i), 24))
+                    pipeline_style.append(("TEXTCOLOR", (0, i), (-1, i), colors.HexColor("#475569")))
+                elif kind == "subtotal_taxes":
+                    pipeline_style.append(("FONTNAME", (0, i), (-1, i), "Helvetica-Bold"))
+                    pipeline_style.append(("LINEABOVE", (0, i), (-1, i), 1, colors.HexColor("#1e3a8a")))
+                    pipeline_style.append(("TOPPADDING", (0, i), (-1, i), 8))
+                    pipeline_style.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#eef4ff")))
+                    pipeline_style.append(("TEXTCOLOR", (0, i), (-1, i), colors.HexColor("#0F9D7A")))
+                elif kind == "tax":
+                    pipeline_style.append(("LEFTPADDING", (0, i), (0, i), 24))
+                    pipeline_style.append(("FONTSIZE", (0, i), (-1, i), 9))
+                    pipeline_style.append(("TEXTCOLOR", (0, i), (-1, i), colors.HexColor("#475569")))
+                elif kind == "grand":
+                    pipeline_style.append(("FONTNAME", (0, i), (-1, i), "Helvetica-Bold"))
+                    pipeline_style.append(("FONTSIZE", (0, i), (-1, i), 12))
+                    pipeline_style.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#1e3a8a")))
+                    pipeline_style.append(("TEXTCOLOR", (0, i), (-1, i), colors.white))
+                    pipeline_style.append(("TOPPADDING", (0, i), (-1, i), 9))
+                    pipeline_style.append(("BOTTOMPADDING", (0, i), (-1, i), 9))
+                    pipeline_style.append(("LINEABOVE", (0, i), (-1, i), 1.5, colors.HexColor("#1e3a8a")))
+            pipeline_table = Table(pipeline_rows, colWidths=[total_w * (400 / 526), total_w * (126 / 526)])
+            pipeline_table.setStyle(TableStyle(pipeline_style))
+
+            story += [
+                Paragraph("RÉCAP FINANCIER", recap_title_style),
+                Spacer(1, 6),
+                cards_table,
+                Spacer(1, 10),
+                pipeline_table,
+                Spacer(1, 20),
+            ]
+
+        story.append(table)
 
         # Phase C+D (Lot) — rappel des lignes "à compléter" ENCORE à quantité
         # vide au moment de l'export (avertissement, jamais un blocage —
