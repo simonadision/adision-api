@@ -18,9 +18,29 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import fitz  # noqa: E402
+import pytest  # noqa: E402
 from tests._harness import (  # noqa: E402
     make_get_conn, make_projet, make_ligne, make_devis, extract_nested,
 )
+
+
+@pytest.fixture(autouse=True)
+def _restaure_hub_service_apres_chaque_test():
+    """Garde-fou d'isolation — _patch_no_network() ci-dessous mute DIRECTEMENT
+    modules.hub_service.resolve_hub_identity / fetch_client / fetch_organization
+    (le paramètre `monkeypatch=None` de _patch_no_network n'a jamais été câblé
+    à pytest.monkeypatch, donc rien ne restaure ces attributs). C'est un module
+    SINGLETON (B.hub_service, D.hub_service et H sont le MÊME objet) : la
+    mutation SURVIT à ce fichier et pollue tout test lancé après lui dans la
+    même session pytest — constaté le 18 août 2026, `test_pdf_lots_recap.py`
+    héritait ici de `resolve_hub_identity` patché, donnant une fausse identité
+    à un test qui n'appelait pourtant aucun réseau. Restaure après CHAQUE test
+    de ce fichier plutôt que de recâbler les 8 signatures de test existantes."""
+    import modules.hub_service as H
+    saved = {name: getattr(H, name) for name in ("resolve_hub_identity", "fetch_client", "fetch_organization")}
+    yield
+    for name, fn in saved.items():
+        setattr(H, name, fn)
 
 
 def _patch_no_network(monkeypatch=None):

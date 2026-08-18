@@ -224,3 +224,78 @@ def test_projet_sans_lignes_pas_de_recap():
     text = _pdf_text(raw)
     assert "RÉCAP FINANCIER" not in text
     assert "GRAND TOTAL" in text
+
+
+def test_sans_auth_bloc_client_entrepreneur_present_avec_tirets():
+    """Brief priorité absolue, 18 août 2026 — le bloc CLIENT/ENTREPRENEUR doit
+    être présent MÊME sans identité résolue (authorization=None comme les deux
+    tests ci-dessus) : dégradé propre en tirets, jamais absent ni de crash."""
+    projet = {
+        "id": 42, "ad_hub_project_id": None, "arrondi_dollar": False,
+        "revision_label": "Originale", "pct_admin_mode": "global",
+    }
+    get_conn = _make_get_conn(projet, [], [])
+    route = _get_route(get_conn)
+    response = route(42, user=_USER, authorization=None, session_cookie=None)
+    raw = _response_bytes(response)
+    assert raw[:5] == b"%PDF-"
+    text = _pdf_text(raw)
+    assert "CLIENT" in text
+    assert "ENTREPRENEUR" in text
+    assert "Nom du client" in text
+    assert "Numéro du projet" in text
+    assert "Contact entrepreneur" in text
+
+
+def test_avec_identite_snapshot_bloc_client_entrepreneur_rempli(monkeypatch):
+    """Identité résolue -> les VRAIES valeurs apparaissent dans le PDF,
+    exactement comme sur le rapport de calcul (capture Simon, HABVA60_85770 :
+    CDC, Louise-Nadine Langlois, Simon Hachey, ...).
+
+    Épingle hub_service.resolve_hub_identity_with_fallback via le fixture
+    pytest `monkeypatch` (auto-restauré en fin de test) plutôt que de
+    dépendre du VRAI chemin snapshot/hub : plusieurs AUTRES fichiers de ce
+    dépôt monkeypatchent ce même attribut de module (singleton partagé,
+    `modules.hub_service`) SANS restaurer (test_devis_contract.py,
+    tests/devis_fidelity/reportlab_ref.py) — un test qui compte sur l'état
+    "propre" de ce singleton est fragile à l'ORDRE d'exécution de la suite
+    complète (constaté le 18 août 2026 : ce test passait seul et échouait
+    dans `pytest tests/`, polluant les valeurs attendues)."""
+    import modules.hub_service as H
+
+    ident = {
+        "nom": "Rénovation intérieure d'unités de logements-HABVA60_85770",
+        "nom_client": "CDC",
+        "contact_client": "Louise-Nadine Langlois",
+        "email_client": "louise-nadine.langlois@dcc-cdc.gc.ca",
+        "telephone_client": "(418) 576-8350",
+        "numero_projet": "HABVA60_85770",
+        "date_debut": None,
+        "date_fin": None,
+        "contact_entrepreneur": "Simon Hachey",
+        "email_entrepreneur": "simon@contracta.ca",
+        "telephone_entrepreneur": "418-983-3618",
+    }
+    monkeypatch.setattr(H, "resolve_hub_identity_with_fallback", lambda projet, jwt, cache: (ident, "snapshot"))
+
+    projet = {
+        "id": 42, "ad_hub_project_id": None, "arrondi_dollar": False,
+        "revision_label": "Originale", "pct_admin_mode": "global",
+    }
+    get_conn = _make_get_conn(projet, [], [])
+    route = _get_route(get_conn)
+    response = route(42, user=_USER, authorization="Bearer faketoken", session_cookie=None)
+    raw = _response_bytes(response)
+    assert raw[:5] == b"%PDF-"
+    text = _pdf_text(raw)
+    # Espaces normalisés : Paragraph/reportlab replie "Contact entrepreneur :
+    # Simon Hachey" sur 2 lignes selon la largeur de sous-colonne (comportement
+    # HÉRITÉ de _build_projet_report, inchangé par la factorisation — pas une
+    # régression de ce brief) -- on ne teste PAS le retour à la ligne exact.
+    norm = " ".join(text.split())
+    assert "CDC" in norm
+    assert "Louise-Nadine Langlois" in norm
+    assert "HABVA60_85770" in norm
+    assert "Simon Hachey" in norm
+    assert "simon@contracta.ca" in norm
+    assert "418-983-3618" in norm

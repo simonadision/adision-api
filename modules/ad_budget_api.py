@@ -278,6 +278,89 @@ def _persist_hub_identity_snapshot(cur, projet_id, identity: dict) -> None:
         print(f"[hub_identity_snapshot] persist échec projet={projet_id}: {e}", flush=True)
 
 
+def _build_client_entrepreneur_header(total_w, ident: dict):
+    """Bloc CLIENT / ENTREPRENEUR (2 colonnes) — PARTAGÉ par le rapport de
+    calcul (_build_projet_report) et « Ventilation par lot »
+    (export_projet_pdf_lots). Factorisé ici (brief priorité absolue,
+    18 août 2026 — capture du rapport de calcul fournie par Simon comme
+    spécification EXACTE) plutôt que dupliqué : toute correction future de
+    libellé/format profite aux deux exports d'un seul coup.
+
+    `ident` = identité résolue par hub_service.resolve_hub_identity(_with_fallback)
+    — nom, nom_client, contact_client, email_client, telephone_client,
+    numero_projet, date_debut, date_fin, contact_entrepreneur,
+    email_entrepreneur, telephone_entrepreneur. Champ absent -> tiret gris
+    (field_line), jamais de crash. Retourne un unique Flowable (Table)."""
+    info_style = ParagraphStyle("Info", parent=getSampleStyleSheet()["Normal"], fontSize=9, leading=13)
+
+    def fmt_date(v):
+        if v is None or v == "":
+            return ""
+        if hasattr(v, "strftime"):
+            return v.strftime("%Y-%m-%d")
+        return str(v)
+
+    def field_line(label, value):
+        if value:
+            return f"<b>{label}</b> : {value}"
+        return f"<b>{label}</b> : <font color='#94a3b8'>—</font>"
+
+    client_html = "<br/>".join([
+        "<b><font size='10' color='#1e3a8a'>CLIENT</font></b>",
+        field_line("Nom du projet", ident.get("nom")),
+        field_line("Nom du client", ident.get("nom_client")),
+        field_line("Contact", ident.get("contact_client")),
+        field_line("Courriel", ident.get("email_client")),
+        field_line("Téléphone", ident.get("telephone_client")),
+    ])
+    # ENTREPRENEUR : titre sur toute la largeur, puis 2 sous-colonnes
+    ent_heading_html = "<b><font size='10' color='#1e3a8a'>ENTREPRENEUR</font></b>"
+    ent_left_html = "<br/>".join([
+        field_line("Date du jour", date.today().strftime("%Y-%m-%d")),
+        field_line("Numéro du projet", ident.get("numero_projet")),
+        field_line("Date début travaux", fmt_date(ident.get("date_debut"))),
+        field_line("Date fin travaux", fmt_date(ident.get("date_fin"))),
+    ])
+    ent_right_html = "<br/>".join([
+        field_line("Contact entrepreneur", ident.get("contact_entrepreneur")),
+        field_line("Courriel", ident.get("email_entrepreneur")),
+        field_line("Téléphone", ident.get("telephone_entrepreneur")),
+    ])
+
+    client_para = Paragraph(client_html, info_style)
+    ent_heading_para = Paragraph(ent_heading_html, info_style)
+    ent_left_para = Paragraph(ent_left_html, info_style)
+    ent_right_para = Paragraph(ent_right_html, info_style)
+
+    col_w = total_w / 2  # 2 colonnes égales (Client / Entrepreneur)
+    ent_subtable = Table(
+        [[ent_heading_para, ""], [ent_left_para, ent_right_para]],
+        colWidths=[col_w / 2, col_w / 2],
+    )
+    ent_subtable.setStyle(TableStyle([
+        ("SPAN", (0, 0), (1, 0)),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 1), (0, 1), 10),  # gap horizontal entre sous-cols
+    ]))
+
+    header_table = Table(
+        [[client_para, ent_subtable]],
+        colWidths=[col_w, col_w],
+    )
+    header_table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    return header_table
+
+
 def _create_snapshot(cur, projet_row, trigger_event: str, ident: dict) -> int:
     """Crée un snapshot du projet dans app_ana.project_snapshots et le marque
     is_latest=TRUE. Marque les anciens snapshots du même projet à FALSE et
@@ -3773,6 +3856,34 @@ def register_ad_budget_routes(get_conn):
         result = compute_lot_totals(lignes_calc, lots, projet.get("arrondi_dollar"))
         nom_projet = _hub_project_name(projet, authorization, session_cookie) or "Projet"
 
+        # IDENTITÉ (bloc CLIENT / ENTREPRENEUR) — MÊME résolution que le rapport
+        # de calcul (_build_projet_report) : hub source unique, repli sur le
+        # snapshot local si le hub est injoignable, jamais de 502 pour ce motif.
+        # Brief priorité absolue (18 août 2026) : ce bloc manquait entièrement
+        # ici alors qu'il existe depuis longtemps sur le rapport de calcul.
+        # Tolérant : la route est déjà gardée par Depends(jwt_user) — en
+        # production authorization/session_cookie sont donc déjà valides ici.
+        # Extraction directe quand même DÉFENSIVE (jamais de crash pour ce
+        # bloc best-effort) : un appel direct (tests, harnais) sans l'un ni
+        # l'autre dégrade juste vers l'identité vide (tirets), comme
+        # _build_projet_report le fait déjà pour son propre jwt_token.
+        try:
+            _jwt_token = _extract_bearer(authorization, None, session_cookie)
+        except HTTPException:
+            _jwt_token = None
+        _hub_cache = {}
+        if _jwt_token:
+            _ident, _ident_source = hub_service.resolve_hub_identity_with_fallback(projet, _jwt_token, _hub_cache)
+        else:
+            _ident, _ident_source = {}, "none"
+        if _ident_source == "hub":
+            try:
+                _cc = get_conn(); _ccur = _cc.cursor()
+                _persist_hub_identity_snapshot(_ccur, projet_id, _ident)
+                _cc.commit(); _ccur.close(); _cc.close()
+            except Exception:
+                pass  # best-effort
+
         # Récap financier — chemin PARTAGÉ (compute_budget_totals), sur les
         # lignes ACTIVES seulement : même filtre que le rapport détaillé
         # (actifs_seulement par défaut) et que l'écran (activeItems).
@@ -3851,6 +3962,13 @@ def register_ad_budget_routes(get_conn):
             Paragraph(f"Ventilation par lot — {projet.get('revision_label') or 'Originale'}", sub_style),
             Spacer(1, 16),
         ]
+
+        # ── CLIENT / ENTREPRENEUR — bloc PARTAGÉ avec le rapport de calcul
+        #    (_build_client_entrepreneur_header), brief priorité absolue du
+        #    18 août 2026 : reproduire EXACTEMENT ce bloc, mêmes libellés,
+        #    mêmes champs, même ordre (spécification = capture Simon). ──
+        story.append(_build_client_entrepreneur_header(total_w, _ident))
+        story.append(Spacer(1, 14))
 
         # ── RÉCAP FINANCIER — 3 cartes (Mat/MO/ST) + pipeline de synthèse.
         #    Gaté sur lignes_calc non vide, MÊME condition que l'écran
@@ -4246,74 +4364,7 @@ def register_ad_budget_routes(get_conn):
         story.append(title_row)
         story.append(Spacer(1, 14))
 
-        info_style = ParagraphStyle("Info", parent=ss["Normal"], fontSize=9, leading=13)
-
-        def fmt_date(v):
-            if v is None or v == "":
-                return ""
-            if hasattr(v, "strftime"):
-                return v.strftime("%Y-%m-%d")
-            return str(v)
-
-        def field_line(label, value):
-            if value:
-                return f"<b>{label}</b> : {value}"
-            return f"<b>{label}</b> : <font color='#94a3b8'>—</font>"
-
-        client_html = "<br/>".join([
-            "<b><font size='10' color='#1e3a8a'>CLIENT</font></b>",
-            field_line("Nom du projet", _ident.get("nom")),
-            field_line("Nom du client", _ident.get("nom_client")),
-            field_line("Contact", _ident.get("contact_client")),
-            field_line("Courriel", _ident.get("email_client")),
-            field_line("Téléphone", _ident.get("telephone_client")),
-        ])
-        # ENTREPRENEUR : titre sur toute la largeur, puis 2 sous-colonnes
-        ent_heading_html = "<b><font size='10' color='#1e3a8a'>ENTREPRENEUR</font></b>"
-        ent_left_html = "<br/>".join([
-            field_line("Date du jour", date.today().strftime("%Y-%m-%d")),
-            field_line("Numéro du projet", _ident.get("numero_projet")),
-            field_line("Date début travaux", fmt_date(_ident.get("date_debut"))),
-            field_line("Date fin travaux", fmt_date(_ident.get("date_fin"))),
-        ])
-        ent_right_html = "<br/>".join([
-            field_line("Contact entrepreneur", _ident.get("contact_entrepreneur")),
-            field_line("Courriel", _ident.get("email_entrepreneur")),
-            field_line("Téléphone", _ident.get("telephone_entrepreneur")),
-        ])
-
-        client_para = Paragraph(client_html, info_style)
-        ent_heading_para = Paragraph(ent_heading_html, info_style)
-        ent_left_para = Paragraph(ent_left_html, info_style)
-        ent_right_para = Paragraph(ent_right_html, info_style)
-
-        col_w = total_w / 2  # 2 colonnes égales (Client / Entrepreneur)
-        ent_subtable = Table(
-            [[ent_heading_para, ""], [ent_left_para, ent_right_para]],
-            colWidths=[col_w / 2, col_w / 2],
-        )
-        ent_subtable.setStyle(TableStyle([
-            ("SPAN", (0, 0), (1, 0)),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 0),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-            ("TOPPADDING", (0, 0), (-1, -1), 0),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-            ("RIGHTPADDING", (0, 1), (0, 1), 10),  # gap horizontal entre sous-cols
-        ]))
-
-        header_table = Table(
-            [[client_para, ent_subtable]],
-            colWidths=[col_w, col_w],
-        )
-        header_table.setStyle(TableStyle([
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 0),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-            ("TOPPADDING", (0, 0), (-1, -1), 0),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-        ]))
-        story.append(header_table)
+        story.append(_build_client_entrepreneur_header(total_w, _ident))
         story.append(Spacer(1, 14))
 
 
