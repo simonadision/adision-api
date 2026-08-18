@@ -49,7 +49,8 @@ class _FakeCreateLigneCursor:
         if "insert into ad_budget.budget_lignes" in s and "returning" in s:
             (projet_id, source_item_id, section, description, unite, prix_unitaire,
              qte, ajustement_pct, note, actif, item_id_ad_mat, ad_hub_pending_id,
-             taux_horaire, lot_id, a_completer) = params
+             taux_horaire, lot_id, a_completer,
+             heures, heures_manuelles, production_valeur, production_unite) = params
             self._db["next_id"] += 1
             row = {
                 "id": self._db["next_id"], "projet_id": projet_id,
@@ -58,6 +59,8 @@ class _FakeCreateLigneCursor:
                 "qte": qte, "ajustement_pct": ajustement_pct, "note": note, "actif": actif,
                 "item_id_ad_mat": item_id_ad_mat, "ad_hub_pending_id": ad_hub_pending_id,
                 "taux_horaire": taux_horaire, "lot_id": lot_id, "a_completer": a_completer,
+                "heures": heures, "heures_manuelles": heures_manuelles,
+                "production_valeur": production_valeur, "production_unite": production_unite,
             }
             self._db["lignes"].append(row)
             self._pending = ("one", dict(row))
@@ -146,8 +149,40 @@ def test_lot_id_bien_route_a_la_creation():
     assert out["ligne"]["lot_id"] == 42, out
 
 
+def test_production_et_heures_persistees_a_la_creation():
+    """Brief pont 2026-08-18 — modale « Nouvelle ligne » : Production /
+    Unité de production / Heures saisis à la création ne doivent plus être
+    perdus (avant ce correctif, seul le PUT ultérieur les persistait —
+    l'INSERT ne portait pas ces colonnes)."""
+    db = _make_db()
+    create_ligne = _get_create_ligne(lambda: _FakeCreateLigneConn(db))
+    out = _call(create_ligne, 290, {
+        "section": "06 40 00.01", "taux_horaire": 0, "lot_id": 10,
+        "heures": 2.5, "heures_manuelles": True,
+        "production_valeur": 128, "production_unite": "pi2/h",
+    })
+    assert out["ligne"]["heures"] == 2.5, out
+    assert out["ligne"]["heures_manuelles"] is True, out
+    assert out["ligne"]["production_valeur"] == 128, out
+    assert out["ligne"]["production_unite"] == "pi2/h", out
+
+
+def test_production_et_heures_absents_par_defaut():
+    """Non-régression : une création sans ces champs (comportement historique)
+    ne pose ni production_valeur ni heures_manuelles."""
+    db = _make_db()
+    create_ligne = _get_create_ligne(lambda: _FakeCreateLigneConn(db))
+    out = _call(create_ligne, 290, {"section": "06 40 00.01", "taux_horaire": 0})
+    assert out["ligne"]["heures"] == 0, out
+    assert out["ligne"]["heures_manuelles"] is False, out
+    assert out["ligne"]["production_valeur"] is None, out
+    assert out["ligne"]["production_unite"] is None, out
+
+
 if __name__ == "__main__":
     test_a_completer_absent_par_defaut_false()
     test_a_completer_true_pose_uniquement_sur_la_copie_demandee()
     test_lot_id_bien_route_a_la_creation()
-    print("3/3 PASS")
+    test_production_et_heures_persistees_a_la_creation()
+    test_production_et_heures_absents_par_defaut()
+    print("5/5 PASS")

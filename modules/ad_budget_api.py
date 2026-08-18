@@ -5511,11 +5511,22 @@ def register_ad_budget_routes(get_conn):
             resolved = _resolve_taux_default(section, conn)
             taux_horaire = resolved if resolved is not None else 0
 
+        # Brief pont 2026-08-18 — modale « Nouvelle ligne » : Production /
+        # Unité de production / Heures étaient saisissables dès la création
+        # côté front (MultiLotLigneModal) mais silencieusement PERDUS ici —
+        # seul le PUT (update_budget_ligne) les persistait. On les accepte
+        # maintenant à la création, même colonnes que le PUT (production_valeur,
+        # production_unite, heures, heures_manuelles), production_auto laissé
+        # à son défaut BD (TRUE) comme partout ailleurs à la création.
+        production_valeur = data.get("production_valeur")
+        production_valeur = production_valeur if production_valeur else None
+
         cur.execute("""
             INSERT INTO ad_budget.budget_lignes
             (projet_id, source_item_id, section, description, unite, prix_unitaire, qte, ajustement_pct, note, actif,
-             item_id_ad_mat, ad_hub_pending_id, taux_horaire, lot_id, a_completer)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             item_id_ad_mat, ad_hub_pending_id, taux_horaire, lot_id, a_completer,
+             heures, heures_manuelles, production_valeur, production_unite)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """, (
             projet_id,
@@ -5538,6 +5549,10 @@ def register_ad_budget_routes(get_conn):
             # la ligne d'origine. Cf. lots_calc.compute_lot_totals pour la
             # sortie automatique du badge/rappel dès qu'une quantité est saisie.
             bool(data.get("a_completer", False)),
+            data.get("heures", 0),
+            bool(data.get("heures_manuelles", False)),
+            production_valeur,
+            data.get("production_unite") or None,
         ))
         row = cur.fetchone()
         conn.commit()
