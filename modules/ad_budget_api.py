@@ -5234,11 +5234,19 @@ def register_ad_budget_routes(get_conn):
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
+        # Sprint drag-items (17 août 2026) — `ordre` remplace `description`
+        # comme tri secondaire : c'est LUI que le glisser-déposer de la grille
+        # met à jour désormais (cf. reorder_budget_lignes plus bas), pas
+        # `description`. La migration sprint_budget_lignes_ordre.sql backfill
+        # `ordre` sur l'ordre alphabétique existant au déploiement — aucune
+        # ligne ne bouge au premier chargement, seul un futur drag divergera.
+        # `id` en dernier recours (lignes neuves, toutes à ordre=0 par défaut,
+        # gardent au moins un ordre stable = leur ordre de création).
         cur.execute("""
             SELECT *
             FROM ad_budget.budget_lignes
             WHERE projet_id = %s
-            ORDER BY section, description;
+            ORDER BY section, ordre, id;
         """, (projet_id,))
         rows = cur.fetchall()
         cur.close()
@@ -6102,6 +6110,82 @@ def register_ad_budget_routes(get_conn):
         _mark_budget_dirty_if_emitted(projet_id)  # mutation de ligne -> snapshot
         _push_budget_snapshot(get_conn, projet_id, authorization, session_cookie)  # pipeline Ad ANA (fire-and-forget)
         return {"status": "updated"}
+
+    # ─────────────────────────────────────────────────────────────────
+    # PATCH /projets/{projet_id}/lignes/reorder
+    # Sprint drag-items (17 août 2026) — glisser-déposer intra/cross-section
+    # des LIGNES, copie conforme reorder_items d'Ad EST (adision-est-api/
+    # modules/estimation_items_api.py). Recalcule `ordre` ET `section` (si
+    # fournie) pour une liste de lignes en une transaction.
+    # Payload : {"items": [{"id": int, "section": str|null, "ordre": int}, …]}
+    #
+    # DÉCLARÉE AVANT patch_budget_ligne (juste au-dessus, PAS en dessous) :
+    # même piège que documenté côté Ad EST — Starlette dispatche les routes
+    # par PATTERN d'URL, dans l'ordre de DÉCLARATION, avant toute validation
+    # de type. `{ligne_id}` matche n'importe quel segment (y compris
+    # "reorder") ; si patch_budget_ligne était déclarée en premier, un PATCH
+    # .../lignes/reorder tomberait dedans avec ligne_id="reorder" → 422
+    # (coercion int échouée) au lieu d'atteindre cette route. Vérifié dans
+    # le commentaire de reorder_items (Ad EST) : bug déjà vécu et corrigé
+    # là-bas — pas de raison de le revivre ici.
+    # ─────────────────────────────────────────────────────────────────
+    @router.patch("/projets/{projet_id}/lignes/reorder")
+    def reorder_budget_lignes(projet_id: int, data: dict, user=Depends(jwt_user)):
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        items = (data or {}).get("items") or []
+        if not items or not isinstance(items, list):
+            raise HTTPException(
+                status_code=400,
+                detail="`items` (array) requis avec au moins une entrée",
+            )
+        for entry in items:
+            if not isinstance(entry, dict) or "id" not in entry or "ordre" not in entry:
+                raise HTTPException(
+                    status_code=400,
+                    detail="chaque item doit contenir id + ordre (+ section optionnel)",
+                )
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            # Vérification d'appartenance : toutes les lignes doivent
+            # appartenir au projet_id, même garde que reorder_items (Ad EST) —
+            # sinon un client malicieux pourrait écraser l'ordre d'un projet
+            # voisin (id purement séquentiel, pas de scoping implicite).
+            ligne_ids = [e["id"] for e in items]
+            cur.execute(
+                "SELECT id FROM ad_budget.budget_lignes WHERE projet_id = %s AND id = ANY(%s)",
+                (projet_id, ligne_ids),
+            )
+            found_ids = {r["id"] for r in cur.fetchall()}
+            missing = [i for i in ligne_ids if i not in found_ids]
+            if missing:
+                raise HTTPException(status_code=404, detail=f"Lignes inconnues ou hors projet : {missing}")
+
+            updated = 0
+            for entry in items:
+                section_set = "section = %s, " if "section" in entry else ""
+                sql = (
+                    f"UPDATE ad_budget.budget_lignes "
+                    f"SET {section_set}ordre = %s, updated_at = NOW() "
+                    f"WHERE id = %s AND projet_id = %s"
+                )
+                params = []
+                if "section" in entry:
+                    params.append(entry["section"])
+                params.extend([int(entry["ordre"]), entry["id"], projet_id])
+                cur.execute(sql, params)
+                updated += cur.rowcount
+            conn.commit()
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Reorder échoué : {e}")
+        finally:
+            cur.close()
+            conn.close()
+        return {"status": "reordered", "nb": updated}
 
     @router.patch("/projets/{projet_id}/lignes/{ligne_id}")
     def patch_budget_ligne(projet_id: int, ligne_id: int, data: dict,
