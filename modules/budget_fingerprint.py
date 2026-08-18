@@ -70,7 +70,12 @@ def _line_total(arr, l):
     qte = float(l.get("qte") or 0)
     heures = _heures_effectives(l.get("unite"), l.get("heures"), l.get("heures_manuelles"), qte)
     taux = float(l.get("taux_horaire") or 0)
-    st_montant = float(l.get("sous_traitant_montant") or 0)
+    # Règle #2 (2026-08-17, décision Simon) : QTÉ=0 exclut TOUJOURS le montant
+    # ST — même gate que compute_budget_totals (ad_budget_api.py) et getRow
+    # (App.jsx). Sans lui, l'empreinte du devis (et lots_calc.py, qui délègue
+    # à cette fonction) continuerait de compter une ligne que l'écran/le
+    # rapport excluent désormais -> dérive détectée à tort à l'émission.
+    st_montant = float(l.get("sous_traitant_montant") or 0) if qte > 0 else 0.0
     prix = float(l.get("prix_unitaire") or 0)
     ajm = float(l.get("ajust_materiaux") or 0)
     ajmo = float(l.get("ajust_main_oeuvre") or 0)

@@ -594,7 +594,17 @@ def compute_budget_totals(projet, raw_lines):
         qte = _effective_qte(l, 0, 0, 0, 0)
         heures = _heures_effectives(l.get("unite"), l.get("heures"), l.get("heures_manuelles"), qte)
         taux = float(l.get("taux_horaire") or 0)
-        st_montant = float(l.get("sous_traitant_montant") or 0)
+        # RÈGLE #2 (2026-08-17, décision Simon) : QTÉ=0 exclut TOUJOURS le
+        # montant ST des totaux — qu'il vienne du mode COMPUTED (PU_ST, déjà
+        # 0 par construction : sous_traitant_montant est persisté comme
+        # qte×PU_ST par update_budget_ligne) ou du mode LUMP SUM (montant
+        # saisi en bloc, stocké indépendamment de qte jusqu'ici). Miroir
+        # exact de effectiveStMontant (computeReportModel.js) et de getRow
+        # (App.jsx). Revient sur la ligne « pure sous-traitant à qté=0 »
+        # documentée jusqu'ici comme un cas SUPPORTÉ : Simon a tranché que ce
+        # cas n'est plus à garder. La colonne stockée n'est PAS effacée —
+        # seule son entrée dans ce total est bloquée tant que qté=0.
+        st_montant = float(l.get("sous_traitant_montant") or 0) if qte > 0 else 0.0
         ajm = float(l.get("ajust_materiaux") or 0)
         ajmo = float(l.get("ajust_main_oeuvre") or 0)
         ajst = float(l.get("ajust_sous_traitant") or 0)
@@ -2934,7 +2944,12 @@ def register_ad_budget_routes(get_conn):
 
             mat_subtotal = qty_eff * prix_u * (1.0 + ajust_mat / 100.0)
             mo_subtotal = qty_eff * heures * taux * (1.0 + ajust_mo / 100.0)
-            st_subtotal = st_amount * (1.0 + ajust_st / 100.0)
+            # Règle #2 (2026-08-17, décision Simon) : QTÉ=0 exclut le montant
+            # ST du SUBTOTAL poussé à Ad CON — même règle que
+            # compute_budget_totals. `st_amount` (st_amount_origin, plus bas)
+            # reste le montant BRUT saisi, non gaté — seul st_subtotal (la
+            # contribution au contrat) est exclu tant que qté=0.
+            st_subtotal = (st_amount * (1.0 + ajust_st / 100.0)) if qty_eff > 0 else 0.0
             contract_total += mat_subtotal + mo_subtotal + st_subtotal
 
             lines_out.append({
@@ -3632,7 +3647,12 @@ def register_ad_budget_routes(get_conn):
             # sont PAS multipliés par qte (contrairement aux matériaux).
             st_mat = qte * prix * (1 + ajm / 100)
             st_mo = heures * taux * (1 + ajmo / 100)
-            st_st = st_montant * (1 + ajst / 100)
+            # Règle #2 (2026-08-17) : QTÉ=0 exclut le S/T sous-traitant des
+            # totaux Excel — même règle que compute_budget_totals. La colonne
+            # "Montant S-T" (st_montant, ligne d'export plus bas) reste écrite
+            # BRUTE telle que saisie, seule "S/T sous-traitant" (st_st) — la
+            # contribution au total — en est exclue.
+            st_st = (st_montant * (1 + ajst / 100)) if qte > 0 else 0.0
             total_ligne = st_mat + st_mo + st_st
             total_materiaux += st_mat
             total_mo += st_mo
@@ -4446,7 +4466,11 @@ def register_ad_budget_routes(get_conn):
                                              _l.get("heures_manuelles"), _qte)
                 _taux = float(_l["taux_horaire"] or 0)
                 _ajmo = float(_l["ajust_main_oeuvre"] or 0)
-                _st_montant = float(_l["sous_traitant_montant"] or 0)
+                # Règle #2 (2026-08-17) : QTÉ=0 exclut le montant ST — gaté
+                # AVANT _has_st, pour que la ligne « pure sous-traitant » à
+                # qté=0 tombe aussi hors du filtre qte<=0/!has_mo/!has_st
+                # ci-dessous (miroir exact de compute_budget_totals).
+                _st_montant = float(_l["sous_traitant_montant"] or 0) if _qte > 0 else 0.0
                 _ajst = float(_l["ajust_sous_traitant"] or 0)
                 _has_mo = _heures > 0 and _taux > 0
                 _has_st = _st_montant > 0
@@ -4570,16 +4594,30 @@ def register_ad_budget_routes(get_conn):
                 qte = _effective_qte(l, mobilisation, surface_plancher,
                                      surface_mur_calc, surface_gypse_calc)
                 # Avec la refonte 3 sections, une ligne peut être active sans
-                # qte > 0 (ex. ligne pure sous-traitant). On garde le filtre
-                # qte > 0 historique mais on l'élargit aux lignes M-O / S-T.
+                # qte > 0 si elle contribue en M-O (ex. main-d'œuvre au
+                # forfait). On garde le filtre qte > 0 historique mais on
+                # l'élargit à has_mo. CE N'EST PLUS VRAI POUR S-T (règle #2,
+                # 2026-08-17) : has_st est maintenant gaté par qte > 0
+                # ci-dessous, donc une ligne « pure sous-traitant » à qté=0
+                # retombe dans ce filtre et ne s'imprime plus.
                 # Heures effectives : unité hr sans saisie manuelle → heures = qté.
                 heures = _heures_effectives(l["unite"], l["heures"], l.get("heures_manuelles"), qte)
                 taux = float(l["taux_horaire"] or 0)
                 ajmo = float(l["ajust_main_oeuvre"] or 0)
+                # st_montant reste BRUT (affiché tel quel dans la colonne
+                # "Montant S-T" du rapport, via cell_for plus bas, même sur
+                # une ligne mixte M-O+S-T à qté=0 dont le détail s'imprime
+                # encore). Règle #2 (2026-08-17, décision Simon) : QTÉ=0
+                # exclut le montant ST du TOTAL (has_st/st_st gatés
+                # ci-dessous) — miroir exact de compute_budget_totals. Une
+                # ligne « pure sous-traitant » à qté=0 (has_mo aussi faux)
+                # retombe alors dans le filtre qte<=0/!has_mo/!has_st et ne
+                # s'imprime plus du tout, exactement comme une ligne vide
+                # s'est toujours comportée.
                 st_montant = float(l["sous_traitant_montant"] or 0)
                 ajst = float(l["ajust_sous_traitant"] or 0)
                 has_mo = heures > 0 and taux > 0
-                has_st = st_montant > 0
+                has_st = qte > 0 and st_montant > 0
                 if qte <= 0 and not has_mo and not has_st:
                     continue
                 if heures > 0:
@@ -4592,7 +4630,8 @@ def register_ad_budget_routes(get_conn):
                 adj = float(l["ajustement_pct"] or 0)
                 st_mat = qte * prix * (1 + ajm / 100)
                 st_mo = heures * taux * (1 + ajmo / 100)
-                st_st = st_montant * (1 + ajst / 100)
+                # Gaté par qte>0 (règle #2) — st_montant reste brut au-dessus.
+                st_st = (st_montant * (1 + ajst / 100)) if qte > 0 else 0.0
                 # Sous-total ligne = somme des 3 sous-totaux par section.
                 st = st_mat + st_mo + st_st
                 # tot_real = total brut. ajustement_pct historique reste appliqué

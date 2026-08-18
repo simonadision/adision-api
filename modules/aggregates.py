@@ -87,6 +87,13 @@ def adapt_budget_lines(raw_lines) -> list:
         # MO — base heures alignée sur le récap : ligne « hr » SANS heures saisies
         # manuellement -> heures = qté ; sinon heures saisies (override réel).
         qte_v = float(ln.get("qte") or 0)
+        # RÈGLE #2 (2026-08-17, décision Simon) : QTÉ=0 exclut TOUJOURS le
+        # montant ST des agrégats (push hub `budget_st`, Ad ANA) — même règle
+        # que compute_budget_totals (ad_budget_api.py) et effectiveStMontant
+        # (computeReportModel.js). Gaté ICI, à la source, pour que
+        # compute_aggregates n'ait pas à connaître qte à part.
+        if qte_v <= 0:
+            montant_st = 0
         heures_raw = float(ln.get("heures") or 0)
         override_reel = (ln.get("heures_manuelles") is True) and abs(heures_raw) > 1e-9
         heures_eff = qte_v if (_is_heure_unit(ln.get("unite")) and not override_reel) else heures_raw
