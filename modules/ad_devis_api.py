@@ -49,27 +49,34 @@ def _frca_num(value):
     return f"{v:,.2f}".replace(",", " ").replace(".", ",")
 
 
-# Catégorie GED EXCLUE de la liste « Documents consultés » du devis (Simon
-# 2026-08-12) : les soumissions sous-traitants sont des documents PRIVÉS/
-# INTERNES (prix coûtants, marges) — jamais un nom de fichier qui laisserait
-# deviner leur existence ne doit apparaître dans un document envoyé au
-# CLIENT. Comparaison insensible à la casse/aux espaces (nom de catégorie
-# système = "Soumission", cf. ad_res_recipient_api.WHITELIST_CATEGORIES côté
-# HUB — Soumission en est explicitement absente, même logique ici).
-_DEVIS_EXCLUDED_CATEGORY_NAMES = {"soumission", "soumissions"}
+# Catégories GED AUTORISÉES dans la liste « Documents consultés » du devis
+# (Simon 2026-08-18) : seuls Plans / Devis / Addenda — l'arborescence
+# documentaire du projet destinée au client. Était auparavant une liste
+# NOIRE ({"soumission", "soumissions"}) qui excluait la catégorie
+# "Soumission" — mais la migration 041 (GED) a renommé cette catégorie en
+# "Soumission sous-traitants" et en a ajouté une seconde, "Dépôt de
+# soumission VFS" (qui porte "Document de dépôt entreprise", org-partagée :
+# attestations, certificats, résolutions...). Aucune des deux ne matchait
+# plus la liste noire -> tous ces documents internes/administratifs
+# fuitaient dans le devis envoyé au client. Liste BLANCHE = la même
+# whitelist que ad_res_recipient_api.WHITELIST_CATEGORIES côté HUB (partage
+# Ad RES), et robuste par construction à un futur renommage/ajout de
+# catégorie GED : tout ce qui n'est pas explicitement Plans/Devis/Addenda
+# est exclu, pas seulement ce qu'on a pensé à nommer.
+_DEVIS_ALLOWED_CATEGORY_NAMES = {"plans", "devis", "addenda"}
 
 
 def _flatten_doc_names(tree) -> list:
     """Aplati l'arbre GED (categories>disciplines>documents) en liste de noms
-    sélectionnables pour « Documents consultés » du devis. Catégorie
-    Soumission (sous-traitants) TOUJOURS exclue — cf.
-    _DEVIS_EXCLUDED_CATEGORY_NAMES."""
+    sélectionnables pour « Documents consultés » du devis. Seules les
+    catégories Plans/Devis/Addenda sont retenues — cf.
+    _DEVIS_ALLOWED_CATEGORY_NAMES."""
     out = []
     if not isinstance(tree, dict):
         return out
     for cat in tree.get("categories", []) or []:
         cat_name = (cat.get("name") or "").strip().lower()
-        if cat_name in _DEVIS_EXCLUDED_CATEGORY_NAMES:
+        if cat_name not in _DEVIS_ALLOWED_CATEGORY_NAMES:
             continue
         for disc in cat.get("disciplines", []) or []:
             for d in disc.get("documents", []) or []:
@@ -261,11 +268,12 @@ def register_ad_devis_routes(get_conn):
                 _documents_fetch_ok = True
             except Exception as e:  # noqa: BLE001
                 print(f"[devis] fetch_project_documents échec: {e}", flush=True)
-        # Purge défensive (Simon 2026-08-12) : un devis SAUVEGARDÉ avant ce
-        # correctif peut encore contenir une soumission sous-traitant cochée
-        # (catégorie désormais absente de `documents`, cf.
-        # _DEVIS_EXCLUDED_CATEGORY_NAMES). On ne se fie pas qu'au picker
-        # frontend pour l'empêcher de réapparaître -> on intersecte AUSSI ici
+        # Purge défensive (Simon 2026-08-12, élargie 2026-08-18) : un devis
+        # SAUVEGARDÉ avant l'un ou l'autre correctif peut encore contenir un
+        # document hors Plans/Devis/Addenda coché (catégorie désormais
+        # absente de `documents`, cf. _DEVIS_ALLOWED_CATEGORY_NAMES). On ne
+        # se fie pas qu'au picker frontend pour l'empêcher de réapparaître
+        # -> on intersecte AUSSI ici
         # avec la liste déjà filtrée, donc même une sélection historique privée
         # ne peut plus ni se pré-cocher, ni voyager jusqu'au PDF (devisForm.
         # documents est initialisé depuis CE champ côté front). Uniquement si

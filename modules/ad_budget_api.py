@@ -24,6 +24,8 @@ from modules.auth_jwt import SESSION_COOKIE_NAME, _extract_bearer, make_jwt_deps
 from modules.taux_horaires_api import (
     _load_taux_default_map,
     _resolve_taux_default,
+    _resolve_taux_default_avec_secours,
+    _resolve_taux_secours,
 )
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import landscape, letter
@@ -888,6 +890,43 @@ def _apply_master_template(
         sql += " WHERE LEFT(pm.section, 2) = ANY(%s)"
         params.append(list(default_divisions))
     cur.execute(sql, params)
+    return cur.rowcount
+
+
+def _reparer_taux_zero(cur, *, projet_id: int = None, lot_id: int = None) -> int:
+    """Filet de sécurité post-copie — brief pont 2026-08-19 (Simon) : un
+    taux horaire ne doit JAMAIS rester à 0. Appelé juste après une opération
+    qui COPIE des budget_lignes existantes (duplication de lot, révision de
+    projet) : si une ligne copiée porte un taux_horaire à 0/NULL avec des
+    heures > 0 (bug historique déjà propagé par une copie antérieure), on la
+    corrige immédiatement plutôt que de reproduire l'erreur — défaut =
+    Charpentier-menuisier compagnon (CHARPENTIER_C), jamais 0. Ne touche
+    JAMAIS une ligne dont le taux est déjà non-nul, même faible.
+
+    Scope obligatoire (lot_id OU projet_id, jamais les deux à la fois) pour
+    ne réparer QUE les lignes qui viennent d'être créées par l'appelant —
+    jamais un projet ou un lot voisin.
+    """
+    if (lot_id is None) == (projet_id is None):
+        raise ValueError("_reparer_taux_zero : fournir lot_id OU projet_id (un seul des deux)")
+    scope_col, scope_val = ("lot_id", lot_id) if lot_id is not None else ("projet_id", projet_id)
+    cur.execute(
+        f"""
+        UPDATE ad_budget.budget_lignes
+        SET taux_horaire = (
+              SELECT taux_col17 FROM ad_budget.taux_horaires
+              WHERE code = 'CHARPENTIER_C' AND actif = TRUE
+            )
+        WHERE {scope_col} = %s
+          AND (taux_horaire IS NULL OR taux_horaire = 0)
+          AND heures > 0
+          AND EXISTS (
+              SELECT 1 FROM ad_budget.taux_horaires
+              WHERE code = 'CHARPENTIER_C' AND actif = TRUE
+          )
+        """,
+        (scope_val,),
+    )
     return cur.rowcount
 
 
@@ -1960,6 +1999,14 @@ def register_ad_budget_routes(get_conn):
                 f"Importé depuis Ad VIU ({source_file})"
                 if source_file else "Importé depuis Ad VIU"
             )
+            # D5 — auto-fill du taux horaire par défaut (brief 2026-08-19,
+            # jamais 0), même pattern que le push v2 : mapping division CSI
+            # chargé une fois, repli sur CHARPENTIER_C si non mappée. `heures`
+            # n'est pas posé par cette route (toujours 0 à l'insertion), mais
+            # la colonne manquait purement et simplement de l'INSERT — une
+            # ligne créée ici ne devait sa valeur qu'au DEFAULT 0 du schéma.
+            taux_default_map = _load_taux_default_map(conn)
+            taux_secours = _resolve_taux_secours(conn)
 
             for s in sections:
                 section = (s.get("code_csi") or "").strip()
@@ -2007,20 +2054,23 @@ def register_ad_budget_routes(get_conn):
                 )
                 if cur.fetchone():
                     continue
+                taux_horaire = (taux_default_map.get(section[:2]) or taux_secours or 0)
                 cur.execute(
                     """
                     INSERT INTO ad_budget.budget_lignes
                       (projet_id, section, description, unite, prix_unitaire,
                        qte, ajustement_pct, note, actif, source_file, type_source,
-                       sous_traitant_type, sous_traitant_montant, sous_traitant_nom)
+                       sous_traitant_type, sous_traitant_montant, sous_traitant_nom,
+                       taux_horaire)
                     VALUES (%s, %s, %s, 'global', %s, %s, 0, %s, TRUE, %s, %s,
-                            %s, %s, %s)
+                            %s, %s, %s, %s)
                     """,
                     (
                         project_id, section, description,
                         prix_unitaire, qte, note_text,
                         source_file, type_source,
                         sous_traitant_type, sous_traitant_montant, sous_traitant_nom,
+                        taux_horaire,
                     ),
                 )
                 lines_added += 1
@@ -2277,7 +2327,11 @@ def register_ad_budget_routes(get_conn):
             # D5 — auto-fill du taux horaire par défaut. Le mapping division
             # CSI -> taux est chargé UNE seule fois ici (et non par item) pour
             # éviter le N+1 ; résolution en mémoire dans la boucle ci-dessous.
+            # taux_secours (CHARPENTIER_C) chargé une fois aussi — filet de
+            # sécurité si la division n'est pas mappée (brief 2026-08-19,
+            # jamais 0).
             taux_default_map = _load_taux_default_map(conn)
+            taux_secours = _resolve_taux_secours(conn)
 
             for item in items:
                 section = (item.get("csi_section") or "").strip()
@@ -2333,9 +2387,12 @@ def register_ad_budget_routes(get_conn):
                 note_text = " | ".join(note_parts)
 
                 # D5 — taux horaire par défaut résolu via la division CSI
-                # (section déjà strippée plus haut ; peut être vide ici -> 0).
+                # (section déjà strippée plus haut). Repli sur taux_secours
+                # (CHARPENTIER_C) si la division n'est pas mappée ; 0 en
+                # tout dernier recours (secours lui-même indisponible).
                 taux_horaire = (
-                    taux_default_map.get(section[:2], 0) if section else 0
+                    (taux_default_map.get(section[:2]) or taux_secours or 0)
+                    if section else (taux_secours or 0)
                 )
                 cur.execute(
                     """
@@ -3493,6 +3550,10 @@ def register_ad_budget_routes(get_conn):
                 """,
                 (new_id, projet_id))
             nb_lignes = cur.rowcount
+            # Filet de sécurité — même logique que duplicate_lot : ne pas
+            # reproduire dans la révision un taux_horaire à 0/NULL hérité
+            # d'une ligne source déjà buguée (heures > 0). Cf. _reparer_taux_zero.
+            _reparer_taux_zero(cur, projet_id=new_id)
             conn.commit()
         except Exception as e:
             conn.rollback()
@@ -5555,11 +5616,14 @@ def register_ad_budget_routes(get_conn):
 
         # D5 — auto-fill du taux horaire par défaut. On ne l'applique QUE si
         # l'appelant n'a pas fourni de taux explicite (ne jamais écraser une
-        # valeur saisie). _resolve_taux_default -> None (division non mappée
-        # ou section vide) => 0.
+        # valeur saisie). Brief pont 2026-08-19 (Simon) : un taux horaire ne
+        # doit jamais rester à 0 — _resolve_taux_default_avec_secours résout
+        # par division CSI, puis retombe sur CHARPENTIER_C (Charpentier-
+        # menuisier compagnon) si la division n'est pas mappée. 0 seulement
+        # si même ce métier de secours est absent (ne devrait jamais arriver).
         taux_horaire = data.get("taux_horaire")
         if taux_horaire is None:
-            resolved = _resolve_taux_default(section, conn)
+            resolved = _resolve_taux_default_avec_secours(section, conn)
             taux_horaire = resolved if resolved is not None else 0
 
         # Brief pont 2026-08-18 — modale « Nouvelle ligne » : Production /
@@ -6205,8 +6269,10 @@ def register_ad_budget_routes(get_conn):
 
         # D5 — auto-fill du taux par défaut. Mapping division CSI -> taux
         # chargé UNE fois (pas par item) pour éviter le N+1 ; résolution en
-        # mémoire dans la boucle.
+        # mémoire dans la boucle. taux_secours (CHARPENTIER_C) : filet de
+        # sécurité si la division n'est pas mappée (brief 2026-08-19, jamais 0).
         taux_default_map = _load_taux_default_map(conn)
+        taux_secours = _resolve_taux_secours(conn)
 
         inserted = 0
         for item_id in item_ids:
@@ -6220,7 +6286,8 @@ def register_ad_budget_routes(get_conn):
                 continue
             section = source["section"]
             taux_horaire = (
-                taux_default_map.get(section.strip()[:2], 0) if section else 0
+                (taux_default_map.get(section.strip()[:2]) or taux_secours or 0)
+                if section else (taux_secours or 0)
             )
             cur.execute("""
                 INSERT INTO ad_budget.budget_lignes
@@ -6831,6 +6898,12 @@ def register_ad_budget_routes(get_conn):
                 (projet_id, new_lot["id"], projet_id, lot_id),
             )
             nb_lignes = cur.rowcount
+            # Filet de sécurité — taux_horaire est copié TEL QUEL ci-dessus
+            # (volontaire, cf. docstring : c'est un TAUX, pas une quantité).
+            # Mais si la ligne SOURCE portait déjà un taux à 0/NULL avec des
+            # heures > 0 (bug historique propagé par une copie antérieure),
+            # on ne le reproduit pas dans la copie : cf. _reparer_taux_zero.
+            _reparer_taux_zero(cur, lot_id=new_lot["id"])
             conn.commit()
         except Exception:
             conn.rollback()
