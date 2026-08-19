@@ -35,6 +35,7 @@ from modules.ad_budget_api import (
     _load_and_authorize_projet,
     _next_free_csi_suffix,
 )
+from modules.taux_horaires_api import _resolve_taux_default_avec_secours
 
 logger = logging.getLogger(__name__)
 
@@ -168,12 +169,18 @@ def register_ad_gabarits_routes(get_conn):
                     )
 
     def _insert_manual(cur, projet_id, section, description):
-        """Ligne manuelle dans un budget : valeurs vides (à remplir)."""
+        """Ligne manuelle dans un budget : valeurs vides (à remplir), SAUF le
+        taux horaire — brief 2026-08-19 (Simon) : jamais 0. Résolu par
+        division CSI (section fournie), repli sur CHARPENTIER_C (Charpentier-
+        menuisier compagnon) si non mappée. qte=0 donc heures=0 (DEFAULT) à
+        cet instant : le taux non-nul n'a d'effet que quand l'user saisit une
+        quantité — c'est exactement le but (jamais de gel à 0 plus tard)."""
+        taux_horaire = _resolve_taux_default_avec_secours(section, cur.connection) or 0
         cur.execute(
             "INSERT INTO ad_budget.budget_lignes "
             "(projet_id, section, description, unite, prix_unitaire, qte, actif, taux_horaire) "
-            "VALUES (%s, %s, %s, 'global', 0, 0, TRUE, 0)",
-            (projet_id, section, description),
+            "VALUES (%s, %s, %s, 'global', 0, 0, TRUE, %s)",
+            (projet_id, section, description, taux_horaire),
         )
 
     # ─── Taxonomie CSI pour les sélecteurs de l'éditeur (2 niveaux) ───────
