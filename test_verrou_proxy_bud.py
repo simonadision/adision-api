@@ -114,6 +114,7 @@ class FakeCursor:
         if "SELECT * FROM ad_budget.projets WHERE id" in s:         # toggle_projet_verrou (full row)
             pid = self.p[0] if self.p else None
             return {"id": pid, "ad_hub_project_id": CFG["hub"], "organization_id": "ORG-1",
+                    "user_id": CFG.get("owner", 7),
                     "statut": "brouillon", "mobilisation": None, "surface_plancher": None,
                     "hauteur_cloisons": None, "longueur_cloisons": None,
                     "hub_identity_snapshot": None}
@@ -193,18 +194,29 @@ check("  → verrou local is_verrouille true", r.json().get("is_verrouille"), Tr
 check("  → hub PAS appelé", CALLS, [])
 
 # B4 — ÉPREUVE À L'ENVERS (URGENT 20 août) : budget AUTONOME + membre NON-gestionnaire
-# → doit ÉCHOUER en 403. Avant ce correctif, ce chemin n'avait AUCUN gate de rôle et
-# répondait 200 : c'est exactement le trou fermé par cette PR. Si ce test repasse au
-# vert (200), le gate a été défait — régression critique.
+# ET NON-propriétaire (owner=999, FAKE_USER id=7) → doit ÉCHOUER en 403. Avant ce
+# correctif, ce chemin n'avait AUCUN gate de rôle et répondait 200 : c'est exactement
+# le trou fermé par cette PR. Si ce test repasse au vert (200), le gate a été défait —
+# régression critique.
 FAKE_USER["org_role"] = "member"
 FAKE_USER["platform_role"] = "client"
 CFG["hub"] = None
+CFG["owner"] = 999  # propriétaire = quelqu'un d'autre que FAKE_USER (id 7)
 CFG.pop("raise403", None)
 CALLS.clear()
 r = client.request("PATCH", "/budget/projets/8/verrou", json={"verrouille": False}, headers=H)
-check("autonome + membre (non-gestionnaire) → 403", r.status_code, 403)
+check("autonome + membre non-gestionnaire, non-propriétaire → 403", r.status_code, 403)
+
+# B5 — décision Simon (20 août 2026) : le PROPRIÉTAIRE du projet peut déverrouiller
+# même sans être gestionnaire. Même FAKE_USER (member/client) que B4, mais
+# CFG["owner"] = 7 (= FAKE_USER["id"]) → doit RÉUSSIR en 200.
+CFG["owner"] = 7
+CALLS.clear()
+r = client.request("PATCH", "/budget/projets/8/verrou", json={"verrouille": False}, headers=H)
+check("autonome + membre non-gestionnaire MAIS propriétaire → 200", r.status_code, 200)
 FAKE_USER["org_role"] = "admin"
 FAKE_USER["platform_role"] = "super_admin"  # restaure l'état des cas précédents
+CFG.pop("owner", None)
 
 print(f"\n=== {PASS} OK / {FAIL} FAIL ===")
 sys.exit(1 if FAIL else 0)

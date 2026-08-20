@@ -1212,7 +1212,11 @@ def _is_gestionnaire_bud(user, organization_id) -> bool:
     verrou LOCAL (projet Ad BUD autonome, sans ad_hub_project_id) — le chemin
     proxifié au hub est déjà gaté là-bas ; ce garde-fou ferme l'AUTRE moitié
     du même trou (URGENT 20 août 2026 : n'importe quel membre pouvait
-    déverrouiller un budget fermé, faute de ce gate côté fallback local)."""
+    déverrouiller un budget fermé, faute de ce gate côté fallback local).
+
+    Ne couvre que la moitié « gestionnaire » du gate — voir aussi
+    _is_owner_bud (propriétaire) : les deux ensemble décident qui peut
+    verrouiller/déverrouiller (décision Simon, 20 août 2026)."""
     if (user or {}).get("platform_role") == "super_admin":
         return True
     org_role = (user or {}).get("org_role") or ""
@@ -1222,6 +1226,19 @@ def _is_gestionnaire_bud(user, organization_id) -> bool:
         and user_org is not None
         and organization_id is not None
         and str(user_org) == str(organization_id)
+    )
+
+
+def _is_owner_bud(user, projet_user_id) -> bool:
+    """Le PROPRIÉTAIRE du projet (ad_budget.projets.user_id — celui qui l'a
+    créé ; même colonne que _authorize_projet.is_owner, jamais réassignée
+    après coup). Décision Simon, 20 août 2026 : seuls le propriétaire ET un
+    gestionnaire peuvent verrouiller/déverrouiller un projet — aucun autre
+    rôle (ni « responsable de projet » distinct, ni membre standard)."""
+    return (
+        projet_user_id is not None
+        and (user or {}).get("id") is not None
+        and str(projet_user_id) == str(user.get("id"))
     )
 
 
@@ -3348,10 +3365,11 @@ def register_ad_budget_routes(get_conn):
         """Verrouille / déverrouille un projet (lecture seule), INDÉPENDAMMENT du statut.
         VAGUE 2 — le verrou est une propriété du PROJET HUB (source unique). Si le budget
         est lié (ad_hub_project_id), ce toggle PROXIFIE vers le hub (PATCH /verrou, gate
-        gestionnaire) puis MET À JOUR LE MIROIR local immédiatement. Budget autonome (sans
-        lien hub) → fallback verrou local, désormais gaté LOCALEMENT par le même rôle
-        (_is_gestionnaire_bud) — URGENT 20 août 2026 : ce chemin n'avait AUCUN gate de
-        rôle, n'importe quel membre de l'org pouvait déverrouiller un budget fermé.
+        propriétaire/gestionnaire) puis MET À JOUR LE MIROIR local immédiatement. Budget
+        autonome (sans lien hub) → fallback verrou local, désormais gaté LOCALEMENT par
+        les mêmes deux rôles (_is_gestionnaire_bud + _is_owner_bud, décision Simon du
+        20 août 2026) — URGENT 20 août 2026 : ce chemin n'avait AUCUN gate de rôle,
+        n'importe quel membre de l'org pouvait déverrouiller un budget fermé.
         Clé d'entrée `{verrouille}` conservée (UX inchangée). check_lock=False
         (déverrouiller doit marcher verrouillé). Les ~32 gates + exceptions
         duplication/révision INCHANGÉS.
@@ -3395,14 +3413,19 @@ def register_ad_budget_routes(get_conn):
         else:
             # FALLBACK local (budget autonome, sans lien hub) — le hub n'existe pas
             # pour trancher : le gate doit se faire ICI. Même définition que le gate
-            # hub (_is_gestionnaire_bud), pour que la restriction soit identique quel
-            # que soit le chemin emprunté.
-            if not _is_gestionnaire_bud(user, prow.get("organization_id")):
+            # hub (_is_gestionnaire_bud + _is_owner_bud), pour que la restriction
+            # soit identique quel que soit le chemin emprunté. Décision Simon,
+            # 20 août 2026 : DEUX rôles seulement — le propriétaire (user_id) ou
+            # un gestionnaire de l'organisation, aucun autre.
+            if not (
+                _is_gestionnaire_bud(user, prow.get("organization_id"))
+                or _is_owner_bud(user, prow.get("user_id"))
+            ):
                 cur.close(); conn.close()
                 raise HTTPException(
                     status_code=403,
-                    detail="Seul un gestionnaire de l'organisation peut "
-                           "verrouiller/déverrouiller ce projet.",
+                    detail="Seul le propriétaire du projet ou un gestionnaire "
+                           "de l'organisation peut verrouiller/déverrouiller ce projet.",
                 )
 
         try:
