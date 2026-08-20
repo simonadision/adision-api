@@ -152,6 +152,47 @@ def _load_taux_default_map(conn) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# Filet de sécurité absolu — brief pont 2026-08-19 (Simon) : un taux horaire
+# ne doit JAMAIS rester à 0 sur une ligne où des heures sont saisies. Quand
+# aucune division/section CSI n'est mappée (ou que l'appelant ne fournit pas
+# de section), le repli n'est plus 0 mais le métier CHARPENTIER_C
+# (Charpentier-menuisier Compagnon) — retrouvé dans ad_budget.taux_horaires,
+# déjà utilisé comme défaut le plus courant du mapping division CSI
+# (sprint2_taux_horaires_seed.sql, sprint6_8_csi_division_coverage.sql).
+# ─────────────────────────────────────────────────────────────────────────
+TAUX_SECOURS_CODE = "CHARPENTIER_C"
+
+
+def _resolve_taux_secours(conn) -> Optional[Decimal]:
+    """Taux du métier de secours (Charpentier-menuisier Compagnon). Renvoie
+    None seulement si ce métier lui-même est absent/inactif — ne devrait
+    jamais arriver en production (garde-fou de dernier repli malgré tout :
+    l'appelant retombe alors sur 0, comme avant cette migration)."""
+    cur = conn.cursor(row_factory=dict_row)
+    try:
+        cur.execute(
+            "SELECT taux_col17 FROM ad_budget.taux_horaires WHERE code = %s AND actif = TRUE",
+            (TAUX_SECOURS_CODE,),
+        )
+        row = cur.fetchone()
+    finally:
+        cur.close()
+    return row["taux_col17"] if row else None
+
+
+def _resolve_taux_default_avec_secours(csi_section: Optional[str], conn) -> Optional[Decimal]:
+    """Comme `_resolve_taux_default`, mais ne renvoie None que si MÊME le
+    métier de secours (CHARPENTIER_C) est indisponible : résout d'abord par
+    division CSI (comportement existant, le plus précis), et ne retombe sur
+    CHARPENTIER_C que si la division n'est pas mappée. Utiliser aux points de
+    CRÉATION d'une ligne — jamais pour écraser un taux déjà saisi."""
+    resolved = _resolve_taux_default(csi_section, conn)
+    if resolved is not None:
+        return resolved
+    return _resolve_taux_secours(conn)
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # Router
 # ─────────────────────────────────────────────────────────────────────────
 

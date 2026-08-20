@@ -24,6 +24,8 @@ from modules.auth_jwt import SESSION_COOKIE_NAME, _extract_bearer, make_jwt_deps
 from modules.taux_horaires_api import (
     _load_taux_default_map,
     _resolve_taux_default,
+    _resolve_taux_default_avec_secours,
+    _resolve_taux_secours,
 )
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import landscape, letter
@@ -891,6 +893,43 @@ def _apply_master_template(
     return cur.rowcount
 
 
+def _reparer_taux_zero(cur, *, projet_id: int = None, lot_id: int = None) -> int:
+    """Filet de sécurité post-copie — brief pont 2026-08-19 (Simon) : un
+    taux horaire ne doit JAMAIS rester à 0. Appelé juste après une opération
+    qui COPIE des budget_lignes existantes (duplication de lot, révision de
+    projet) : si une ligne copiée porte un taux_horaire à 0/NULL avec des
+    heures > 0 (bug historique déjà propagé par une copie antérieure), on la
+    corrige immédiatement plutôt que de reproduire l'erreur — défaut =
+    Charpentier-menuisier compagnon (CHARPENTIER_C), jamais 0. Ne touche
+    JAMAIS une ligne dont le taux est déjà non-nul, même faible.
+
+    Scope obligatoire (lot_id OU projet_id, jamais les deux à la fois) pour
+    ne réparer QUE les lignes qui viennent d'être créées par l'appelant —
+    jamais un projet ou un lot voisin.
+    """
+    if (lot_id is None) == (projet_id is None):
+        raise ValueError("_reparer_taux_zero : fournir lot_id OU projet_id (un seul des deux)")
+    scope_col, scope_val = ("lot_id", lot_id) if lot_id is not None else ("projet_id", projet_id)
+    cur.execute(
+        f"""
+        UPDATE ad_budget.budget_lignes
+        SET taux_horaire = (
+              SELECT taux_col17 FROM ad_budget.taux_horaires
+              WHERE code = 'CHARPENTIER_C' AND actif = TRUE
+            )
+        WHERE {scope_col} = %s
+          AND (taux_horaire IS NULL OR taux_horaire = 0)
+          AND heures > 0
+          AND EXISTS (
+              SELECT 1 FROM ad_budget.taux_horaires
+              WHERE code = 'CHARPENTIER_C' AND actif = TRUE
+          )
+        """,
+        (scope_val,),
+    )
+    return cur.rowcount
+
+
 def _hub_project_name(projet_row, authorization, session_cookie=None):
     """Phase 7A — nom du projet depuis Ad HUB (source unique), BEST-EFFORT : 1
     appel (fetch_revision_meta renvoie `name`). None si projet non lié ou hub
@@ -1164,6 +1203,26 @@ def _authorize_projet(projet, user, mode):
     # Ni propriétaire, ni super_admin, ni membre de l'org du projet -> 404
     # (ne pas révéler l'existence d'un projet d'une autre organisation).
     raise HTTPException(status_code=404, detail="Projet introuvable")
+
+
+def _is_gestionnaire_bud(user, organization_id) -> bool:
+    """Même définition que le gate hub (adision-app-api/modules/projects_api.py
+    toggle_project_verrou) : platform_role super_admin, OU org_role admin/
+    super_admin DANS l'organisation du projet. Utilisée pour le fallback
+    verrou LOCAL (projet Ad BUD autonome, sans ad_hub_project_id) — le chemin
+    proxifié au hub est déjà gaté là-bas ; ce garde-fou ferme l'AUTRE moitié
+    du même trou (URGENT 20 août 2026 : n'importe quel membre pouvait
+    déverrouiller un budget fermé, faute de ce gate côté fallback local)."""
+    if (user or {}).get("platform_role") == "super_admin":
+        return True
+    org_role = (user or {}).get("org_role") or ""
+    user_org = (user or {}).get("organization_id")
+    return (
+        org_role in ("admin", "super_admin")
+        and user_org is not None
+        and organization_id is not None
+        and str(user_org) == str(organization_id)
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1960,6 +2019,14 @@ def register_ad_budget_routes(get_conn):
                 f"Importé depuis Ad VIU ({source_file})"
                 if source_file else "Importé depuis Ad VIU"
             )
+            # D5 — auto-fill du taux horaire par défaut (brief 2026-08-19,
+            # jamais 0), même pattern que le push v2 : mapping division CSI
+            # chargé une fois, repli sur CHARPENTIER_C si non mappée. `heures`
+            # n'est pas posé par cette route (toujours 0 à l'insertion), mais
+            # la colonne manquait purement et simplement de l'INSERT — une
+            # ligne créée ici ne devait sa valeur qu'au DEFAULT 0 du schéma.
+            taux_default_map = _load_taux_default_map(conn)
+            taux_secours = _resolve_taux_secours(conn)
 
             for s in sections:
                 section = (s.get("code_csi") or "").strip()
@@ -2007,20 +2074,23 @@ def register_ad_budget_routes(get_conn):
                 )
                 if cur.fetchone():
                     continue
+                taux_horaire = (taux_default_map.get(section[:2]) or taux_secours or 0)
                 cur.execute(
                     """
                     INSERT INTO ad_budget.budget_lignes
                       (projet_id, section, description, unite, prix_unitaire,
                        qte, ajustement_pct, note, actif, source_file, type_source,
-                       sous_traitant_type, sous_traitant_montant, sous_traitant_nom)
+                       sous_traitant_type, sous_traitant_montant, sous_traitant_nom,
+                       taux_horaire)
                     VALUES (%s, %s, %s, 'global', %s, %s, 0, %s, TRUE, %s, %s,
-                            %s, %s, %s)
+                            %s, %s, %s, %s)
                     """,
                     (
                         project_id, section, description,
                         prix_unitaire, qte, note_text,
                         source_file, type_source,
                         sous_traitant_type, sous_traitant_montant, sous_traitant_nom,
+                        taux_horaire,
                     ),
                 )
                 lines_added += 1
@@ -2277,7 +2347,11 @@ def register_ad_budget_routes(get_conn):
             # D5 — auto-fill du taux horaire par défaut. Le mapping division
             # CSI -> taux est chargé UNE seule fois ici (et non par item) pour
             # éviter le N+1 ; résolution en mémoire dans la boucle ci-dessous.
+            # taux_secours (CHARPENTIER_C) chargé une fois aussi — filet de
+            # sécurité si la division n'est pas mappée (brief 2026-08-19,
+            # jamais 0).
             taux_default_map = _load_taux_default_map(conn)
+            taux_secours = _resolve_taux_secours(conn)
 
             for item in items:
                 section = (item.get("csi_section") or "").strip()
@@ -2333,9 +2407,12 @@ def register_ad_budget_routes(get_conn):
                 note_text = " | ".join(note_parts)
 
                 # D5 — taux horaire par défaut résolu via la division CSI
-                # (section déjà strippée plus haut ; peut être vide ici -> 0).
+                # (section déjà strippée plus haut). Repli sur taux_secours
+                # (CHARPENTIER_C) si la division n'est pas mappée ; 0 en
+                # tout dernier recours (secours lui-même indisponible).
                 taux_horaire = (
-                    taux_default_map.get(section[:2], 0) if section else 0
+                    (taux_default_map.get(section[:2]) or taux_secours or 0)
+                    if section else (taux_secours or 0)
                 )
                 cur.execute(
                     """
@@ -3272,16 +3349,28 @@ def register_ad_budget_routes(get_conn):
         VAGUE 2 — le verrou est une propriété du PROJET HUB (source unique). Si le budget
         est lié (ad_hub_project_id), ce toggle PROXIFIE vers le hub (PATCH /verrou, gate
         gestionnaire) puis MET À JOUR LE MIROIR local immédiatement. Budget autonome (sans
-        lien hub) → fallback verrou local (comportement historique). Clé d'entrée
-        `{verrouille}` conservée (UX inchangée). check_lock=False (déverrouiller doit
-        marcher verrouillé). Les ~32 gates + exceptions duplication/révision INCHANGÉS."""
+        lien hub) → fallback verrou local, désormais gaté LOCALEMENT par le même rôle
+        (_is_gestionnaire_bud) — URGENT 20 août 2026 : ce chemin n'avait AUCUN gate de
+        rôle, n'importe quel membre de l'org pouvait déverrouiller un budget fermé.
+        Clé d'entrée `{verrouille}` conservée (UX inchangée). check_lock=False
+        (déverrouiller doit marcher verrouillé). Les ~32 gates + exceptions
+        duplication/révision INCHANGÉS.
+
+        TRAÇABILITÉ (même brief) : chaque bascule s'inscrit, INSERT-only, dans
+        ad_budget.projet_verrou_log — qui survit aux déverrouillages suivants,
+        contrairement au miroir verrouille_par/verrouille_le. Un VERROUILLAGE
+        (verrouille=True) déclenche EN PLUS un snapshot complet du budget
+        (_create_snapshot, trigger_event='verrouillage') dans la même transaction :
+        l'état exact au moment de la fermeture reste consultable même après
+        déverrouillage(s) et modification(s) ultérieurs."""
         _load_and_authorize_projet(get_conn, projet_id, user, "write", check_lock=False)
         verrouille = bool(data.get("verrouille"))
         email = user.get("email") or (str(user.get("id")) if user.get("id") is not None else "inconnu")
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
 
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
-        cur.execute("SELECT ad_hub_project_id FROM ad_budget.projets WHERE id = %s", (projet_id,))
+        cur.execute("SELECT * FROM ad_budget.projets WHERE id = %s", (projet_id,))
         prow = cur.fetchone()
         if not prow:
             cur.close(); conn.close()
@@ -3290,9 +3379,9 @@ def register_ad_budget_routes(get_conn):
 
         # PROXY → hub (source unique) si lié. Le hub tranche par RÔLE (gestionnaire).
         v_le_hub = None
+        via_hub = hub_pid is not None
         if hub_pid is not None:
             try:
-                jwt_token = _extract_bearer(authorization, None, session_cookie)
                 hub_proj = hub_service.toggle_project_verrou(jwt_token, int(hub_pid), verrouille)
                 v_le_hub = hub_proj.get("verrouille_le")
             except hub_service.HubServiceError as e:
@@ -3303,10 +3392,22 @@ def register_ad_budget_routes(get_conn):
             except HTTPException:
                 cur.close(); conn.close()
                 raise
+        else:
+            # FALLBACK local (budget autonome, sans lien hub) — le hub n'existe pas
+            # pour trancher : le gate doit se faire ICI. Même définition que le gate
+            # hub (_is_gestionnaire_bud), pour que la restriction soit identique quel
+            # que soit le chemin emprunté.
+            if not _is_gestionnaire_bud(user, prow.get("organization_id")):
+                cur.close(); conn.close()
+                raise HTTPException(
+                    status_code=403,
+                    detail="Seul un gestionnaire de l'organisation peut "
+                           "verrouiller/déverrouiller ce projet.",
+                )
 
-        # MIROIR local (reflet du hub si lié ; verrou local si autonome). verrouille_le
-        # depuis le hub si dispo, sinon NOW(). verrouille_par = email (audit local).
         try:
+            # MIROIR local (reflet du hub si lié ; verrou local si autonome). verrouille_le
+            # depuis le hub si dispo, sinon NOW(). verrouille_par = email (audit local).
             if verrouille:
                 cur.execute(
                     "UPDATE ad_budget.projets SET is_verrouille = TRUE, "
@@ -3322,11 +3423,113 @@ def register_ad_budget_routes(get_conn):
                     (projet_id,),
                 )
             row = cur.fetchone()
+
+            # SNAPSHOT au VERROUILLAGE — fige tout le budget (lignes + agrégats) tel
+            # qu'il est PILE au moment de la fermeture. Résolution d'identité en mode
+            # "with_fallback" (jamais fail-closed) : le contenu du snapshot (les
+            # lignes budget_lignes, ce qui compte pour l'audit financier) ne dépend
+            # PAS de la disponibilité du hub — seuls les champs cosmétiques
+            # (nom/client affichés) se dégradent sur un hub injoignable.
+            snapshot_id = None
+            if verrouille:
+                ident, _source = hub_service.resolve_hub_identity_with_fallback(prow, jwt_token, {})
+                snapshot_id = _create_snapshot(cur, prow, "verrouillage", ident)
+
+            cur.execute(
+                "INSERT INTO ad_budget.projet_verrou_log "
+                "(projet_id, action, acteur_email, acteur_user_id, via_hub, snapshot_id) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (projet_id, "verrouille" if verrouille else "deverrouille",
+                 email, user.get("id"), via_hub, snapshot_id),
+            )
             conn.commit()
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"verrou : {type(e).__name__} : {e}")
         finally:
             cur.close(); conn.close()
         return {"status": "ok", "is_verrouille": row["is_verrouille"],
-                "verrouille_par": row["verrouille_par"], "verrouille_le": row["verrouille_le"]}
+                "verrouille_par": row["verrouille_par"], "verrouille_le": row["verrouille_le"],
+                "verrou_snapshot_id": snapshot_id}
+
+    @router.get("/projets/{projet_id}/verrou-historique")
+    def get_projet_verrou_historique(projet_id: int, user=Depends(jwt_user)):
+        """Journal INSERT-only des bascules verrou/déverrou de CE service (voir
+        ad_budget.projet_verrou_log). Pour un projet lié au hub, ne couvre que les
+        bascules faites DEPUIS Ad BUD — le journal complet, toute origine confondue
+        (y compris Ad EST), vit côté Ad HUB (GET /api/projects/{id}/verrou-historique).
+        Lecture seule : mode='read' (consultation, pas d'écriture sur le projet)."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute(
+                "SELECT id, action, acteur_email, via_hub, snapshot_id, created_at "
+                "FROM ad_budget.projet_verrou_log WHERE projet_id = %s "
+                "ORDER BY created_at DESC",
+                (projet_id,),
+            )
+            rows = cur.fetchall()
+        finally:
+            cur.close(); conn.close()
+        for r in rows:
+            r["created_at"] = r["created_at"].isoformat() if r.get("created_at") else None
+        return {"historique": rows}
+
+    @router.get("/projets/{projet_id}/verrou-snapshots")
+    def list_projet_verrou_snapshots(projet_id: int, user=Depends(jwt_user)):
+        """Liste les instantanés créés AU VERROUILLAGE (trigger_event='verrouillage')
+        pour ce projet — l'état figé exact à chaque fermeture, encore consultable
+        même après déverrouillage(s)/modification(s). Résumé seulement (pas les
+        lignes complètes) ; voir /verrou-snapshots/{snapshot_id} pour le détail."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute(
+                "SELECT id, created_at, is_latest, "
+                "       aggregates_jsonb->'totals'->>'general' AS total_general "
+                "FROM app_ana.project_snapshots "
+                "WHERE projet_id = %s AND trigger_event = 'verrouillage' "
+                "ORDER BY created_at DESC",
+                (projet_id,),
+            )
+            rows = cur.fetchall()
+        finally:
+            cur.close(); conn.close()
+        for r in rows:
+            r["created_at"] = r["created_at"].isoformat() if r.get("created_at") else None
+        return {"snapshots": rows}
+
+    @router.get("/projets/{projet_id}/verrou-snapshots/{snapshot_id}")
+    def get_projet_verrou_snapshot(projet_id: int, snapshot_id: int, user=Depends(jwt_user)):
+        """Détail complet d'un instantané de verrouillage : toutes les lignes
+        budget (telles que stockées à ce moment-là) + agrégats calculés
+        (mat/mo/st, sous-totaux, total). Sert à CONSULTER/COMPARER la version
+        verrouillée d'origine. La RESTAURATION (réécrire ces lignes dans le
+        budget courant) n'est PAS exposée ici — c'est une opération destructive
+        distincte, à concevoir séparément (cf. rapport de livraison)."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute(
+                "SELECT id, projet_id, created_at, trigger_event, is_latest, "
+                "       budget_lines_jsonb, aggregates_jsonb, nom_projet, client_nom "
+                "FROM app_ana.project_snapshots "
+                "WHERE id = %s AND projet_id = %s AND trigger_event = 'verrouillage'",
+                (snapshot_id, projet_id),
+            )
+            snap = cur.fetchone()
+        finally:
+            cur.close(); conn.close()
+        if not snap:
+            raise HTTPException(status_code=404, detail="Instantané de verrouillage introuvable")
+        snap["created_at"] = snap["created_at"].isoformat() if snap.get("created_at") else None
+        return snap
 
     # Note: endpoint internal /projets/by-hub/{id}/verrou-mirror déplacé dans
     # api.py au niveau RACINE (hors router /budget) pour éviter la dependency
@@ -3493,6 +3696,10 @@ def register_ad_budget_routes(get_conn):
                 """,
                 (new_id, projet_id))
             nb_lignes = cur.rowcount
+            # Filet de sécurité — même logique que duplicate_lot : ne pas
+            # reproduire dans la révision un taux_horaire à 0/NULL hérité
+            # d'une ligne source déjà buguée (heures > 0). Cf. _reparer_taux_zero.
+            _reparer_taux_zero(cur, projet_id=new_id)
             conn.commit()
         except Exception as e:
             conn.rollback()
@@ -5555,11 +5762,14 @@ def register_ad_budget_routes(get_conn):
 
         # D5 — auto-fill du taux horaire par défaut. On ne l'applique QUE si
         # l'appelant n'a pas fourni de taux explicite (ne jamais écraser une
-        # valeur saisie). _resolve_taux_default -> None (division non mappée
-        # ou section vide) => 0.
+        # valeur saisie). Brief pont 2026-08-19 (Simon) : un taux horaire ne
+        # doit jamais rester à 0 — _resolve_taux_default_avec_secours résout
+        # par division CSI, puis retombe sur CHARPENTIER_C (Charpentier-
+        # menuisier compagnon) si la division n'est pas mappée. 0 seulement
+        # si même ce métier de secours est absent (ne devrait jamais arriver).
         taux_horaire = data.get("taux_horaire")
         if taux_horaire is None:
-            resolved = _resolve_taux_default(section, conn)
+            resolved = _resolve_taux_default_avec_secours(section, conn)
             taux_horaire = resolved if resolved is not None else 0
 
         # Brief pont 2026-08-18 — modale « Nouvelle ligne » : Production /
@@ -6205,8 +6415,10 @@ def register_ad_budget_routes(get_conn):
 
         # D5 — auto-fill du taux par défaut. Mapping division CSI -> taux
         # chargé UNE fois (pas par item) pour éviter le N+1 ; résolution en
-        # mémoire dans la boucle.
+        # mémoire dans la boucle. taux_secours (CHARPENTIER_C) : filet de
+        # sécurité si la division n'est pas mappée (brief 2026-08-19, jamais 0).
         taux_default_map = _load_taux_default_map(conn)
+        taux_secours = _resolve_taux_secours(conn)
 
         inserted = 0
         for item_id in item_ids:
@@ -6220,7 +6432,8 @@ def register_ad_budget_routes(get_conn):
                 continue
             section = source["section"]
             taux_horaire = (
-                taux_default_map.get(section.strip()[:2], 0) if section else 0
+                (taux_default_map.get(section.strip()[:2]) or taux_secours or 0)
+                if section else (taux_secours or 0)
             )
             cur.execute("""
                 INSERT INTO ad_budget.budget_lignes
@@ -6831,6 +7044,12 @@ def register_ad_budget_routes(get_conn):
                 (projet_id, new_lot["id"], projet_id, lot_id),
             )
             nb_lignes = cur.rowcount
+            # Filet de sécurité — taux_horaire est copié TEL QUEL ci-dessus
+            # (volontaire, cf. docstring : c'est un TAUX, pas une quantité).
+            # Mais si la ligne SOURCE portait déjà un taux à 0/NULL avec des
+            # heures > 0 (bug historique propagé par une copie antérieure),
+            # on ne le reproduit pas dans la copie : cf. _reparer_taux_zero.
+            _reparer_taux_zero(cur, lot_id=new_lot["id"])
             conn.commit()
         except Exception:
             conn.rollback()
