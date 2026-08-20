@@ -1205,6 +1205,26 @@ def _authorize_projet(projet, user, mode):
     raise HTTPException(status_code=404, detail="Projet introuvable")
 
 
+def _is_gestionnaire_bud(user, organization_id) -> bool:
+    """Même définition que le gate hub (adision-app-api/modules/projects_api.py
+    toggle_project_verrou) : platform_role super_admin, OU org_role admin/
+    super_admin DANS l'organisation du projet. Utilisée pour le fallback
+    verrou LOCAL (projet Ad BUD autonome, sans ad_hub_project_id) — le chemin
+    proxifié au hub est déjà gaté là-bas ; ce garde-fou ferme l'AUTRE moitié
+    du même trou (URGENT 20 août 2026 : n'importe quel membre pouvait
+    déverrouiller un budget fermé, faute de ce gate côté fallback local)."""
+    if (user or {}).get("platform_role") == "super_admin":
+        return True
+    org_role = (user or {}).get("org_role") or ""
+    user_org = (user or {}).get("organization_id")
+    return (
+        org_role in ("admin", "super_admin")
+        and user_org is not None
+        and organization_id is not None
+        and str(user_org) == str(organization_id)
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # SEUIL D'INACTIVITÉ DE LA DÉTENTION — miroir de la source unique du hub.
 #
@@ -3329,16 +3349,28 @@ def register_ad_budget_routes(get_conn):
         VAGUE 2 — le verrou est une propriété du PROJET HUB (source unique). Si le budget
         est lié (ad_hub_project_id), ce toggle PROXIFIE vers le hub (PATCH /verrou, gate
         gestionnaire) puis MET À JOUR LE MIROIR local immédiatement. Budget autonome (sans
-        lien hub) → fallback verrou local (comportement historique). Clé d'entrée
-        `{verrouille}` conservée (UX inchangée). check_lock=False (déverrouiller doit
-        marcher verrouillé). Les ~32 gates + exceptions duplication/révision INCHANGÉS."""
+        lien hub) → fallback verrou local, désormais gaté LOCALEMENT par le même rôle
+        (_is_gestionnaire_bud) — URGENT 20 août 2026 : ce chemin n'avait AUCUN gate de
+        rôle, n'importe quel membre de l'org pouvait déverrouiller un budget fermé.
+        Clé d'entrée `{verrouille}` conservée (UX inchangée). check_lock=False
+        (déverrouiller doit marcher verrouillé). Les ~32 gates + exceptions
+        duplication/révision INCHANGÉS.
+
+        TRAÇABILITÉ (même brief) : chaque bascule s'inscrit, INSERT-only, dans
+        ad_budget.projet_verrou_log — qui survit aux déverrouillages suivants,
+        contrairement au miroir verrouille_par/verrouille_le. Un VERROUILLAGE
+        (verrouille=True) déclenche EN PLUS un snapshot complet du budget
+        (_create_snapshot, trigger_event='verrouillage') dans la même transaction :
+        l'état exact au moment de la fermeture reste consultable même après
+        déverrouillage(s) et modification(s) ultérieurs."""
         _load_and_authorize_projet(get_conn, projet_id, user, "write", check_lock=False)
         verrouille = bool(data.get("verrouille"))
         email = user.get("email") or (str(user.get("id")) if user.get("id") is not None else "inconnu")
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
 
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
-        cur.execute("SELECT ad_hub_project_id FROM ad_budget.projets WHERE id = %s", (projet_id,))
+        cur.execute("SELECT * FROM ad_budget.projets WHERE id = %s", (projet_id,))
         prow = cur.fetchone()
         if not prow:
             cur.close(); conn.close()
@@ -3347,9 +3379,9 @@ def register_ad_budget_routes(get_conn):
 
         # PROXY → hub (source unique) si lié. Le hub tranche par RÔLE (gestionnaire).
         v_le_hub = None
+        via_hub = hub_pid is not None
         if hub_pid is not None:
             try:
-                jwt_token = _extract_bearer(authorization, None, session_cookie)
                 hub_proj = hub_service.toggle_project_verrou(jwt_token, int(hub_pid), verrouille)
                 v_le_hub = hub_proj.get("verrouille_le")
             except hub_service.HubServiceError as e:
@@ -3360,10 +3392,22 @@ def register_ad_budget_routes(get_conn):
             except HTTPException:
                 cur.close(); conn.close()
                 raise
+        else:
+            # FALLBACK local (budget autonome, sans lien hub) — le hub n'existe pas
+            # pour trancher : le gate doit se faire ICI. Même définition que le gate
+            # hub (_is_gestionnaire_bud), pour que la restriction soit identique quel
+            # que soit le chemin emprunté.
+            if not _is_gestionnaire_bud(user, prow.get("organization_id")):
+                cur.close(); conn.close()
+                raise HTTPException(
+                    status_code=403,
+                    detail="Seul un gestionnaire de l'organisation peut "
+                           "verrouiller/déverrouiller ce projet.",
+                )
 
-        # MIROIR local (reflet du hub si lié ; verrou local si autonome). verrouille_le
-        # depuis le hub si dispo, sinon NOW(). verrouille_par = email (audit local).
         try:
+            # MIROIR local (reflet du hub si lié ; verrou local si autonome). verrouille_le
+            # depuis le hub si dispo, sinon NOW(). verrouille_par = email (audit local).
             if verrouille:
                 cur.execute(
                     "UPDATE ad_budget.projets SET is_verrouille = TRUE, "
@@ -3379,11 +3423,113 @@ def register_ad_budget_routes(get_conn):
                     (projet_id,),
                 )
             row = cur.fetchone()
+
+            # SNAPSHOT au VERROUILLAGE — fige tout le budget (lignes + agrégats) tel
+            # qu'il est PILE au moment de la fermeture. Résolution d'identité en mode
+            # "with_fallback" (jamais fail-closed) : le contenu du snapshot (les
+            # lignes budget_lignes, ce qui compte pour l'audit financier) ne dépend
+            # PAS de la disponibilité du hub — seuls les champs cosmétiques
+            # (nom/client affichés) se dégradent sur un hub injoignable.
+            snapshot_id = None
+            if verrouille:
+                ident, _source = hub_service.resolve_hub_identity_with_fallback(prow, jwt_token, {})
+                snapshot_id = _create_snapshot(cur, prow, "verrouillage", ident)
+
+            cur.execute(
+                "INSERT INTO ad_budget.projet_verrou_log "
+                "(projet_id, action, acteur_email, acteur_user_id, via_hub, snapshot_id) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (projet_id, "verrouille" if verrouille else "deverrouille",
+                 email, user.get("id"), via_hub, snapshot_id),
+            )
             conn.commit()
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"verrou : {type(e).__name__} : {e}")
         finally:
             cur.close(); conn.close()
         return {"status": "ok", "is_verrouille": row["is_verrouille"],
-                "verrouille_par": row["verrouille_par"], "verrouille_le": row["verrouille_le"]}
+                "verrouille_par": row["verrouille_par"], "verrouille_le": row["verrouille_le"],
+                "verrou_snapshot_id": snapshot_id}
+
+    @router.get("/projets/{projet_id}/verrou-historique")
+    def get_projet_verrou_historique(projet_id: int, user=Depends(jwt_user)):
+        """Journal INSERT-only des bascules verrou/déverrou de CE service (voir
+        ad_budget.projet_verrou_log). Pour un projet lié au hub, ne couvre que les
+        bascules faites DEPUIS Ad BUD — le journal complet, toute origine confondue
+        (y compris Ad EST), vit côté Ad HUB (GET /api/projects/{id}/verrou-historique).
+        Lecture seule : mode='read' (consultation, pas d'écriture sur le projet)."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute(
+                "SELECT id, action, acteur_email, via_hub, snapshot_id, created_at "
+                "FROM ad_budget.projet_verrou_log WHERE projet_id = %s "
+                "ORDER BY created_at DESC",
+                (projet_id,),
+            )
+            rows = cur.fetchall()
+        finally:
+            cur.close(); conn.close()
+        for r in rows:
+            r["created_at"] = r["created_at"].isoformat() if r.get("created_at") else None
+        return {"historique": rows}
+
+    @router.get("/projets/{projet_id}/verrou-snapshots")
+    def list_projet_verrou_snapshots(projet_id: int, user=Depends(jwt_user)):
+        """Liste les instantanés créés AU VERROUILLAGE (trigger_event='verrouillage')
+        pour ce projet — l'état figé exact à chaque fermeture, encore consultable
+        même après déverrouillage(s)/modification(s). Résumé seulement (pas les
+        lignes complètes) ; voir /verrou-snapshots/{snapshot_id} pour le détail."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute(
+                "SELECT id, created_at, is_latest, "
+                "       aggregates_jsonb->'totals'->>'general' AS total_general "
+                "FROM app_ana.project_snapshots "
+                "WHERE projet_id = %s AND trigger_event = 'verrouillage' "
+                "ORDER BY created_at DESC",
+                (projet_id,),
+            )
+            rows = cur.fetchall()
+        finally:
+            cur.close(); conn.close()
+        for r in rows:
+            r["created_at"] = r["created_at"].isoformat() if r.get("created_at") else None
+        return {"snapshots": rows}
+
+    @router.get("/projets/{projet_id}/verrou-snapshots/{snapshot_id}")
+    def get_projet_verrou_snapshot(projet_id: int, snapshot_id: int, user=Depends(jwt_user)):
+        """Détail complet d'un instantané de verrouillage : toutes les lignes
+        budget (telles que stockées à ce moment-là) + agrégats calculés
+        (mat/mo/st, sous-totaux, total). Sert à CONSULTER/COMPARER la version
+        verrouillée d'origine. La RESTAURATION (réécrire ces lignes dans le
+        budget courant) n'est PAS exposée ici — c'est une opération destructive
+        distincte, à concevoir séparément (cf. rapport de livraison)."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute(
+                "SELECT id, projet_id, created_at, trigger_event, is_latest, "
+                "       budget_lines_jsonb, aggregates_jsonb, nom_projet, client_nom "
+                "FROM app_ana.project_snapshots "
+                "WHERE id = %s AND projet_id = %s AND trigger_event = 'verrouillage'",
+                (snapshot_id, projet_id),
+            )
+            snap = cur.fetchone()
+        finally:
+            cur.close(); conn.close()
+        if not snap:
+            raise HTTPException(status_code=404, detail="Instantané de verrouillage introuvable")
+        snap["created_at"] = snap["created_at"].isoformat() if snap.get("created_at") else None
+        return snap
 
     # Note: endpoint internal /projets/by-hub/{id}/verrou-mirror déplacé dans
     # api.py au niveau RACINE (hors router /budget) pour éviter la dependency
