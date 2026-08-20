@@ -19,6 +19,7 @@ from psycopg.types.json import Json
 from modules import con_service, hub_service, mat_service, typ_service
 from modules.ad_budget_constants import AD_VIU_BLINDSPOT_DIVISIONS
 from modules.aggregates import adapt_budget_lines, compute_aggregates, _js_round
+from modules.aggregates import heures_effectives as _heures_effectives
 from modules.lots_calc import compute_lot_totals
 from modules.auth_jwt import SESSION_COOKIE_NAME, _extract_bearer, make_jwt_deps
 from modules.taux_horaires_api import (
@@ -689,7 +690,8 @@ def compute_budget_totals(projet, raw_lines):
     contremaitre_h = 0.0
     for l in raw_lines:
         qte = _effective_qte(l, 0, 0, 0, 0)
-        heures = _heures_effectives(l.get("unite"), l.get("heures"), l.get("heures_manuelles"), qte)
+        heures = _heures_effectives(l.get("unite"), l.get("heures"), l.get("heures_manuelles"), qte,
+                                    l.get("production_valeur"))
         taux = float(l.get("taux_horaire") or 0)
         # RÈGLE #2 (2026-08-17, décision Simon) : QTÉ=0 exclut TOUJOURS le
         # montant ST des totaux — qu'il vienne du mode COMPUTED (PU_ST, déjà
@@ -1438,25 +1440,10 @@ def _maj_compute_mat_divergences(ligne, src):
     return divs
 
 
-# Unité « heures de MO » : la quantité représente des heures → heures = qté par défaut.
-# Couvre la vraie unité prod « hr » + variantes. PAS « sem. » / « jours » (temps ≠ heures).
-_HEURE_UNITS = {"hr", "hre", "heure", "heures", "h"}
-
-
-def _is_heure_unit(unite) -> bool:
-    return str(unite or "").strip().lower() in _HEURE_UNITS
-
-
-def _heures_effectives(unite, heures, heures_manuelles, qte) -> float:
-    """Heures utilisées dans le calcul MO. Ligne unité hr → heures effectives = qté
-    SAUF override RÉEL (heures_manuelles ET heures ≠ 0). Un « override » à 0 est un
-    FAUX override (ex. apply-typ d'un assemblage SANS rendement, ou flag posé par
-    erreur) → on retombe sur le défaut qté (0 h sur une ligne facturée à l'heure n'a
-    pas de sens). Miroir EXACT de getRow côté front."""
-    h = float(heures or 0)
-    if _is_heure_unit(unite) and not (heures_manuelles and h != 0):
-        return float(qte or 0)
-    return h
+# _heures_effectives : SOURCE UNIQUE = modules.aggregates.heures_effectives (importée
+# ci-dessus sous cet alias). Ne PAS réintroduire de copie locale ici — c'est exactement
+# la dérive qui a causé l'incident 2026-08-20 (colonne `heures` lue telle quelle côté
+# serveur, production_valeur ignorée -> écart de 39 219 $ vs l'écran sur le projet 290).
 
 
 def register_ad_budget_routes(get_conn):
@@ -3672,7 +3659,7 @@ def register_ad_budget_routes(get_conn):
             cur.execute(
                 "SELECT id, description, a_completer, lot_id, actif, qte, prix_unitaire, ajust_materiaux, heures, "
                 "taux_horaire, ajust_main_oeuvre, sous_traitant_montant, ajust_sous_traitant, "
-                "ajustement_pct, unite, heures_manuelles FROM ad_budget.budget_lignes "
+                "ajustement_pct, unite, heures_manuelles, production_valeur FROM ad_budget.budget_lignes "
                 "WHERE projet_id = %s",
                 (projet_id,),
             )
@@ -3719,7 +3706,7 @@ def register_ad_budget_routes(get_conn):
         cur.execute("""
             SELECT section, description, unite, qte, prix_unitaire,
                    ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
-                   heures, heures_manuelles, taux_horaire,
+                   heures, heures_manuelles, taux_horaire, production_valeur,
                    sous_traitant_type, sous_traitant_montant, sous_traitant_nom,
                    note
             FROM ad_budget.budget_lignes
@@ -3750,8 +3737,10 @@ def register_ad_budget_routes(get_conn):
             qte = float(l["qte"] or 0)
             prix = float(l["prix_unitaire"] or 0)
             ajm = float(l["ajust_materiaux"] or 0)
-            # Heures effectives : unité hr sans saisie manuelle → heures = qté.
-            heures = _heures_effectives(l["unite"], l["heures"], l.get("heures_manuelles"), qte)
+            # Heures effectives : production renseignée -> PRIORITÉ ABSOLUE (ratio
+            # qté/production) ; sinon unité hr sans saisie manuelle -> heures = qté.
+            heures = _heures_effectives(l["unite"], l["heures"], l.get("heures_manuelles"), qte,
+                                        l.get("production_valeur"))
             taux = float(l["taux_horaire"] or 0)
             ajmo = float(l["ajust_main_oeuvre"] or 0)
             st_montant = float(l["sous_traitant_montant"] or 0)
@@ -3846,7 +3835,7 @@ def register_ad_budget_routes(get_conn):
         cur.execute(
             "SELECT id, section, description, a_completer, lot_id, actif, qte, prix_unitaire, ajust_materiaux, heures, "
             "taux_horaire, ajust_main_oeuvre, sous_traitant_montant, ajust_sous_traitant, "
-            "ajustement_pct, unite, heures_manuelles FROM ad_budget.budget_lignes "
+            "ajustement_pct, unite, heures_manuelles, production_valeur FROM ad_budget.budget_lignes "
             "WHERE projet_id = %s",
             (projet_id,),
         )
@@ -4247,7 +4236,7 @@ def register_ad_budget_routes(get_conn):
             f"""
             SELECT section, description, unite, qte, prix_unitaire, ajustement_pct,
                    heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
-                   ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
+                   ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant, production_valeur,
                    sous_traitant_type, sous_traitant_montant,
                    sous_total, total, note
             FROM ad_budget.budget_lignes
@@ -4686,7 +4675,8 @@ def register_ad_budget_routes(get_conn):
                 _qte = _effective_qte(_l, mobilisation, surface_plancher,
                                       surface_mur_calc, surface_gypse_calc)
                 _heures = _heures_effectives(_l["unite"], _l["heures"],
-                                             _l.get("heures_manuelles"), _qte)
+                                             _l.get("heures_manuelles"), _qte,
+                                             _l.get("production_valeur"))
                 _taux = float(_l["taux_horaire"] or 0)
                 _ajmo = float(_l["ajust_main_oeuvre"] or 0)
                 # Règle #2 (2026-08-17) : QTÉ=0 exclut le montant ST — gaté
@@ -4823,8 +4813,10 @@ def register_ad_budget_routes(get_conn):
                 # 2026-08-17) : has_st est maintenant gaté par qte > 0
                 # ci-dessous, donc une ligne « pure sous-traitant » à qté=0
                 # retombe dans ce filtre et ne s'imprime plus.
-                # Heures effectives : unité hr sans saisie manuelle → heures = qté.
-                heures = _heures_effectives(l["unite"], l["heures"], l.get("heures_manuelles"), qte)
+                # Heures effectives : production renseignée -> PRIORITÉ ABSOLUE (ratio
+                # qté/production) ; sinon unité hr sans saisie manuelle -> heures = qté.
+                heures = _heures_effectives(l["unite"], l["heures"], l.get("heures_manuelles"), qte,
+                                            l.get("production_valeur"))
                 taux = float(l["taux_horaire"] or 0)
                 ajmo = float(l["ajust_main_oeuvre"] or 0)
                 # st_montant reste BRUT (affiché tel quel dans la colonne
@@ -6563,7 +6555,7 @@ def register_ad_budget_routes(get_conn):
         cur.execute(
             "SELECT id, description, a_completer, lot_id, actif, qte, prix_unitaire, ajust_materiaux, heures, "
             "taux_horaire, ajust_main_oeuvre, sous_traitant_montant, ajust_sous_traitant, "
-            "ajustement_pct, unite, heures_manuelles FROM ad_budget.budget_lignes "
+            "ajustement_pct, unite, heures_manuelles, production_valeur FROM ad_budget.budget_lignes "
             "WHERE projet_id = %s",
             (projet_id,),
         )
