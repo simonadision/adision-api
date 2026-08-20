@@ -1446,6 +1446,41 @@ def _maj_compute_mat_divergences(ligne, src):
 # serveur, production_valeur ignorée -> écart de 39 219 $ vs l'écran sur le projet 290).
 
 
+def _verifier_pdf_correspond_au_mode(pdf_bytes: bytes, marqueur_attendu: str, mode_export: str) -> None:
+    """Garde-fou anti-régression de emit_report_to_hub (brief Simon, 20 août
+    2026, incident projet 290 — ÉMETTRE publiait TOUJOURS le rapport de
+    calcul, quel que soit le mode choisi dans la modale). Le document PDF
+    CONSTRUIT pour l'émission doit correspondre au mode DEMANDÉ, jamais un
+    repli silencieux vers l'autre : chaque moteur (reportlab) imprime un
+    TITRE de page distinct selon le mode (« Rapport de budget — … » /
+    « Ventilation par lot — … », cf. _build_projet_report et
+    _build_lot_ventilation_report) — relu ICI, AVANT toute publication au hub.
+
+    Lève HTTPException(500) — jamais de publication silencieuse — si le
+    marqueur attendu est absent de la première page, ou si le PDF est
+    illisible. Module-level (et non nested) pour rester unitairement
+    testable sans passer par tout emit_report_to_hub (cf.
+    tests/test_pdf_critical.py)."""
+    try:
+        import fitz  # PyMuPDF — dépendance déjà présente (requirements.txt)
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        texte = doc[0].get_text() if doc.page_count else ""
+        doc.close()
+    except Exception as e:  # noqa: BLE001 — jamais de crash inattendu ici
+        raise HTTPException(
+            status_code=500,
+            detail=(f"Garde-fou émission : échec de vérification du document généré "
+                     f"({type(e).__name__}) — rien publié."),
+        )
+    if marqueur_attendu not in texte:
+        raise HTTPException(
+            status_code=500,
+            detail=(f"Garde-fou émission : le document généré ne correspond pas au mode "
+                     f"demandé ({mode_export!r}, attendu « {marqueur_attendu} » sur la page) — "
+                     f"émission annulée, rien publié."),
+        )
+
+
 def register_ad_budget_routes(get_conn):
 
     jwt_user, jwt_user_or_token, jwt_admin, _ = make_jwt_deps(get_conn)
@@ -3793,12 +3828,33 @@ def register_ad_budget_routes(get_conn):
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
-    @router.get("/projets/{projet_id}/pdf-lots")
-    def export_projet_pdf_lots(projet_id: int, user=Depends(jwt_user),
-                               authorization: Optional[str] = Header(None), session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
-        """Phase 4 (Lot) — export PDF « Ventilation par lot ». Trappe de
-        secours reportlab pour le moteur SERVI par défaut côté client
-        (jsPDF, @adision/report-pdf::buildLotVentilationPdf) : document
+    def _build_lot_ventilation_report(
+        projet_id,
+        authorization=None,
+        session_cookie=None,
+        avec_recap_financier=True,
+        colonnes_lots=None,
+    ):
+        """Construit le PDF « Ventilation par lot » (reportlab). Retourne
+        (buf: BytesIO, meta: dict). FACTORISÉ (brief Simon, 20 août 2026,
+        incident projet 290) : AVANT, seule la route GET /pdf-lots ci-dessous
+        appelait ce code — ÉMETTRE (POST /emit-report) republiait TOUJOURS le
+        rapport de calcul (_build_projet_report) même quand la modale
+        demandait la ventilation par lot. Désormais export_projet_pdf_lots
+        (aperçu/téléchargement) ET emit_report_to_hub (mode_export="par_lot")
+        appellent ce MÊME chemin — aucune divergence possible entre ce qui
+        est validé à l'écran et ce qui est publié dans Espace Rapports.
+
+        avec_recap_financier : inclut (ou non) le bandeau RÉCAP FINANCIER en
+        haut de page (case à cocher de la modale, brief Simon 18 août 2026).
+        colonnes_lots : CSV parmi nb_logements/nb_lignes/sous_total ; colonne
+        « Lot » (nom) toujours affichée. None (paramètre omis) = toutes
+        (rétrocompat des appelants historiques de GET /pdf-lots) ; ""
+        explicite = aucune colonne optionnelle — même convention que
+        sous_totaux/admin_profits dans _build_projet_report.
+
+        Trappe de secours reportlab pour le moteur SERVI par défaut côté
+        client (jsPDF, @adision/report-pdf::buildLotVentilationPdf) : document
         SIMPLE, préfixé du RÉCAP FINANCIER en en-tête (brief Simon,
         18 août 2026) — le même sommaire qu'à l'écran (matériaux/
         main-d'œuvre incl. heures/sous-traitant, coûtant total,
@@ -3817,7 +3873,6 @@ def register_ad_budget_routes(get_conn):
         divergences déjà connues et verrouillées près (D3/D4,
         tests/test_divergences_ecran_rapport.py).
         """
-        _load_and_authorize_projet(get_conn, projet_id, user, "read")
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         cur.execute("SELECT * FROM ad_budget.projets WHERE id = %s", (projet_id,))
@@ -3850,8 +3905,9 @@ def register_ad_budget_routes(get_conn):
         # snapshot local si le hub est injoignable, jamais de 502 pour ce motif.
         # Brief priorité absolue (18 août 2026) : ce bloc manquait entièrement
         # ici alors qu'il existe depuis longtemps sur le rapport de calcul.
-        # Tolérant : la route est déjà gardée par Depends(jwt_user) — en
-        # production authorization/session_cookie sont donc déjà valides ici.
+        # Tolérant : les DEUX appelants (route pdf-lots, émission hub) sont déjà
+        # gardés par Depends(jwt_user) — en production authorization/
+        # session_cookie sont donc déjà valides ici.
         # Extraction directe quand même DÉFENSIVE (jamais de crash pour ce
         # bloc best-effort) : un appel direct (tests, harnais) sans l'un ni
         # l'autre dégrade juste vers l'identité vide (tirets), comme
@@ -3875,7 +3931,9 @@ def register_ad_budget_routes(get_conn):
 
         # Récap financier — chemin PARTAGÉ (compute_budget_totals), sur les
         # lignes ACTIVES seulement : même filtre que le rapport détaillé
-        # (actifs_seulement par défaut) et que l'écran (activeItems).
+        # (actifs_seulement par défaut) et que l'écran (activeItems). Calculé
+        # INCONDITIONNELLEMENT (même si avec_recap_financier=False ou aucune
+        # ligne) : `meta` en a besoin pour montant_affiche_pdf (émission hub).
         arr = bool(projet.get("arrondi_dollar"))
 
         def R(v):
@@ -3917,22 +3975,58 @@ def register_ad_budget_routes(get_conn):
             s = f"{v:,.0f}" if float(v).is_integer() else f"{v:,.1f}"
             return s.replace(",", " ").replace(".", ",")
 
-        rows = [["Lot", "Nb logements", "Nb lignes", "Sous-total"]]
+        # Colonnes du tableau des lots — choisies à la génération (correctif
+        # Simon, 20 août 2026, incident projet 290) : même sélection qu'à
+        # l'écran et qu'au moteur client jsPDF (buildLotVentilationPdf.js).
+        # « Lot » (nom) reste toujours affichée.
+        ALL_LOT_COLS = ["nb_logements", "nb_lignes", "sous_total"]
+        LOT_COL_LABELS = {"nb_logements": "Nb logements", "nb_lignes": "Nb lignes", "sous_total": "Sous-total"}
+        if colonnes_lots is None:
+            requested_lots = set(ALL_LOT_COLS)
+        else:
+            requested_lots = {c.strip() for c in colonnes_lots.split(",") if c.strip()}
+        selected_lots = [c for c in ALL_LOT_COLS if c in requested_lots]
+        num_cols = 1 + len(selected_lots)
+
+        def _lot_value(col, nb_logements, nb_lignes, sous_total):
+            if col == "nb_logements":
+                return str(nb_logements) if nb_logements is not None else "—"
+            if col == "nb_lignes":
+                return str(nb_lignes)
+            if col == "sous_total":
+                return f"{sous_total:,.2f} $".replace(",", " ").replace(".", ",")
+            return ""
+
+        rows = [["Lot"] + [LOT_COL_LABELS[c] for c in selected_lots]]
         for lot in result["lots"]:
-            rows.append([
-                lot["nom"],
-                str(lot["nb_logements"]) if lot["nb_logements"] is not None else "—",
-                str(lot["nb_lignes"]),
-                f"{lot['sous_total']:,.2f} $".replace(",", " ").replace(".", ","),
+            rows.append([lot["nom"]] + [
+                _lot_value(c, lot["nb_logements"], lot["nb_lignes"], lot["sous_total"])
+                for c in selected_lots
             ])
         if result["hors_lot"]["nb_lignes"] > 0:
-            rows.append([
-                "Hors lot", "—", str(result["hors_lot"]["nb_lignes"]),
-                f"{result['hors_lot']['sous_total']:,.2f} $".replace(",", " ").replace(".", ","),
+            rows.append(["Hors lot"] + [
+                _lot_value(c, None, result["hors_lot"]["nb_lignes"], result["hors_lot"]["sous_total"])
+                for c in selected_lots
             ])
-        rows.append(["", "", "GRAND TOTAL", f"{result['grand_total']:,.2f} $".replace(",", " ").replace(".", ",")])
+        # Pied "GRAND TOTAL" — casé dans les deux dernières colonnes visibles
+        # (ou fusionné dans l'unique colonne "Lot" si toutes les colonnes
+        # optionnelles sont décochées) — MÊME règle que buildLotVentilationPdf.js
+        # (moteur client jsPDF) : structure de tableau identique quel que soit
+        # le moteur qui le rend. Rétrocompat : colonnes_lots omis (les 3
+        # colonnes optionnelles) reproduit EXACTEMENT l'ancien pied fixe
+        # ["", "", "GRAND TOTAL", total] (num_cols=4).
+        grand_total_str = f"{result['grand_total']:,.2f} $".replace(",", " ").replace(".", ",")
+        foot_row = [""] * num_cols
+        if num_cols >= 2:
+            foot_row[num_cols - 2] = "GRAND TOTAL"
+            foot_row[num_cols - 1] = grand_total_str
+        else:
+            foot_row[0] = f"GRAND TOTAL : {grand_total_str}"
+        rows.append(foot_row)
 
-        table = Table(rows, colWidths=[6 * cm, 3 * cm, 2.5 * cm, 3.5 * cm], repeatRows=1)
+        col_widths_map = {"nb_logements": 3 * cm, "nb_lignes": 2.5 * cm, "sous_total": 3.5 * cm}
+        col_widths = [6 * cm] + [col_widths_map[c] for c in selected_lots]
+        table = Table(rows, colWidths=col_widths, repeatRows=1)
         table.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e3a8a")),
             ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -3964,8 +4058,10 @@ def register_ad_budget_routes(get_conn):
         #    (« Le bloc ne dépend plus de lignes.length > 0 [pour la barre
         #    Budget du projet] ... seules les cartes et la ligne de synthèse
         #    restent conditionnelles », App.jsx) — un projet sans lignes
-        #    n'affiche pas un récap à zéro. ──
-        if lignes_calc:
+        #    n'affiche pas un récap à zéro — ET sur avec_recap_financier
+        #    (case à cocher de la modale, brief Simon 18 août 2026 : décochée,
+        #    ce bandeau du haut disparaît). ──
+        if lignes_calc and avec_recap_financier:
             card_rows = [
                 [Paragraph("MATÉRIAUX", card_label_mat_style), Paragraph("MAIN-D'ŒUVRE", card_label_mo_style), Paragraph("SOUS-TRAITANT", card_label_st_style)],
                 [
@@ -4087,7 +4183,39 @@ def register_ad_budget_routes(get_conn):
 
         doc.build(story)
         buf.seek(0)
-        safe_nom = "".join(c if c.isalnum() or c in "-_ " else "_" for c in nom_projet).strip() or "projet"
+        meta = {
+            "nom_projet": nom_projet,
+            # « TOTAL avec taxes » du récap financier — utilisé par
+            # emit_report_to_hub (montant_affiche_pdf), INDÉPENDAMMENT de
+            # avec_recap_financier (c'est le montant réel du budget filtré sur
+            # les lignes actives, pas une valeur affichée ailleurs à l'écran).
+            "total_general": total_general,
+        }
+        return buf, meta
+
+    @router.get("/projets/{projet_id}/pdf-lots")
+    def export_projet_pdf_lots(projet_id: int, user=Depends(jwt_user),
+                               authorization: Optional[str] = Header(None), session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
+                               avec_recap_financier: bool = True,
+                               # CSV parmi nb_logements,nb_lignes,sous_total ; paramètre omis
+                               # = toutes (rétrocompat), vide explicite = aucune. Défaut simple
+                               # (PAS Query(...)) : appelé aussi en invocation directe par les
+                               # tests (extract_nested), où le sentinel Query() ne se résout
+                               # jamais en None hors passage par FastAPI (cf. emit_report_to_hub).
+                               colonnes_lots: Optional[str] = None):
+        """Phase 4 (Lot) — export PDF « Ventilation par lot » (aperçu +
+        téléchargement de la modale). Délègue à _build_lot_ventilation_report
+        (factorisée le 20 août 2026, cf. sa docstring) — MÊME chemin que
+        emit_report_to_hub en mode_export="par_lot", pour qu'Émettre publie
+        toujours exactement ce que cette route (et donc l'aperçu/le
+        téléchargement) aurait produit."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        buf, meta = _build_lot_ventilation_report(
+            projet_id, authorization, session_cookie,
+            avec_recap_financier=avec_recap_financier,
+            colonnes_lots=colonnes_lots,
+        )
+        safe_nom = "".join(c if c.isalnum() or c in "-_ " else "_" for c in meta["nom_projet"]).strip() or "projet"
         return StreamingResponse(
             buf,
             media_type="application/pdf",
@@ -5256,7 +5384,18 @@ def register_ad_budget_routes(get_conn):
         user=Depends(jwt_user),
         authorization: Optional[str] = Header(None),
         session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
+        # Mode d'export — QUEL artefact PDF est poussé au hub (une VUE parmi
+        # deux, MÊME distinction que la modale « Générer un rapport PDF »,
+        # App.jsx pdfVentilationMode) : "global" = rapport de calcul détaillé
+        # (_build_projet_report, DÉFAUT, comportement historique — AUCUNE
+        # régression) ; "par_lot" = ventilation par lot
+        # (_build_lot_ventilation_report, MÊME chemin que GET
+        # /projets/{id}/pdf-lots). Brief Simon, 20 août 2026 (incident projet
+        # 290) : ÉMETTRE publiait TOUJOURS le rapport de calcul, quel que soit
+        # le mode choisi dans la modale — corrigé ici.
+        mode_export: str = "global",
         # Config PDF (modale) — pilote UNIQUEMENT l'artefact PDF (une VUE).
+        # Mode "global" seulement — ignorés en mode "par_lot".
         actifs_seulement: bool = True,
         avec_prix: bool = True,
         sections: str = "",
@@ -5281,19 +5420,36 @@ def register_ad_budget_routes(get_conn):
         longueur_cloisons: float = 0,
         gabarit_id: Optional[int] = None,
         gabarit_nom: Optional[str] = None,
+        # Config PDF — mode "par_lot" seulement, ignorés en mode "global".
+        # MÊME sémantique que GET /projets/{id}/pdf-lots (CSV parmi
+        # nb_logements,nb_lignes,sous_total ; paramètre omis = toutes, vide
+        # explicite = aucune). Défaut simple (pas Query(...), cf. commentaire
+        # d'export_projet_pdf_lots) : test_emit_rapport_vers_hub appelle cette
+        # fonction en invocation DIRECTE (extract_nested), hors FastAPI.
+        avec_recap_financier: bool = True,
+        colonnes_lots: Optional[str] = None,
         # Choix user (option A) quand le budget a changé depuis la dernière
         # émission : 'new' (nouvelle révision) | 'correction' (remplace la
         # courante). None = pas encore choisi -> si une question est requise,
         # l'endpoint répond {choice_required:true} sans émettre.
         revision_choice: Optional[str] = None,
     ):
-        """Émet le RAPPORT DE CALCUL (quantitatif) vers l'Espace Rapports HUB.
-        DISSOCIATION (option 1) : PDF = vue modale, snapshot = budget COMPLET.
+        """Émet le rapport (calcul quantitatif OU ventilation par lot, cf.
+        mode_export) vers l'Espace Rapports HUB.
+        DISSOCIATION (option 1) : PDF = vue modale, snapshot = budget COMPLET
+        — INCHANGÉE par mode_export (cf. plus bas : le snapshot poussé reste
+        TOUJOURS le rapport de calcul complet, quel que soit l'artefact PDF
+        publié — comportement VOULU, cf. commentaire d'origine).
         RÉVISION (option A) : si la révision courante a déjà été émise ET que le
         budget a changé depuis (budget_modifie_depuis_emission), on demande à
         l'user (choice_required) ; 'new' bumpe la révision avant d'émettre,
         'correction' reste sur la courante (remplace l'artefact). Sinon émet
         directement. Le flag dirty est remis à FALSE à l'émission."""
+        if mode_export not in ("global", "par_lot"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"mode_export invalide : {mode_export!r} (attendu 'global' ou 'par_lot')",
+            )
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
@@ -5342,24 +5498,57 @@ def register_ad_budget_routes(get_conn):
 
         # Token pour les logos (client/org via hub_service) ET l'émission HUB.
         jwt_token = _extract_bearer(authorization, None, session_cookie)
-        # 1. PDF = config de la modale (artefact / vue). On ignore son snapshot.
-        buf, _filtered_snap = _build_projet_report(
-            projet_id, actifs_seulement, avec_prix, sections, colonnes,
-            sous_totaux, admin_profits, avec_sous_total_avant_taxes, avec_tps,
-            avec_tvq, orientation, mobilisation, surface_plancher,
-            hauteur_cloisons, longueur_cloisons, avec_heures=avec_heures,
-            jwt_token=jwt_token,
-            afficher_lignes_detail=afficher_lignes_detail,
-            afficher_sous_totaux=afficher_sous_totaux,
-            afficher_totaux_section=afficher_totaux_section,
-            afficher_entete_section=afficher_entete_section,
-            afficher_entete_soussection=afficher_entete_soussection,
-            csi_div_labels=csi_div_labels,
-            csi_sec_labels=csi_sec_labels,
-        )
-        pdf_bytes = buf.getvalue()
+
+        # 1. PDF = config de la modale (artefact / vue), SELON LE MODE demandé
+        #    (brief Simon, 20 août 2026 — incident projet 290, cf. docstring).
+        #    Chaque branche produit pdf_bytes + montant_affiche_pdf (montant TEL
+        #    QU'AFFICHÉ sur CET artefact, pour la détection de rapport partiel
+        #    côté HUB) + _pdf_marker (texte imprimé par CE moteur pour CE mode,
+        #    relu par le garde-fou juste après — jamais de publication d'un
+        #    document qui ne correspond pas au mode demandé).
+        if mode_export == "par_lot":
+            buf, lot_meta = _build_lot_ventilation_report(
+                projet_id, authorization, session_cookie,
+                avec_recap_financier=avec_recap_financier,
+                colonnes_lots=colonnes_lots,
+            )
+            pdf_bytes = buf.getvalue()
+            montant_affiche_pdf = lot_meta["total_general"]
+            mode_label = "Ventilation par lot"
+            _pdf_marker = "Ventilation par lot"
+        else:
+            buf, _filtered_snap = _build_projet_report(
+                projet_id, actifs_seulement, avec_prix, sections, colonnes,
+                sous_totaux, admin_profits, avec_sous_total_avant_taxes, avec_tps,
+                avec_tvq, orientation, mobilisation, surface_plancher,
+                hauteur_cloisons, longueur_cloisons, avec_heures=avec_heures,
+                jwt_token=jwt_token,
+                afficher_lignes_detail=afficher_lignes_detail,
+                afficher_sous_totaux=afficher_sous_totaux,
+                afficher_totaux_section=afficher_totaux_section,
+                afficher_entete_section=afficher_entete_section,
+                afficher_entete_soussection=afficher_entete_soussection,
+                csi_div_labels=csi_div_labels,
+                csi_sec_labels=csi_sec_labels,
+            )
+            pdf_bytes = buf.getvalue()
+            # Montant TEL QU'AFFICHÉ dans le PDF filtré (TOTAL GÉNÉRAL de la vue
+            # modale, reflète sections/taxes décochées) -> détection rapport
+            # partiel côté HUB. Le snapshot plus bas reste le budget complet.
+            montant_affiche_pdf = _filtered_snap["totaux"]["montant_apres_taxes"]
+            mode_label = "Rapport de budget"
+            _pdf_marker = "Rapport de budget"
+
+        # PHASE 3 — garde-fou anti-régression (brief Simon, 20 août 2026,
+        # incident projet 290) : le document ÉMIS doit correspondre au mode
+        # DEMANDÉ, jamais un repli silencieux vers l'autre. AVANT de publier
+        # au hub — échoue BRUYAMMENT (jamais de publication) sinon. Cf.
+        # _verifier_pdf_correspond_au_mode (module-level, unitairement testée).
+        _verifier_pdf_correspond_au_mode(pdf_bytes, _pdf_marker, mode_export)
+
         # 2. Snapshot = budget COMPLET (vérité Ad ANA) : aucune section/colonne
         #    filtrée, taxes complètes (avec_tps/avec_tvq=True), lignes actives.
+        #    INCHANGÉ par mode_export — dissociation VOULUE (cf. docstring).
         _full_buf, snapshot = _build_projet_report(
             projet_id, True, True, "", "", None, None, True, True, True,
             "portrait", 0, 0, 0, 0,
@@ -5372,10 +5561,7 @@ def register_ad_budget_routes(get_conn):
             "revision_label": rev_label,
             "montant_avant_taxes": snapshot["totaux"]["montant_avant_taxes"],
             "montant_apres_taxes": snapshot["totaux"]["montant_apres_taxes"],
-            # Montant TEL QU'AFFICHÉ dans le PDF filtré (TOTAL GÉNÉRAL de la vue
-            # modale, reflète sections/taxes décochées) -> détection rapport
-            # partiel côté HUB. Le snapshot ci-dessus reste le budget complet.
-            "montant_affiche_pdf": _filtered_snap["totaux"]["montant_apres_taxes"],
+            "montant_affiche_pdf": montant_affiche_pdf,
             "gabarit_id": gabarit_id,
             "gabarit_nom": gabarit_nom,
             "source_ref": projet_id,
@@ -5386,8 +5572,14 @@ def register_ad_budget_routes(get_conn):
             # pas de champ "titre du document" libre comme Ad FAC -> repli sur
             # le NOM DU PROJET (identifiant naturel côté HUB), pour que chaque
             # ligne « Rapports de calcul » affiche un libellé lisible au lieu
-            # d'une ligne nue avec juste le badge de révision.
-            "titre": snapshot["project"]["nom"],
+            # d'une ligne nue avec juste le badge de révision. Brief Simon,
+            # 20 août 2026 : en mode "par_lot", le libellé du mode est ANNEXÉ —
+            # sans ça, un projet qui a émis les DEUX types de rapport (calcul ET
+            # ventilation) afficherait deux lignes identiques dans Espace
+            # Rapports, impossible à distinguer. Mode "global" INCHANGÉ (pas de
+            # suffixe) — comportement historique, aucune régression.
+            "titre": (f"{snapshot['project']['nom']} — {mode_label}"
+                      if mode_export == "par_lot" else snapshot["project"]["nom"]),
         }
         try:
             result = hub_service.post_report(jwt_token, int(hub_pid), pdf_bytes, fields)
@@ -5408,6 +5600,7 @@ def register_ad_budget_routes(get_conn):
         return {
             "emitted": True,
             "report_type": "calcul_quantitatif",
+            "mode_export": mode_export,
             "revision_no": rev_no,
             "revision_label": rev_label,
             "hub": result,

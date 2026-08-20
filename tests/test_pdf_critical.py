@@ -37,7 +37,9 @@ def _restaure_hub_service_apres_chaque_test():
     à un test qui n'appelait pourtant aucun réseau. Restaure après CHAQUE test
     de ce fichier plutôt que de recâbler les 8 signatures de test existantes."""
     import modules.hub_service as H
-    saved = {name: getattr(H, name) for name in ("resolve_hub_identity", "fetch_client", "fetch_organization")}
+    saved = {name: getattr(H, name) for name in
+             ("resolve_hub_identity", "resolve_hub_identity_with_fallback",
+              "fetch_client", "fetch_organization", "fetch_revision_meta")}
     yield
     for name, fn in saved.items():
         setattr(H, name, fn)
@@ -54,6 +56,12 @@ def _patch_no_network(monkeypatch=None):
     B.hub_service.fetch_client = _raise
     B.hub_service.fetch_organization = lambda *a, **k: {}
     D.hub_service.fetch_organization = lambda *a, **k: {}
+    # _hub_project_name (nom de fichier / titre PDF, cf. export_projet_pdf_lots
+    # et _build_lot_ventilation_report) appelle fetch_revision_meta dès qu'un
+    # projet a ad_hub_project_id + authorization -- sans ce stub, un VRAI appel
+    # réseau part vers le hub de prod (constaté 20 août 2026, tests émission
+    # ventilation par lot : GET .../revision-meta -> 401, lent et non isolé).
+    B.hub_service.fetch_revision_meta = lambda *a, **k: {}
 
     # Phase 6 — neutralise la résolution d'identité hub (réseau) : simule un hub
     # qui renvoie la MÊME identité que le projet local mock (hub ≡ local), sans
@@ -78,6 +86,20 @@ def _patch_no_network(monkeypatch=None):
         }
     B.hub_service.resolve_hub_identity = _fake_identity
     D.hub_service.resolve_hub_identity = _fake_identity
+
+    # _build_projet_report/_build_lot_ventilation_report appellent l'AUTRE
+    # fonction d'identité (_with_fallback, jamais fail-closed -- cf. sa
+    # docstring), distincte de resolve_hub_identity ci-dessus : un stub qui
+    # ne couvrirait que la première laisse la seconde à sa valeur réelle, ou
+    # pire à une POLLUTION résiduelle d'un autre fichier de la suite (constaté
+    # 20 août 2026 : tests/devis_fidelity/reportlab_ref.py mute ce même
+    # singleton sans restaurer -- cf. docstring du fixture ci-dessus -- un
+    # test lancé après lui héritait d'une identité fixe d'un TÉMOIN de
+    # fidélité, sans aucun appel réseau apparent).
+    def _fake_identity_with_fallback(projet_row, jwt_token, cache):
+        return _fake_identity(projet_row, jwt_token, cache), "hub"
+    B.hub_service.resolve_hub_identity_with_fallback = _fake_identity_with_fallback
+    D.hub_service.resolve_hub_identity_with_fallback = _fake_identity_with_fallback
 
 
 def _build_rapport(get_conn):
@@ -247,6 +269,159 @@ def test_emit_rapport_vers_hub():
     assert "montant_affiche_pdf" in f, "montant affiché (dissociation) absent"
     print(f"  [OK] émission rapport HUB : post_report appelé, "
           f"montant_apres_taxes={f['montant_apres_taxes']}, snapshot complet")
+
+
+# ── Tests émission HUB en mode "par_lot" (incident projet 290, 20 août 2026) ──
+def _emit_lots_setup():
+    """MÊME patron que test_emit_rapport_vers_hub, + table ad_budget.lots
+    (requise par _build_lot_ventilation_report, ignorée en mode "global")."""
+    import modules.ad_budget_api as B
+    _patch_no_network()
+    captured = {}
+
+    def _fake_post_report(jwt_token, hub_pid, pdf_bytes, fields, **k):
+        captured["hub_pid"] = hub_pid
+        captured["pdf_bytes"] = pdf_bytes
+        captured["fields"] = fields
+        return {"version": {"id": 7, "revision_no": 1}}
+    B.hub_service.post_report = _fake_post_report
+
+    projet = make_projet(ad_hub_project_id=307, organization_id="org-test",
+                         emitted_at_current_revision=False, nom="Projet 290")
+    results = {
+        "ad_budget.projets": ("one", projet),
+        "ad_budget.lots": ("all", [{"id": 1, "nom": "Lot A", "nb_logements": 5, "ordre": 0}]),
+        "budget_lignes": ("all", [make_ligne(total=500, sous_total=500, lot_id=1),
+                                  make_ligne(section="03", total=300, sous_total=300, lot_id=1)]),
+    }
+    get_conn = make_get_conn(results)
+    emit = extract_nested(B.register_ad_budget_routes, get_conn, "emit_report_to_hub")
+    user = {"id": 1, "platform_role": "super_admin", "org_role": "admin",
+            "organization_id": "org-test", "nom": "Test"}
+    return emit, user, captured
+
+
+def test_emit_ventilation_par_lot_vers_hub():
+    """Incident projet 290 (20 août 2026) : mode_export="par_lot" -> le PDF
+    ÉMIS est celui de _build_lot_ventilation_report (« Ventilation par lot »),
+    PAS le rapport de calcul détaillé -- AVANT ce correctif, Émettre publiait
+    TOUJOURS le rapport de calcul quel que soit le mode de la modale."""
+    import fitz
+    emit, user, captured = _emit_lots_setup()
+    out = emit(1, user=user, authorization="Bearer TOK", mode_export="par_lot")
+
+    assert out.get("emitted") is True, f"émission échouée : {out}"
+    assert out.get("mode_export") == "par_lot"
+    pdf_bytes = captured["pdf_bytes"]
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    texte = doc[0].get_text()
+    doc.close()
+    assert "Ventilation par lot" in texte, "le PDF émis n'est pas la ventilation par lot"
+    assert "Rapport de budget" not in texte, "le PDF émis est encore le rapport de calcul (régression du bug)"
+    f = captured["fields"]
+    assert f["titre"] == "Projet 290 — Ventilation par lot", f["titre"]
+    # Snapshot poussé au hub reste le budget COMPLET (dissociation VOULUE,
+    # inchangée par mode_export) -- pas touché par ce correctif.
+    assert f.get("snapshot_data"), "snapshot_data absent de l'émission"
+    print("  [OK] émission ventilation par lot HUB : PDF « Ventilation par lot », titre annexé, snapshot complet inchangé")
+
+
+def test_emit_global_titre_inchange_non_regression():
+    """Non-régression (critère d'acceptation #2) : mode "global" (défaut) ->
+    même comportement qu'avant ce correctif, AUCUN suffixe sur le titre."""
+    import modules.ad_budget_api as B
+    _patch_no_network()
+    captured = {}
+
+    def _fake_post_report(jwt_token, hub_pid, pdf_bytes, fields, **k):
+        captured["fields"] = fields
+        return {"version": {"id": 8, "revision_no": 1}}
+    B.hub_service.post_report = _fake_post_report
+
+    projet = make_projet(ad_hub_project_id=307, organization_id="org-test",
+                         emitted_at_current_revision=False, nom="Projet 290")
+    results = {
+        "ad_budget.projets": ("one", projet),
+        "budget_lignes": ("all", [make_ligne(total=500, sous_total=500)]),
+    }
+    get_conn = make_get_conn(results)
+    emit = extract_nested(B.register_ad_budget_routes, get_conn, "emit_report_to_hub")
+    user = {"id": 1, "platform_role": "super_admin", "org_role": "admin",
+            "organization_id": "org-test", "nom": "Test"}
+    out = emit(1, user=user, authorization="Bearer TOK")  # mode_export omis -> "global"
+
+    assert out.get("emitted") is True
+    assert out.get("mode_export") == "global"
+    assert captured["fields"]["titre"] == "Projet 290", captured["fields"]["titre"]
+    print("  [OK] mode global : titre = nom du projet seul, aucun suffixe (non-régression)")
+
+
+def test_emit_mode_export_invalide_400():
+    """mode_export hors {"global","par_lot"} -> 400 clair, AUCUNE émission
+    (garde-fou d'entrée, avant toute construction de PDF)."""
+    import modules.ad_budget_api as B
+    from fastapi import HTTPException
+    _patch_no_network()
+    called = []
+    B.hub_service.post_report = lambda *a, **k: called.append(1)
+
+    projet = make_projet(ad_hub_project_id=307, organization_id="org-test")
+    results = {
+        "ad_budget.projets": ("one", projet),
+        "budget_lignes": ("all", [make_ligne()]),
+    }
+    get_conn = make_get_conn(results)
+    emit = extract_nested(B.register_ad_budget_routes, get_conn, "emit_report_to_hub")
+    user = {"id": 1, "platform_role": "super_admin", "org_role": "admin",
+            "organization_id": "org-test", "nom": "Test"}
+    try:
+        emit(1, user=user, authorization="Bearer TOK", mode_export="bogus")
+        raise AssertionError("aurait dû lever 400")
+    except HTTPException as e:
+        assert e.status_code == 400 and "mode_export" in e.detail
+    assert not called, "post_report NE DOIT PAS être appelé sur mode_export invalide"
+    print("  [OK] mode_export invalide -> 400 clair, aucune émission")
+
+
+# ── Test garde-fou (Phase 3) — module-level, sans passer par emit_report_to_hub ──
+def test_garde_fou_pdf_correspond_au_mode():
+    """_verifier_pdf_correspond_au_mode : ne lève PAS si le marqueur attendu
+    est présent ; lève HTTPException(500) EXPLICITE sinon (jamais de
+    publication silencieuse d'un document qui ne correspond pas au mode) --
+    y compris sur un PDF illisible (octets non-PDF)."""
+    import modules.ad_budget_api as B
+    from fastapi import HTTPException
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import letter
+    import io as _io
+
+    def _pdf_avec_texte(texte):
+        buf = _io.BytesIO()
+        c = canvas.Canvas(buf, pagesize=letter)
+        c.drawString(72, 700, texte)
+        c.save()
+        return buf.getvalue()
+
+    # 1) marqueur présent -> aucune exception.
+    B._verifier_pdf_correspond_au_mode(_pdf_avec_texte("Ventilation par lot — Originale"),
+                                       "Ventilation par lot", "par_lot")
+
+    # 2) marqueur absent (document de l'AUTRE mode) -> 500 explicite, JAMAIS silencieux.
+    try:
+        B._verifier_pdf_correspond_au_mode(_pdf_avec_texte("Rapport de budget — Originale"),
+                                           "Ventilation par lot", "par_lot")
+        raise AssertionError("aurait dû lever 500")
+    except HTTPException as e:
+        assert e.status_code == 500 and "par_lot" in e.detail and "Ventilation par lot" in e.detail
+
+    # 3) PDF illisible (octets arbitraires) -> 500 explicite, jamais de crash nu.
+    try:
+        B._verifier_pdf_correspond_au_mode(b"pas un PDF du tout", "Rapport de budget", "global")
+        raise AssertionError("aurait dû lever 500")
+    except HTTPException as e:
+        assert e.status_code == 500
+
+    print("  [OK] garde-fou mode<->PDF : silencieux si conforme, 500 explicite sinon (jamais de publication)")
 
 
 # ── Runner autonome ───────────────────────────────────────────────────────
