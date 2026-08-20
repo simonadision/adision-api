@@ -86,6 +86,17 @@ def render_reportlab(fixture, logo_b64=None):
         return ""
     D._logo_flowable_for_org = _logo_flowable
 
+    # CORRECTIF INCIDENT 20 août 2026 — _build_devis ne prend plus le montant
+    # tel quel : il relit ad_budget.budget_lignes et le recalcule via
+    # compute_budget_totals (même chemin que le rapport de calcul), pour que
+    # les deux documents ne puissent plus diverger. Ce harnais de fidélité
+    # compare le RENDU (jsPDF vs reportlab) pour un montant DONNÉ par le
+    # fichier témoin — il ne teste pas le calcul lui-même (couvert ailleurs,
+    # côté compute_budget_totals). Monkeypatch pour continuer à piloter le
+    # montant depuis le fichier témoin, sans fabriquer de lignes de budget
+    # synthétiques dont la somme devrait retomber pile sur cette valeur.
+    D._montant_avant_taxes_serveur = lambda *a, **k: float(fixture.get("montant") or 0)
+
     results = {
         "ad_budget.projets": ("one", _projet_row(fixture)),
         "ad_budget.devis": ("one", _devis_row(fixture)),

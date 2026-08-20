@@ -33,9 +33,9 @@ x10000) pour éliminer tout formatage de flottant dans la chaîne canonique.
 import hashlib
 
 from modules.aggregates import _js_round
+from modules.aggregates import heures_effectives as _heures_effectives
 
 SCHEMA = "adision-devis-budget-fp/v1"
-_HEURE_UNITS = {"hr", "hre", "heure", "heures", "h"}
 NULL = "null"  # marqueur ASCII (aucun risque d'encodage) pour un pct absent
 
 # 4 disciplines x {discipline, mat, mo, st} = 16 champs, triés par nom.
@@ -54,21 +54,15 @@ def _i10000(x):
     return int(_js_round(float(x) * 10000))
 
 
-def _is_heure_unit(u):
-    return str(u or "").strip().lower() in _HEURE_UNITS
-
-
-def _heures_effectives(unite, heures, heures_manuelles, qte):
-    h = float(heures or 0)
-    if _is_heure_unit(unite) and not (heures_manuelles and h != 0):
-        return float(qte or 0)
-    return h
-
-
 def _line_total(arr, l):
-    """R(total) d'UNE ligne, EXACTEMENT comme compute_budget_totals / getRow."""
+    """R(total) d'UNE ligne, EXACTEMENT comme compute_budget_totals / getRow.
+
+    Heures effectives : SOURCE UNIQUE modules.aggregates.heures_effectives (importée
+    ci-dessus) — production_valeur > 0 gagne TOUJOURS (priorité absolue sur `heures`
+    et `heures_manuelles`), cf. incident 2026-08-20 (voir docstring du module)."""
     qte = float(l.get("qte") or 0)
-    heures = _heures_effectives(l.get("unite"), l.get("heures"), l.get("heures_manuelles"), qte)
+    heures = _heures_effectives(l.get("unite"), l.get("heures"), l.get("heures_manuelles"), qte,
+                                l.get("production_valeur"))
     taux = float(l.get("taux_horaire") or 0)
     # Règle #2 (2026-08-17, décision Simon) : QTÉ=0 exclut TOUJOURS le montant
     # ST — même gate que compute_budget_totals (ad_budget_api.py) et getRow

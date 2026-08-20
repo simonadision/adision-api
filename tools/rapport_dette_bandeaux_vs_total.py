@@ -30,7 +30,8 @@ from modules.ad_budget_api import (
 
 def _tot_real(l):
     qte = _effective_qte(l, 0, 0, 0, 0)
-    heures = _heures_effectives(l.get("unite"), l.get("heures"), l.get("heures_manuelles"), qte)
+    heures = _heures_effectives(l.get("unite"), l.get("heures"), l.get("heures_manuelles"), qte,
+                                l.get("production_valeur"))
     taux = float(l.get("taux_horaire") or 0)
     stm = float(l.get("sous_traitant_montant") or 0)
     if qte <= 0 and not (heures > 0 and taux > 0) and not (stm > 0):

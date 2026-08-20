@@ -34,7 +34,7 @@ from modules import budget_fingerprint
 from modules.auth_jwt import SESSION_COOKIE_NAME, make_jwt_deps, _extract_bearer
 from modules.ad_budget_api import (
     build_pdf_logo, _load_and_authorize_projet, draw_adflo_footer,
-    _persist_hub_identity_snapshot,
+    _persist_hub_identity_snapshot, compute_budget_totals,
 )
 
 logger = logging.getLogger(__name__)
@@ -141,6 +141,39 @@ def _logo_flowable_for_org(org, max_width=150):
     build_pdf_logo('') -> "" (placeholder NEUTRE, jamais Adision — décision Simon,
     cohérent multi-tenant)."""
     return build_pdf_logo(_org_logo_base64(org) or "", max_width=max_width)
+
+
+def _montant_avant_taxes_serveur(get_conn, projet, projet_id):
+    """CORRECTIF INCIDENT 20 août 2026 (deux totaux différents pour le même
+    projet, au même instant, sur « Rapport de calcul » vs « Proposition /
+    Devis ») — le montant du devis était un float ENVOYÉ PAR LE CLIENT
+    (`?montant=...`), calculé côté navigateur depuis l'état EN MÉMOIRE de
+    l'onglet (potentiellement périmé : autre onglet, autre utilisateur,
+    bundle pas encore rechargé — cf. incidents « grandTotal » du 18/19 août).
+    Le rapport de calcul, lui, relit TOUJOURS la base au moment de la
+    génération et passe par `compute_budget_totals` (chemin de calcul
+    PARTAGÉ, aussi utilisé par `_prix_vente_total`/le hub). Les deux
+    documents n'avaient donc AUCUNE garantie de concorder.
+
+    Le devis utilise désormais EXACTEMENT le même chemin : relit
+    `ad_budget.budget_lignes actif=TRUE` fraîchement et appelle
+    `compute_budget_totals`, comme `_build_projet_report`. Le montant reçu du
+    client n'est plus utilisé pour le PDF ni pour le snapshot poussé au hub —
+    seulement, historiquement, pour dessiner l'aperçu HORS LIGNE (moteur
+    client jsPDF, qui ne peut pas requêter le serveur)."""
+    conn = get_conn()
+    cur = conn.cursor(row_factory=dict_row)
+    try:
+        cur.execute(
+            "SELECT * FROM ad_budget.budget_lignes WHERE projet_id = %s AND actif = TRUE",
+            (projet_id,),
+        )
+        lignes_actives = cur.fetchall()
+    finally:
+        cur.close()
+        conn.close()
+    totals = compute_budget_totals(projet, lignes_actives)
+    return round(totals["sous_total_avant_taxes"], 2)
 
 
 def _devis_snapshot(projet, devis, ident, montant):
@@ -490,8 +523,16 @@ def register_ad_devis_routes(get_conn):
                 conn.close()
 
         # ── Snapshot (sans reportlab) + relais des octets CLIENT au hub ────────
+        # CORRECTIF INCIDENT 20 août 2026 — le montant ÉMIS (snapshot poussé au
+        # hub, donc affiché dans Espace Rapports) vient TOUJOURS du chemin de
+        # calcul serveur (compute_budget_totals), jamais du float `montant` du
+        # formulaire. Le contrôle d'empreinte ci-dessus RESTE (il protège le
+        # moteur client jsPDF hors ligne : la PAGE du PDF déjà dessinée peut
+        # afficher un montant périmé si le budget a changé depuis) — mais il
+        # ne pilote plus le nombre PERSISTÉ, qui est désormais toujours exact.
         _ident, _ident_source = _resolve_identity_with_snapshot(projet, jwt_token, {})
-        snapshot = _devis_snapshot(projet, devis, _ident, montant)
+        montant_serveur = round(compute_budget_totals(projet, lignes_actives)["sous_total_avant_taxes"], 2)
+        snapshot = _devis_snapshot(projet, devis, _ident, montant_serveur)
         fields = {
             "report_type": "proposition_devis",
             "revision_no": rev_no,
@@ -543,7 +584,11 @@ def register_ad_devis_routes(get_conn):
         `user` = utilisateur courant (dict {nom,email}) pour le REPLI du bloc
         signature quand le devis n'a pas de responsable saisi. Optionnel : sans
         user ET sans responsable -> mention neutre « — », JAMAIS de 500 (avant,
-        un `user` libre non défini partait en NameError -> 500)."""
+        un `user` libre non défini partait en NameError -> 500).
+
+        `montant` (paramètre reçu du client, hérité) N'EST PLUS LA VALEUR
+        AFFICHÉE — cf. _montant_avant_taxes_serveur. Gardé en signature pour
+        compat d'appel, écrasé juste après le chargement du projet."""
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         try:
@@ -555,6 +600,15 @@ def register_ad_devis_routes(get_conn):
         finally:
             cur.close()
             conn.close()
+
+        # CORRECTIF INCIDENT 20 août 2026 — le montant AFFICHÉ ET ÉMIS au hub
+        # vient désormais TOUJOURS du même chemin de calcul serveur que le
+        # rapport de calcul (compute_budget_totals), jamais du float envoyé
+        # par le client. Le `montant` reçu en paramètre ne sert plus qu'à
+        # l'ancien moteur client (jsPDF, hors ligne — cf. ?pdf_engine=jspdf),
+        # qui ne passe pas par cette fonction.
+        montant = _montant_avant_taxes_serveur(get_conn, projet, projet_id)
+
         entreprise = {}
         try:
             entreprise = hub_service.fetch_organization(jwt_token, projet.get("organization_id")) or {}

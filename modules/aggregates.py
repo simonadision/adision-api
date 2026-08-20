@@ -64,6 +64,33 @@ def _is_heure_unit(unite) -> bool:
     return str(unite or "").strip().lower() in _HEURE_UNITS
 
 
+def heures_effectives(unite, heures, heures_manuelles, qte, production_valeur=None) -> float:
+    """Heures effectives MO — SOURCE UNIQUE, importée par ad_budget_api.py,
+    budget_fingerprint.py (donc lots_calc.py) et adapt_budget_lines ci-dessous.
+    Toute autre implémentation locale est un bug en puissance (cf. incident
+    2026-08-20 ci-dessous).
+
+    RÈGLE (confirmée par Simon le 14 août 2026, App.jsx::getRow) : production
+    renseignée (`production_valeur` > 0) -> PRIORITÉ ABSOLUE, écrase TOUJOURS
+    heures — même une valeur déjà tapée à la main (heures_manuelles est SANS
+    EFFET dans ce cas). heures = qté / production_valeur, arrondi à 1 décimale
+    demi vers le HAUT (_round1 = _js_round = miroir Math.round(x*10)/10 du
+    front). Empêche la colonne `heures` de mentir au serveur quand elle a été
+    corrompue / désynchronisée du ratio de production (incident 2026-08-20,
+    projet 290 : écart de 39 219 $ / 463 h entre écran et serveur, colonne
+    `heures` stockée ne reflétant plus qté/production).
+
+    Sinon (pas de production renseignée) : comportement historique inchangé —
+    unité « hr » sans override réel -> heures = qté ; sinon colonne `heures`."""
+    prod = float(production_valeur or 0)
+    if prod > 0:
+        return _round1(float(qte or 0) / prod)
+    h = float(heures or 0)
+    if _is_heure_unit(unite) and not (heures_manuelles and h != 0):
+        return float(qte or 0)
+    return h
+
+
 def adapt_budget_lines(raw_lines) -> list:
     """Adapte les rows BD (shape flat) au format ligne attendu par
     compute_aggregates (mat/mo/st nested). Équivalent Python du JS
@@ -94,9 +121,8 @@ def adapt_budget_lines(raw_lines) -> list:
         # compute_aggregates n'ait pas à connaître qte à part.
         if qte_v <= 0:
             montant_st = 0
-        heures_raw = float(ln.get("heures") or 0)
-        override_reel = (ln.get("heures_manuelles") is True) and abs(heures_raw) > 1e-9
-        heures_eff = qte_v if (_is_heure_unit(ln.get("unite")) and not override_reel) else heures_raw
+        heures_eff = heures_effectives(ln.get("unite"), ln.get("heures"), ln.get("heures_manuelles"),
+                                       qte_v, ln.get("production_valeur"))
         result.append({
             "id": ln.get("id"),
             "section": ln.get("section"),
