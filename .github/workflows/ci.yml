@@ -28,6 +28,16 @@
 #                                        l'incident 2026-08-20 (source Python)
 #   - test_invariant_a_coutant_total.py Invariant A — coûtant total (lot = CSI
 #                                        = mat+mo+st), chantier 20 août 2026
+#   - verifier_source_unique.py + test_verifier_source_unique.py
+#                                        couche 3 (issue #9 monorepo) : detecte
+#                                        une copie locale de la regle des
+#                                        heures (production_valeur) au lieu
+#                                        d'une delegation a
+#                                        modules.aggregates.heures_effectives.
+#                                        Miroir Python du meme controle cote JS
+#                                        (adision-monorepo/scripts/verifier-
+#                                        source-unique.mjs). Pur Python,
+#                                        aucune dependance au depot frere.
 #
 # NE TOURNE PAS ICI, ET CE N'EST PAS UN OUBLI (besoin du dépôt frère
 # adision-monorepo + node — checkout d'un second dépôt privé = jeton
@@ -99,3 +109,14 @@ jobs:
 
       - name: Invariant A — coûtant total (lot = CSI = mat+mo+st)
         run: pytest tests/test_invariant_a_coutant_total.py -v
+
+      # Couche 3 (issue #9 monorepo) : une copie locale de la regle des
+      # heures (production_valeur prioritaire) au lieu d'une delegation a
+      # modules.aggregates.heures_effectives.
+      - name: Source unique - pas de copie locale de la regle des heures
+        run: python tools/verifier_source_unique.py
+
+      # Filet du controle ci-dessus : injecte une copie dans un vrai fichier
+      # temporaire et verifie qu'il la detecte pour de vrai.
+      - name: Source unique - le controle mord-il pour de vrai (filet)
+        run: pytest tests/test_verifier_source_unique.py -v

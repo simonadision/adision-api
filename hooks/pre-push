@@ -19,6 +19,24 @@ if ! python tests/test_invariant_a_coutant_total.py; then
   echo "[pre-push] ÉCHEC Invariant A — push BLOQUÉ." >&2
   exit 1
 fi
+# Couche 3 (issue #9 monorepo) : pas de copie locale de la règle des heures
+# (production_valeur prioritaire) hors de modules/aggregates.py. Pur Python,
+# aucune dépendance au dépôt frère -> toujours bloquant. Miroir de
+# adision-monorepo/scripts/verifier-source-unique.mjs (même 2 signaux).
+echo "[pre-push] Source unique — pas de copie locale de la règle des heures…"
+if ! python tools/verifier_source_unique.py; then
+  echo "[pre-push] ÉCHEC source unique — une copie locale a été détectée. Push BLOQUÉ." >&2
+  echo "[pre-push] Reproduire : python tools/verifier_source_unique.py" >&2
+  exit 1
+fi
+# Filet du contrôle ci-dessus — injecte une vraie copie dans un vrai fichier
+# temporaire et vérifie qu'il la détecte pour de vrai (pas seulement qu'il
+# reste silencieux).
+echo "[pre-push] Filet — le contrôle source unique mord-il pour de vrai ?…"
+if ! python -m pytest tests/test_verifier_source_unique.py -q; then
+  echo "[pre-push] ÉCHEC filet source unique — le contrôle ne détecte plus les copies injectées. Push BLOQUÉ." >&2
+  exit 1
+fi
 # Divergences écran↔rapport connues (D3/D4) : tests ATTENDUS-EN-ÉCHEC (xfail).
 # Exit 0 tant que le défaut est présent (attendu) ; exit 1 en XPASS = un défaut
 # documenté a été corrigé sans retirer le marqueur → mettre le fichier à jour.
