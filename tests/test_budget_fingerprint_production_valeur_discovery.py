@@ -1,39 +1,28 @@
-"""DÉCOUVERTE (chantier « tests d'invariant sur les chiffres que Simon voit »,
-20 août 2026) — pas un des 4 invariants demandés par le brief, un sous-produit
-DIRECT de l'Invariant B : en construisant la fixture partagée de l'incident
-(isolant réel, projet 290) pour comparer Python == JS, ce même cas exécuté
-contre le mirroir JS de l'EMPREINTE budget (budgetFingerprint.js::lineTotal,
-DISTINCT de getRow/computeLigneTotal) révèle qu'il n'a JAMAIS reçu le
-correctif production_valeur d'a07c72b.
+"""CORRECTIF appliqué (chantier « tests d'invariant sur les chiffres que Simon
+voit », 20 août 2026) — verrou de non-régression, plus une découverte.
 
-Constat empirique (isolant réel, 1 800 pi² à 96 pi²/h, heures stockée 149,40
-— cf. test_invariant_b_ligne_python_js.py::test_isolant_incident_290_valeur_attendue) :
-  Python (_line_total, SOURCE UNIQUE depuis a07c72b)        : 5 440,00 $
-  JS empreinte (budgetFingerprint.js::lineTotal, INCHANGÉ)  : 11 970,00 $
-  écart                                                     : 6 530,00 $ sur UNE ligne.
+Historique : ce fichier documentait une découverte, sous-produit DIRECT de
+l'Invariant B — en construisant la fixture partagée de l'incident (isolant
+réel, projet 290) pour comparer Python == JS, ce même cas exécuté contre le
+mirroir JS de l'EMPREINTE budget (budgetFingerprint.js::lineTotal, DISTINCT de
+getRow/computeLigneTotal) révélait qu'il n'avait JAMAIS reçu le correctif
+production_valeur d'a07c72b — écart mesuré de 6 530,00 $ sur cette seule ligne
+(Python 5 440,00 $ vs JS empreinte 11 970,00 $). Le test tournait `xfail
+strict`, en attente d'une décision de Simon (cf. commentaire du chantier
+« si un invariant révèle une divergence réelle en production, ARRÊTE et
+expose-la »).
 
-Cause : budgetFingerprint.js::heuresEffectives (adision-monorepo/apps/ad-bud/
-src/utils/budgetFingerprint.js) n'a pas de paramètre production_valeur — il a
-été écrit (c2f62c94) avant le mécanisme de ratio de production (14 août) et
-n'a pas été mis à jour quand a07c72b a posé la priorité absolue côté serveur.
-budgetFingerprint.js prétend pourtant, dans son propre commentaire, être
-« EXACTEMENT comme compute_budget_totals / getRow ».
+Décision de Simon : corriger. budgetFingerprint.js (adision-monorepo/apps/
+ad-bud/src/utils/) n'a plus sa propre copie de la règle des heures — sa
+fonction `condense()` délègue désormais à `computeLigneTotal`
+(budgetLigneTotal.js), LA MÊME fonction que App.jsx::getRow appelle à
+l'écran et que ce test compare au calcul Python (_line_total). Même
+traitement appliqué à adaptBudgetLines.js (agrégats dashboard / Ad ANA),
+signalé le même jour avec le même défaut.
 
-Portée du risque : l'empreinte sert à détecter, à l'émission d'un devis
-(Option B), si le budget a changé depuis sa génération — SANS bloquer (cf. la
-docstring de budget_fingerprint.py). Toute ligne de devis avec
-production_valeur renseignée (278 lignes / 17 projets au 20 août 2026, cf.
-a07c72b) fait diverger l'empreinte CLIENT (générée avec le mirroir JS boiteux)
-de l'empreinte SERVEUR (recalculée à l'émission avec _line_total, correct) —
-FAUX POSITIF « le budget a changé » systématique sur ces devis.
-
-CE FICHIER NE CORRIGE RIEN — décision explicite du chantier : « si un
-invariant révèle une divergence réelle en production, ARRÊTE et expose-la —
-c'est une découverte qui mérite une décision de Simon, pas un correctif
-silencieux ». xfail STRICT (même patron que test_divergences_ecran_rapport.py,
-D3/D4) : si budgetFingerprint.js reçoit un jour le correctif sans qu'on retire
-ce marqueur, ce test XPASS et le fait savoir bruyamment plutôt que de
-disparaître en silence.
+Ce test n'est plus `xfail` : il verrouille l'accord retrouvé, sur le CAS RÉEL
+de l'incident. S'il redevenait rouge, ce serait une régression du correctif
+lui-même — pas une découverte à documenter.
 
 Portée CI : comme test_invariant_b_ligne_python_js.py, ce test a besoin du
 dépôt frère adision-monorepo + node -> réservé au pre-push local, skip ailleurs.
@@ -68,9 +57,10 @@ _LIGNE_ISOLANT = {
 
 
 def _js_line_total_cents():
-    """budgetFingerprint.js n'exporte pas lineTotal (privé) — seule sa sortie
-    condensée (canonicalString) l'est. On isole le total de la ligne unique en
-    cents depuis la dernière ligne de la chaîne canonique ("<id>=<cents>")."""
+    """budgetFingerprint.js n'exporte pas lineTotal (délégué à computeLigneTotal,
+    privé à ce module) — seule sa sortie condensée (canonicalString) l'est. On
+    isole le total de la ligne unique en cents depuis la dernière ligne de la
+    chaîne canonique ("<id>=<cents>")."""
     fx = {"projet": {}, "lignes": [_LIGNE_ISOLANT], "montant": 0}
     p = os.path.join(HERE, "_tmp_discovery_fixture.json")
     with open(p, "w", encoding="utf-8") as fh:
@@ -90,20 +80,16 @@ def _js_line_total_cents():
 
 
 @pytest.mark.skipif(not _DISPONIBLE, reason=_RAISON_SKIP)
-@pytest.mark.xfail(strict=True, reason=(
-    "DÉCOUVERTE 2026-08-20 (chantier tests d'invariant) : budgetFingerprint.js::"
-    "heuresEffectives ignore production_valeur — jamais mis à jour par a07c72b, qui n'a "
-    "touché que le serveur. En attente de décision Simon (cf. docstring du fichier). "
-    "Retirer ce marqueur seulement quand budgetFingerprint.js appliquera la même priorité "
-    "production_valeur que modules/aggregates.py::heures_effectives."
-))
-def test_empreinte_js_diverge_de_python_sur_production_valeur():
+def test_empreinte_js_concorde_avec_python_sur_production_valeur():
     total_py_cents = round(_line_total(False, _LIGNE_ISOLANT) * 100)
     total_js_cents = _js_line_total_cents()
     assert total_py_cents == total_js_cents, (
         f"Python={total_py_cents / 100:.2f} $ vs JS(empreinte)={total_js_cents / 100:.2f} $ "
         f"— écart {(total_js_cents - total_py_cents) / 100:.2f} $ sur la ligne isolant "
-        "de l'incident 2026-08-20 (production_valeur=96)")
+        "de l'incident 2026-08-20 (production_valeur=96) — régression du correctif "
+        "production_valeur dans budgetFingerprint.js")
+    # Chiffre exact attendu (critère d'acceptation #1 du chantier) : 5 440,00 $.
+    assert total_py_cents == 544000
 
 
 if __name__ == "__main__":
@@ -112,9 +98,9 @@ if __name__ == "__main__":
         sys.exit(0)
     total_py_cents = round(_line_total(False, _LIGNE_ISOLANT) * 100)
     total_js_cents = _js_line_total_cents()
-    if total_py_cents == total_js_cents:
-        print("[XPASS inattendu] l'écart a disparu — retirer le xfail de ce fichier.")
+    if total_py_cents != total_js_cents:
+        print(f"[FAIL] Python={total_py_cents / 100:.2f} $ JS={total_js_cents / 100:.2f} $ "
+              f"écart={(total_js_cents - total_py_cents) / 100:.2f} $")
         sys.exit(1)
-    print(f"[XFAIL attendu] Python={total_py_cents / 100:.2f} $ JS={total_js_cents / 100:.2f} $ "
-          f"écart={(total_js_cents - total_py_cents) / 100:.2f} $")
+    print(f"[OK] Python == JS == {total_py_cents / 100:.2f} $ (production_valeur=96)")
     sys.exit(0)

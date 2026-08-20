@@ -38,7 +38,8 @@
 #   - test_invariant_b_ligne_python_js.py  (Invariant B — LE PLUS IMPORTANT,
 #     ligne budget Python == JS écran) — reste réservé au pre-push local,
 #     où les deux dépôts sont déjà frères sur le poste de Simon.
-#   - test_budget_fingerprint_production_valeur_discovery.py (découverte xfail,
+#   - test_budget_fingerprint_production_valeur_discovery.py (verrou de
+#     non-régression production_valeur, correctif appliqué le 20 août 2026 —
 #     même contrainte que l'Invariant B)
 #
 # AUCUN SECRET DE PRODUCTION N'EST RÉFÉRENCÉ ICI — pas de base, pas de réseau
