@@ -10,7 +10,7 @@ from typing import Optional
 
 import httpx
 import openpyxl
-from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from psycopg.errors import UniqueViolation
 from psycopg.rows import dict_row
@@ -1479,6 +1479,113 @@ def _verifier_pdf_correspond_au_mode(pdf_bytes: bytes, marqueur_attendu: str, mo
                      f"demandé ({mode_export!r}, attendu « {marqueur_attendu} » sur la page) — "
                      f"émission annulée, rien publié."),
         )
+
+
+def _fetch_lot_ventilation_calc(get_conn, projet_id):
+    """CHARGEMENT + CALCUL PARTAGÉS de la ventilation par lot — chemin UNIQUE
+    utilisé À LA FOIS par _build_lot_ventilation_report (rendu reportlab,
+    trappe de secours ?pdf_engine=reportlab / GET /pdf-lots) ET par
+    emit_report_to_hub (mode_export="par_lot") pour VÉRIFIER, SANS rendu, le
+    PDF client (jsPDF) reçu à l'émission. Un seul SELECT lignes/lots, jamais
+    deux requêtes qui pourraient un jour diverger sur les colonnes lues (cf.
+    incident du 20 août 2026, projet 290 : colonne `heures` lue telle quelle
+    côté serveur au lieu de `production_valeur`, écart de 39 219 $ vs l'écran).
+
+    Retourne (projet, lignes_calc, lot_result, budget_totals) — lève
+    HTTPException(404) si le projet est introuvable.
+    - lot_result = compute_lot_totals (lots_calc.py) : sous-totaux par lot,
+      « hors lot » et grand_total COÛTANT (avant administration/profit et
+      taxes) — la valeur imprimée en pied du tableau des lots.
+    - budget_totals = compute_budget_totals, sur les lignes ACTIVES
+      seulement (même filtre que le rapport détaillé et l'écran) :
+      sous_total_avant_taxes / tps / tvq / total_general (APRÈS taxes) +
+      détail mat/mo/st et heures — le récap financier."""
+    conn = get_conn()
+    cur = conn.cursor(row_factory=dict_row)
+    try:
+        cur.execute("SELECT * FROM ad_budget.projets WHERE id = %s", (projet_id,))
+        projet = cur.fetchone()
+        if not projet:
+            raise HTTPException(status_code=404, detail="Projet not found")
+        cur.execute(
+            "SELECT id, nom, nb_logements, ordre FROM ad_budget.lots "
+            "WHERE projet_id = %s ORDER BY ordre, id",
+            (projet_id,),
+        )
+        lots = cur.fetchall()
+        cur.execute(
+            "SELECT id, section, description, a_completer, lot_id, actif, qte, prix_unitaire, ajust_materiaux, heures, "
+            "taux_horaire, ajust_main_oeuvre, sous_traitant_montant, ajust_sous_traitant, "
+            "ajustement_pct, unite, heures_manuelles, production_valeur FROM ad_budget.budget_lignes "
+            "WHERE projet_id = %s",
+            (projet_id,),
+        )
+        lignes_calc = cur.fetchall()
+    finally:
+        cur.close()
+        conn.close()
+    lot_result = compute_lot_totals(lignes_calc, lots, projet.get("arrondi_dollar"))
+    raw_lignes_actives = [l for l in lignes_calc if l.get("actif", True)]
+    budget_totals = compute_budget_totals(projet, raw_lignes_actives)
+    return projet, lignes_calc, lot_result, budget_totals
+
+
+_MONTANT_PDF_RE = re.compile(r"(\d{1,3}(?:[  ]\d{3})*,\d{2})\s*\$")
+
+
+def _extraire_montant_pdf_lot(pdf_bytes: bytes):
+    """Lit le montant TOTAL réellement IMPRIMÉ dans un PDF « Ventilation par
+    lot » (moteur client jsPDF, OU repli reportlab — cf. docstring de
+    _build_lot_ventilation_report) — utilisé par emit_report_to_hub
+    (mode_export="par_lot") pour vérifier l'artefact TÉLÉVERSÉ par le client
+    AVANT publication au hub. On ne le croit jamais sur parole (même esprit
+    que b4c2491 pour le devis : le montant retenu vient toujours d'un
+    recalcul serveur — ici en plus COMPARÉ à ce que le document affiche
+    réellement, PDF illisible ou montant introuvable -> refus, jamais publié).
+
+    Cherche, dans l'ordre de préférence, le premier montant "$" qui suit une
+    des ancres de texte imprimées par les DEUX moteurs :
+      1. « GRAND TOTAL (avec taxes) » — bloc sommaire bas de page (jsPDF,
+         TOUJOURS rendu dès qu'un récap existe, INDÉPENDAMMENT de la case
+         « Récap financier » du haut) -> montant APRÈS TAXES.
+      2. « TOTAL avec taxes » — bandeau RÉCAP FINANCIER du haut (reportlab
+         ET jsPDF quand la case est cochée) -> montant APRÈS TAXES.
+      3. « GRAND TOTAL » — pied du tableau des lots, TOUJOURS rendu par les
+         DEUX moteurs quel que soit l'état du récap -> dernier repli, montant
+         COÛTANT (avant administration/profit et taxes).
+
+    Retourne (montant: float, base: "apres_taxes"|"coutant") ou (None, None)
+    si aucune ancre ni aucun montant lisible n'est trouvé."""
+    try:
+        import fitz  # PyMuPDF — même dépendance que _verifier_pdf_correspond_au_mode
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        texte = "\n".join(page.get_text() for page in doc)
+        doc.close()
+    except Exception:  # noqa: BLE001 — PDF illisible, jamais de crash ici
+        return None, None
+
+    def _montant_apres(label):
+        idx = texte.find(label)
+        if idx == -1:
+            return None
+        fenetre = texte[idx + len(label): idx + len(label) + 120]
+        m = _MONTANT_PDF_RE.search(fenetre)
+        if not m:
+            return None
+        brut = re.sub(r"[\s ]", "", m.group(1)).replace(",", ".")
+        try:
+            return float(brut)
+        except ValueError:
+            return None
+
+    for label in ("GRAND TOTAL (avec taxes)", "TOTAL avec taxes"):
+        v = _montant_apres(label)
+        if v is not None:
+            return v, "apres_taxes"
+    v = _montant_apres("GRAND TOTAL")
+    if v is not None:
+        return v, "coutant"
+    return None, None
 
 
 def register_ad_budget_routes(get_conn):
@@ -3836,14 +3943,26 @@ def register_ad_budget_routes(get_conn):
         colonnes_lots=None,
     ):
         """Construit le PDF « Ventilation par lot » (reportlab). Retourne
-        (buf: BytesIO, meta: dict). FACTORISÉ (brief Simon, 20 août 2026,
-        incident projet 290) : AVANT, seule la route GET /pdf-lots ci-dessous
-        appelait ce code — ÉMETTRE (POST /emit-report) republiait TOUJOURS le
-        rapport de calcul (_build_projet_report) même quand la modale
-        demandait la ventilation par lot. Désormais export_projet_pdf_lots
-        (aperçu/téléchargement) ET emit_report_to_hub (mode_export="par_lot")
-        appellent ce MÊME chemin — aucune divergence possible entre ce qui
-        est validé à l'écran et ce qui est publié dans Espace Rapports.
+        (buf: BytesIO, meta: dict).
+
+        ⚠ TRAPPE DE SECOURS, PAS le document publié par défaut (brief Simon,
+        20 août 2026, régression émission — incident projet 290 bis). Le
+        document réellement obtenu à l'aperçu, au téléchargement ET publié
+        dans Espace Rapports (émission mode_export="par_lot") est le PDF
+        CLIENT (jsPDF, @adision/report-pdf::buildLotVentilationPdf), construit
+        dans le navigateur et TÉLÉVERSÉ tel quel par emit_report_to_hub (cf.
+        sa docstring) — jamais re-rendu ni recopié ici. CETTE fonction ne sert
+        plus que :
+          1. GET /projets/{id}/pdf-lots (export_projet_pdf_lots) — repli
+             SERVEUR de l'aperçu quand le moteur client est désactivé
+             (?pdf_engine=reportlab, trappe cachée, cf. reportEngineFlag.js) ;
+          2. la vérification serveur du montant côté emit_report_to_hub, via
+             _fetch_lot_ventilation_calc (chemin de calcul PARTAGÉ avec CETTE
+             fonction, mais SANS construire de PDF).
+        Document volontairement plus pauvre que le rendu client (cf. plus
+        bas) — NE JAMAIS le rebrancher sur l'émission : c'est exactement la
+        régression corrigée ici. Si l'émission doit un jour republier ce
+        RENDU, c'est un nouveau brief, pas une réintroduction silencieuse.
 
         avec_recap_financier : inclut (ou non) le bandeau RÉCAP FINANCIER en
         haut de page (case à cocher de la modale, brief Simon 18 août 2026).
@@ -3853,51 +3972,20 @@ def register_ad_budget_routes(get_conn):
         explicite = aucune colonne optionnelle — même convention que
         sous_totaux/admin_profits dans _build_projet_report.
 
-        Trappe de secours reportlab pour le moteur SERVI par défaut côté
-        client (jsPDF, @adision/report-pdf::buildLotVentilationPdf) : document
-        SIMPLE, préfixé du RÉCAP FINANCIER en en-tête (brief Simon,
+        Document SIMPLE, préfixé du RÉCAP FINANCIER en en-tête (brief Simon,
         18 août 2026) — le même sommaire qu'à l'écran (matériaux/
         main-d'œuvre incl. heures/sous-traitant, coûtant total,
         administration et profit, sous-total avant taxes, TPS/TVQ, total
         avec taxes) suivi de la table Lot -> sous-total, jamais le détail
-        ligne par ligne CSI imbriqué (cf. commentaire de
-        buildLotVentilationPdf.js).
+        ligne par ligne CSI imbriqué, ni le logo/filet/récap complet du
+        moteur client (cf. commentaire de buildLotVentilationPdf.js).
 
-        Les sous-totaux par lot et le grand total viennent EXCLUSIVEMENT de
-        compute_lot_totals (lots_calc.py) — aucune divergence possible avec
-        l'écran (Vue par lot) ni avec GET /lots. Le récap financier vient
-        EXCLUSIVEMENT de compute_budget_totals — le CHEMIN DE CALCUL PARTAGÉ
-        du rapport de calcul détaillé et du prix de vente poussé au hub
-        (cf. docstring de compute_budget_totals) — donc les mêmes chiffres
-        que le bandeau « Récap financier » de l'écran (App.jsx), aux
-        divergences déjà connues et verrouillées près (D3/D4,
-        tests/test_divergences_ecran_rapport.py).
-        """
-        conn = get_conn()
-        cur = conn.cursor(row_factory=dict_row)
-        cur.execute("SELECT * FROM ad_budget.projets WHERE id = %s", (projet_id,))
-        projet = cur.fetchone()
-        if not projet:
-            cur.close()
-            conn.close()
-            raise HTTPException(status_code=404, detail="Projet not found")
-        cur.execute(
-            "SELECT id, nom, nb_logements, ordre FROM ad_budget.lots "
-            "WHERE projet_id = %s ORDER BY ordre, id",
-            (projet_id,),
-        )
-        lots = cur.fetchall()
-        cur.execute(
-            "SELECT id, section, description, a_completer, lot_id, actif, qte, prix_unitaire, ajust_materiaux, heures, "
-            "taux_horaire, ajust_main_oeuvre, sous_traitant_montant, ajust_sous_traitant, "
-            "ajustement_pct, unite, heures_manuelles, production_valeur FROM ad_budget.budget_lignes "
-            "WHERE projet_id = %s",
-            (projet_id,),
-        )
-        lignes_calc = cur.fetchall()
-        cur.close()
-        conn.close()
-        result = compute_lot_totals(lignes_calc, lots, projet.get("arrondi_dollar"))
+        Chargement + calcul (lots, lignes, compute_lot_totals,
+        compute_budget_totals) délégués à _fetch_lot_ventilation_calc —
+        CHEMIN PARTAGÉ avec la vérification serveur d'emit_report_to_hub,
+        aucune divergence possible entre ce que cette trappe rendrait et ce
+        que le serveur vérifie du PDF client."""
+        projet, lignes_calc, result, budget_totals = _fetch_lot_ventilation_calc(get_conn, projet_id)
         nom_projet = _hub_project_name(projet, authorization, session_cookie) or "Projet"
 
         # IDENTITÉ (bloc CLIENT / ENTREPRENEUR) — MÊME résolution que le rapport
@@ -3929,9 +4017,10 @@ def register_ad_budget_routes(get_conn):
             except Exception:
                 pass  # best-effort
 
-        # Récap financier — chemin PARTAGÉ (compute_budget_totals), sur les
-        # lignes ACTIVES seulement : même filtre que le rapport détaillé
-        # (actifs_seulement par défaut) et que l'écran (activeItems). Calculé
+        # Récap financier — chemin PARTAGÉ (compute_budget_totals, DÉJÀ
+        # calculé par _fetch_lot_ventilation_calc ci-dessus), sur les lignes
+        # ACTIVES seulement : même filtre que le rapport détaillé (actifs_
+        # seulement par défaut) et que l'écran (activeItems). Disponible
         # INCONDITIONNELLEMENT (même si avec_recap_financier=False ou aucune
         # ligne) : `meta` en a besoin pour montant_affiche_pdf (émission hub).
         arr = bool(projet.get("arrondi_dollar"))
@@ -3939,8 +4028,7 @@ def register_ad_budget_routes(get_conn):
         def R(v):
             return float(_js_round(v)) if arr else v
 
-        raw_lignes_actives = [l for l in lignes_calc if l.get("actif", True)]
-        totals = compute_budget_totals(projet, raw_lignes_actives)
+        totals = budget_totals
         coutant_total = result["grand_total"]
         sous_total_avant_taxes = totals["sous_total_avant_taxes"]
         admin_profit_total = sous_total_avant_taxes - coutant_total
@@ -5386,14 +5474,39 @@ def register_ad_budget_routes(get_conn):
         session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
         # Mode d'export — QUEL artefact PDF est poussé au hub (une VUE parmi
         # deux, MÊME distinction que la modale « Générer un rapport PDF »,
-        # App.jsx pdfVentilationMode) : "global" = rapport de calcul détaillé
-        # (_build_projet_report, DÉFAUT, comportement historique — AUCUNE
-        # régression) ; "par_lot" = ventilation par lot
-        # (_build_lot_ventilation_report, MÊME chemin que GET
-        # /projets/{id}/pdf-lots). Brief Simon, 20 août 2026 (incident projet
-        # 290) : ÉMETTRE publiait TOUJOURS le rapport de calcul, quel que soit
-        # le mode choisi dans la modale — corrigé ici.
+        # App.jsx pdfVentilationMode) :
+        #   "global"  = rapport de calcul détaillé (_build_projet_report,
+        #               DÉFAUT, comportement historique — AUCUNE régression,
+        #               INCHANGÉ par ce correctif, rendu SERVEUR reportlab).
+        #   "par_lot" = ventilation par lot. Brief Simon, 20 août 2026
+        #               (incident projet 290) : ÉMETTRE publiait TOUJOURS le
+        #               rapport de calcul, quel que soit le mode choisi dans
+        #               la modale — corrigé (50fc904). RÉGRESSION introduite
+        #               PAR CE MÊME CORRECTIF, corrigée ici : "par_lot"
+        #               publiait un RE-RENDU SERVEUR (reportlab,
+        #               _build_lot_ventilation_report) — un document DIFFÉRENT
+        #               de celui validé à l'aperçu (logo/filet/bloc ENTREPRISE
+        #               RBQ/adresse client/colonne Nb lignes/récap financier/
+        #               pied AdFLO ABSENTS du rendu serveur). Désormais
+        #               "par_lot" exige le paramètre `pdf` (multipart) : LE
+        #               PDF DÉJÀ CONSTRUIT côté client (jsPDF) pour l'aperçu,
+        #               télé versé tel quel — jamais reconstruit ici. Le
+        #               serveur ne le croit pas sur parole : il VÉRIFIE le
+        #               montant qu'il affiche contre un recalcul serveur (cf.
+        #               plus bas) avant toute publication.
         mode_export: str = "global",
+        # PDF déjà rendu par le CLIENT (jsPDF), REQUIS quand mode_export=
+        # "par_lot" (ignoré en mode "global", qui reste rendu SERVEUR). Même
+        # patron que emit_devis_to_hub (ad_devis_api.py, Option B) : le
+        # serveur RELAIE les octets, il ne les régénère jamais — mais il les
+        # VÉRIFIE (contrôle de forme + montant relu dans le PDF vs recalcul
+        # serveur) avant de les publier au hub.
+        # Défaut PLAIN None (pas File(None)) : FastAPI reconnaît UploadFile
+        # automatiquement comme upload multipart SANS marqueur File() explicite
+        # (confirmé via TestClient) — ET un défaut simple reste résoluble en
+        # invocation DIRECTE (extract_nested, hors FastAPI, cf. tests), où
+        # File(None) resterait un objet Param non résolu au lieu de None.
+        pdf: Optional[UploadFile] = None,
         # Config PDF (modale) — pilote UNIQUEMENT l'artefact PDF (une VUE).
         # Mode "global" seulement — ignorés en mode "par_lot".
         actifs_seulement: bool = True,
@@ -5420,14 +5533,13 @@ def register_ad_budget_routes(get_conn):
         longueur_cloisons: float = 0,
         gabarit_id: Optional[int] = None,
         gabarit_nom: Optional[str] = None,
-        # Config PDF — mode "par_lot" seulement, ignorés en mode "global".
-        # MÊME sémantique que GET /projets/{id}/pdf-lots (CSV parmi
-        # nb_logements,nb_lignes,sous_total ; paramètre omis = toutes, vide
-        # explicite = aucune). Défaut simple (pas Query(...), cf. commentaire
-        # d'export_projet_pdf_lots) : test_emit_rapport_vers_hub appelle cette
-        # fonction en invocation DIRECTE (extract_nested), hors FastAPI.
-        avec_recap_financier: bool = True,
-        colonnes_lots: Optional[str] = None,
+        # PAS de avec_recap_financier / colonnes_lots ici (retirés par ce
+        # correctif) : c'était la config de RENDU du mode "par_lot", pertinente
+        # UNIQUEMENT quand le serveur générait le PDF (reportlab). Le mode
+        # "par_lot" reçoit désormais le PDF DÉJÀ rendu (cf. paramètre `pdf`
+        # ci-dessus) — rien à retransmettre pour le rendu, cf. docstring.
+        # (GET /projets/{id}/pdf-lots, lui, garde ses propres paramètres —
+        # trappe de secours toujours pilotable indépendamment.)
         # Choix user (option A) quand le budget a changé depuis la dernière
         # émission : 'new' (nouvelle révision) | 'correction' (remplace la
         # courante). None = pas encore choisi -> si une question est requise,
@@ -5444,7 +5556,26 @@ def register_ad_budget_routes(get_conn):
         budget a changé depuis (budget_modifie_depuis_emission), on demande à
         l'user (choice_required) ; 'new' bumpe la révision avant d'émettre,
         'correction' reste sur la courante (remplace l'artefact). Sinon émet
-        directement. Le flag dirty est remis à FALSE à l'émission."""
+        directement. Le flag dirty est remis à FALSE à l'émission.
+
+        mode_export="par_lot" — ÉMISSION RELAIS (même patron que le devis,
+        Option B) : le CLIENT construit les octets PDF (jsPDF,
+        buildLotVentilationPdf), le serveur les RELAIE au hub — reportlab
+        (_build_lot_ventilation_report) N'INTERVIENT PLUS dans ce chemin, il
+        reste la trappe de secours ?pdf_engine=reportlab / GET /pdf-lots (cf.
+        sa docstring). Avant publication :
+          - contrôle de bon sens : %PDF présent, taille plausible (même
+            bornes que emit_devis_to_hub) ;
+          - contrôle du MODE : _verifier_pdf_correspond_au_mode (inchangé,
+            appliqué au PDF REÇU au lieu d'un PDF construit ici) ;
+          - contrôle du MONTANT : _extraire_montant_pdf_lot relit le montant
+            RÉELLEMENT imprimé sur le document reçu, comparé (± 1 $) à un
+            recalcul serveur indépendant (_fetch_lot_ventilation_calc — MÊME
+            chemin compute_lot_totals/compute_budget_totals que partout
+            ailleurs). Écart, ou montant illisible -> 409/400, RIEN publié.
+        Le serveur ne fait plus AUCUN rendu PDF pour ce mode — seulement une
+        vérification. mode_export="global" reste, lui, un rendu 100% serveur,
+        INCHANGÉ par ce correctif."""
         if mode_export not in ("global", "par_lot"):
             raise HTTPException(
                 status_code=400,
@@ -5507,13 +5638,65 @@ def register_ad_budget_routes(get_conn):
         #    relu par le garde-fou juste après — jamais de publication d'un
         #    document qui ne correspond pas au mode demandé).
         if mode_export == "par_lot":
-            buf, lot_meta = _build_lot_ventilation_report(
-                projet_id, authorization, session_cookie,
-                avec_recap_financier=avec_recap_financier,
-                colonnes_lots=colonnes_lots,
-            )
-            pdf_bytes = buf.getvalue()
-            montant_affiche_pdf = lot_meta["total_general"]
+            # ÉMISSION RELAIS (cf. docstring) — le PDF est celui de l'APERÇU,
+            # construit et déjà validé côté client (jsPDF), TÉLÉVERSÉ ici.
+            # Aucun rendu serveur pour ce mode (_build_lot_ventilation_report
+            # reste la trappe de secours ?pdf_engine=reportlab / GET
+            # /pdf-lots — jamais appelée sur ce chemin).
+            if pdf is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="PDF manquant — mode_export='par_lot' exige le PDF déjà rendu "
+                           "à l'aperçu (champ multipart 'pdf'). Régénérez l'aperçu puis réémettez.",
+                )
+            pdf_bytes = pdf.file.read()
+            # ── Contrôle de bon sens sur les octets reçus (jamais un 500,
+            #    mêmes bornes que emit_devis_to_hub) ──
+            if not pdf_bytes.startswith(b"%PDF"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Le fichier reçu n'est pas un PDF (%PDF absent). "
+                           "Régénérez l'aperçu puis réémettez.",
+                )
+            if len(pdf_bytes) < 1000 or len(pdf_bytes) > 25_000_000:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Taille de PDF implausible ({len(pdf_bytes)} o). "
+                           "Régénérez l'aperçu puis réémettez.",
+                )
+            # ── Contrôle du montant — le PDF client n'est JAMAIS cru sur
+            #    parole (même esprit que b4c2491 pour le devis : le montant
+            #    RETENU vient toujours d'un recalcul serveur). On relit EN
+            #    PLUS le montant réellement imprimé sur CE document
+            #    (_extraire_montant_pdf_lot) et on le compare au recalcul —
+            #    écart > 1 $, ou montant introuvable -> refus explicite,
+            #    RIEN publié (le garde-fou écran, checkPdfLotInvariant, a
+            #    déjà dû passer côté client AVANT que ce blob n'existe ;
+            #    celui-ci est la vérification SERVEUR, indépendante). ──
+            _projet_calc, _lignes_calc, lot_result, budget_totals = _fetch_lot_ventilation_calc(get_conn, projet_id)
+            montant_pdf, base_montant = _extraire_montant_pdf_lot(pdf_bytes)
+            if montant_pdf is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Impossible de lire un montant total dans le PDF reçu — document "
+                           "inattendu. Régénérez l'aperçu puis réémettez.",
+                )
+            montant_serveur = (budget_totals["total_general"] if base_montant == "apres_taxes"
+                                else lot_result["grand_total"])
+            ecart = abs(montant_pdf - montant_serveur)
+            if ecart > 1:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(f"Montant du PDF reçu ({montant_pdf:.2f} $) incohérent avec le "
+                            f"budget recalculé côté serveur ({montant_serveur:.2f} $) — écart de "
+                            f"{ecart:.2f} $. Le budget a peut-être changé depuis la génération "
+                            f"de l'aperçu : régénérez-le puis réémettez. Rien n'a été publié."),
+                )
+            # Montant affiché (dissociation vue/vérité, détection rapport
+            # partiel côté HUB) : TOUJOURS l'après-taxes recalculé serveur —
+            # même sémantique qu'avant ce correctif, indépendante de la base
+            # sur laquelle le contrôle ci-dessus a pu se replier.
+            montant_affiche_pdf = budget_totals["total_general"]
             mode_label = "Ventilation par lot"
             _pdf_marker = "Ventilation par lot"
         else:

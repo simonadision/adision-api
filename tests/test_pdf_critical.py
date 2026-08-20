@@ -24,6 +24,33 @@ from tests._harness import (  # noqa: E402
 )
 
 
+class _Upload:
+    """Stub minimal d'UploadFile (même patron que tests/test_devis_emit_relay.py) :
+    emit_report_to_hub (mode_export="par_lot") ne fait que pdf.file.read()."""
+    def __init__(self, data):
+        self.file = io.BytesIO(data)
+
+
+def _pdf_lot_synthetique(montant_ligne, mode_ligne="Ventilation par lot — Originale"):
+    """Construit un PDF MINIMAL (reportlab canvas, PAS le rendu réel de
+    _build_lot_ventilation_report) portant l'ancre de mode ET l'ancre de
+    montant attendues par le garde-fou serveur d'émission (mode_export=
+    "par_lot") : _verifier_pdf_correspond_au_mode (marqueur de mode) et
+    _extraire_montant_pdf_lot (montant). Simule ce que le CLIENT (jsPDF)
+    aurait produit, sans dépendre de son rendu réel -- ces tests couvrent la
+    PLOMBERIE serveur (contrôle de forme/mode/montant), pas la fidélité
+    visuelle jsPDF (couverte ailleurs, cf. tests/report_fidelity)."""
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import letter
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    c.drawString(72, 700, mode_ligne)
+    if montant_ligne:
+        c.drawString(72, 650, montant_ligne)
+    c.save()
+    return buf.getvalue()
+
+
 @pytest.fixture(autouse=True)
 def _restaure_hub_service_apres_chaque_test():
     """Garde-fou d'isolation — _patch_no_network() ci-dessous mute DIRECTEMENT
@@ -271,10 +298,22 @@ def test_emit_rapport_vers_hub():
           f"montant_apres_taxes={f['montant_apres_taxes']}, snapshot complet")
 
 
-# ── Tests émission HUB en mode "par_lot" (incident projet 290, 20 août 2026) ──
+# ── Tests émission HUB en mode "par_lot" — ÉMISSION RELAIS du PDF client
+#    (régression du 20 août 2026 introduite PAR le correctif de l'incident
+#    projet 290 lui-même : l'émission republiait un RE-RENDU SERVEUR
+#    (reportlab) au lieu du PDF DÉJÀ VALIDÉ à l'aperçu (jsPDF, logo/filet/
+#    bloc ENTREPRISE RBQ/adresse client/colonne Nb lignes/récap financier/
+#    pied AdFLO ABSENTS du rendu serveur). Ces tests couvrent désormais le
+#    RELAIS + la VÉRIFICATION serveur (forme, mode, montant), pas un rendu.
+#    Avec ces lignes fixture (qte=10 × prix=50 = 500 $ chacune, MÊME
+#    défauts pour les deux lignes malgré total=/sous_total= — ces champs ne
+#    sont PAS relus par compute_lot_totals/compute_budget_totals) :
+#      coûtant (compute_lot_totals.grand_total)      = 1000,00 $
+#      après taxes (compute_budget_totals.total_general) = 1149,75 $ (TPS
+#      50,00 $ + TVQ 99,75 $, aucun admin&profit configuré sur ce projet). ──
 def _emit_lots_setup():
     """MÊME patron que test_emit_rapport_vers_hub, + table ad_budget.lots
-    (requise par _build_lot_ventilation_report, ignorée en mode "global")."""
+    (requise par _fetch_lot_ventilation_calc, ignorée en mode "global")."""
     import modules.ad_budget_api as B
     _patch_no_network()
     captured = {}
@@ -302,17 +341,19 @@ def _emit_lots_setup():
 
 
 def test_emit_ventilation_par_lot_vers_hub():
-    """Incident projet 290 (20 août 2026) : mode_export="par_lot" -> le PDF
-    ÉMIS est celui de _build_lot_ventilation_report (« Ventilation par lot »),
-    PAS le rapport de calcul détaillé -- AVANT ce correctif, Émettre publiait
-    TOUJOURS le rapport de calcul quel que soit le mode de la modale."""
+    """Le PDF ÉMIS est EXACTEMENT le PDF TÉLÉVERSÉ (celui de l'aperçu client,
+    simulé ici) -- AUCUN re-rendu serveur (reportlab) : les octets reçus par
+    hub_service.post_report sont byte-identiques à ceux envoyés par le client."""
     import fitz
     emit, user, captured = _emit_lots_setup()
-    out = emit(1, user=user, authorization="Bearer TOK", mode_export="par_lot")
+    pdf_bytes_client = _pdf_lot_synthetique("GRAND TOTAL (avec taxes)      1 149,75 $")
+    out = emit(1, user=user, authorization="Bearer TOK", mode_export="par_lot",
+               pdf=_Upload(pdf_bytes_client))
 
     assert out.get("emitted") is True, f"émission échouée : {out}"
     assert out.get("mode_export") == "par_lot"
     pdf_bytes = captured["pdf_bytes"]
+    assert pdf_bytes == pdf_bytes_client, "le PDF émis N'EST PAS celui téléversé par le client (re-rendu serveur ?)"
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     texte = doc[0].get_text()
     doc.close()
@@ -320,10 +361,102 @@ def test_emit_ventilation_par_lot_vers_hub():
     assert "Rapport de budget" not in texte, "le PDF émis est encore le rapport de calcul (régression du bug)"
     f = captured["fields"]
     assert f["titre"] == "Projet 290 — Ventilation par lot", f["titre"]
+    assert f["montant_affiche_pdf"] == 1149.75, f["montant_affiche_pdf"]
     # Snapshot poussé au hub reste le budget COMPLET (dissociation VOULUE,
     # inchangée par mode_export) -- pas touché par ce correctif.
     assert f.get("snapshot_data"), "snapshot_data absent de l'émission"
-    print("  [OK] émission ventilation par lot HUB : PDF « Ventilation par lot », titre annexé, snapshot complet inchangé")
+    print("  [OK] émission ventilation par lot HUB : PDF CLIENT relayé tel quel (byte-identique), titre annexé, snapshot complet inchangé")
+
+
+def test_emit_par_lot_via_repli_montant_coutant():
+    """Le montant peut être vérifié via l'ancre de repli « GRAND TOTAL »
+    (coûtant, TOUJOURS rendue) quand aucune ancre après-taxes n'est présente
+    (ex. case « Récap financier » décochée sur le repli reportlab)."""
+    emit, user, captured = _emit_lots_setup()
+    pdf_bytes_client = _pdf_lot_synthetique("GRAND TOTAL      1 000,00 $")
+    out = emit(1, user=user, authorization="Bearer TOK", mode_export="par_lot",
+               pdf=_Upload(pdf_bytes_client))
+    assert out.get("emitted") is True, f"émission échouée : {out}"
+    # montant_affiche_pdf reste TOUJOURS l'après-taxes recalculé serveur,
+    # indépendamment de l'ancre sur laquelle la VÉRIFICATION s'est repliée.
+    assert captured["fields"]["montant_affiche_pdf"] == 1149.75
+    print("  [OK] vérification via repli GRAND TOTAL (coûtant) -> émission acceptée, montant affiché = après-taxes serveur")
+
+
+def test_emit_par_lot_sans_pdf_400():
+    """mode_export="par_lot" SANS le paramètre `pdf` -> 400 explicite, AUCUNE
+    émission (le front DOIT téléverser le blob déjà rendu à l'aperçu)."""
+    from fastapi import HTTPException
+    emit, user, captured = _emit_lots_setup()
+    try:
+        emit(1, user=user, authorization="Bearer TOK", mode_export="par_lot")
+        raise AssertionError("aurait dû lever 400")
+    except HTTPException as e:
+        assert e.status_code == 400 and "PDF manquant" in e.detail
+    assert "pdf_bytes" not in captured, "post_report NE DOIT PAS être appelé sans PDF"
+    print("  [OK] par_lot sans PDF -> 400 clair, aucune émission")
+
+
+def test_emit_par_lot_octets_non_pdf_400():
+    """Octets reçus qui ne sont pas un PDF (%PDF absent) -> 400 clair."""
+    from fastapi import HTTPException
+    emit, user, captured = _emit_lots_setup()
+    try:
+        emit(1, user=user, authorization="Bearer TOK", mode_export="par_lot",
+             pdf=_Upload(b"NOT A PDF at all ...." + b"x" * 1200))
+        raise AssertionError("aurait dû lever 400")
+    except HTTPException as e:
+        assert e.status_code == 400 and "PDF" in e.detail
+    assert "pdf_bytes" not in captured
+    print("  [OK] par_lot octets non-PDF -> 400 clair (pas de 500)")
+
+
+def test_emit_par_lot_pdf_trop_petit_400():
+    """PDF plausible en préfixe mais trop petit (< 1000 o) -> 400 clair."""
+    from fastapi import HTTPException
+    emit, user, captured = _emit_lots_setup()
+    try:
+        emit(1, user=user, authorization="Bearer TOK", mode_export="par_lot",
+             pdf=_Upload(b"%PDF-1.4\n"))
+        raise AssertionError("aurait dû lever 400")
+    except HTTPException as e:
+        assert e.status_code == 400
+    assert "pdf_bytes" not in captured
+    print("  [OK] par_lot PDF trop petit -> 400 clair")
+
+
+def test_emit_par_lot_montant_illisible_400():
+    """PDF valide (mode correct) mais SANS aucun montant lisible -> 400
+    explicite, AUCUNE émission (jamais de publication non vérifiable)."""
+    from fastapi import HTTPException
+    emit, user, captured = _emit_lots_setup()
+    pdf_bytes_client = _pdf_lot_synthetique(montant_ligne=None)
+    try:
+        emit(1, user=user, authorization="Bearer TOK", mode_export="par_lot",
+             pdf=_Upload(pdf_bytes_client))
+        raise AssertionError("aurait dû lever 400")
+    except HTTPException as e:
+        assert e.status_code == 400 and "montant" in e.detail.lower()
+    assert "pdf_bytes" not in captured
+    print("  [OK] par_lot montant illisible -> 400 clair, aucune émission")
+
+
+def test_emit_par_lot_montant_divergent_409():
+    """Le montant IMPRIMÉ sur le PDF reçu (5 000 $) ne correspond PAS au
+    recalcul serveur (1 149,75 $, cf. fixture) -> 409 explicite, RIEN publié
+    (même esprit que le garde-fou GRAND TOTAL vs Récap de l'écran, mais côté
+    serveur — le PDF n'est jamais cru sur parole)."""
+    from fastapi import HTTPException
+    emit, user, captured = _emit_lots_setup()
+    pdf_bytes_client = _pdf_lot_synthetique("GRAND TOTAL (avec taxes)      5 000,00 $")
+    try:
+        emit(1, user=user, authorization="Bearer TOK", mode_export="par_lot",
+             pdf=_Upload(pdf_bytes_client))
+        raise AssertionError("aurait dû lever 409")
+    except HTTPException as e:
+        assert e.status_code == 409 and "1149.75" in e.detail.replace(" ", ""), e.detail
+    assert "pdf_bytes" not in captured, "post_report NE DOIT PAS être appelé sur montant divergent"
+    print("  [OK] par_lot montant divergent -> 409 clair, aucune émission")
 
 
 def test_emit_global_titre_inchange_non_regression():
