@@ -10,6 +10,15 @@ if ! python tests/test_pdf_critical.py; then
   echo "[pre-push] ÉCHEC des tests PDF — push BLOQUÉ." >&2
   exit 1
 fi
+# Invariant A (chantier tests d'invariant, 20 août 2026) : le coûtant total
+# converge, quel que soit le groupement (par lot / par division CSI / par
+# famille de coût). Pur Python, aucune dépendance au dépôt frère -> toujours
+# bloquant.
+echo "[pre-push] Invariant A — coûtant total (lot = CSI = mat+mo+st)…"
+if ! python tests/test_invariant_a_coutant_total.py; then
+  echo "[pre-push] ÉCHEC Invariant A — push BLOQUÉ." >&2
+  exit 1
+fi
 # Divergences écran↔rapport connues (D3/D4) : tests ATTENDUS-EN-ÉCHEC (xfail).
 # Exit 0 tant que le défaut est présent (attendu) ; exit 1 en XPASS = un défaut
 # documenté a été corrigé sans retirer le marqueur → mettre le fichier à jour.
@@ -72,6 +81,26 @@ if command -v node >/dev/null 2>&1 && [ -d "../adision-monorepo/packages/devis-p
   echo "[pre-push] Accord empreinte budget Python↔JS…"
   if ! python tests/test_budget_fingerprint_agreement.py; then
     echo "[pre-push] ÉCHEC accord empreinte budget (Python != JS) — push BLOQUÉ." >&2
+    exit 1
+  fi
+  # Invariant B (chantier tests d'invariant, 20 août 2026, LE PLUS IMPORTANT) :
+  # ligne à ligne, le total calculé par le serveur (_line_total) et celui
+  # calculé par l'écran (computeLigneTotal, ce que getRow appelle réellement,
+  # App.jsx) doivent concorder — c'est l'invariant qui aurait attrapé l'écart
+  # de 39 219 $ du 20 août 2026 (projet 290).
+  echo "[pre-push] Invariant B — ligne budget Python == JS (écran)…"
+  if ! python tests/test_invariant_b_ligne_python_js.py; then
+    echo "[pre-push] ÉCHEC Invariant B (Python != JS) — push BLOQUÉ." >&2
+    exit 1
+  fi
+  # DÉCOUVERTE du même chantier (xfail strict, ne bloque PAS tant que le
+  # défaut documenté reste présent — XPASS bloquant sinon, cf. le fichier) :
+  # le mirroir JS de l'EMPREINTE (budgetFingerprint.js, distinct de l'écran
+  # ci-dessus) n'a jamais reçu le correctif production_valeur. En attente de
+  # décision Simon — voir la docstring du fichier pour le détail du risque.
+  echo "[pre-push] (découverte) empreinte JS vs production_valeur, xfail…"
+  if ! python tests/test_budget_fingerprint_production_valeur_discovery.py; then
+    echo "[pre-push] XPASS inattendu — budgetFingerprint.js a changé, MAJ du test requise." >&2
     exit 1
   fi
 else

@@ -23,3 +23,9 @@ pymupdf
 # Sprint C1 — client HTTP cross-service Ad BUD → Ad HUB (modules/hub_service.py).
 # Aligné sur Ad VIU qui utilise déjà httpx>=0.27 pour son propre hub_service.
 httpx>=0.27
+# pytest — n'était PAS déclaré ici alors que tests/ le requiert partout (hooks/
+# pre-push, ce fichier). Marchait sur le poste de Simon (installé à part) ;
+# cassait dans tout venv reconstruit depuis ce seul fichier — même défaut que
+# pymupdf ci-dessus avant sa déclaration. Requis par .github/workflows/ci.yml
+# (chantier tests d'invariant, 20 août 2026 — adision-api n'avait aucune CI).
+pytest
