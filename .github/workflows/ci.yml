@@ -1,0 +1,100 @@
+# CI — adision-api (Ad BUD, Python)
+#
+# Pourquoi ce fichier existe. Avant ce chantier (tests d'invariant sur les
+# chiffres que Simon voit, 20 août 2026), adision-api n'avait AUCUNE CI
+# GitHub — zéro ruleset, zéro branch protection, zéro workflow. Le SEUL filet
+# était hooks/pre-push, un script LOCAL : il ne protège que le poste où il est
+# installé (`git config core.hooksPath hooks`), jamais un push depuis un autre
+# poste, un agent, ou l'éditeur web GitHub — exactement le trou qui a laissé
+# passer e341af90 côté monorepo le même jour (cf. adision-monorepo/.github/
+# workflows/ci.yml, section « Gabarits non corrompus »). « Un outil non armé
+# ne protège rien » vaut ici aussi.
+#
+# Ce workflow rejoue, sur une machine que l'auteur du push ne contrôle pas, le
+# SOUS-ENSEMBLE de hooks/pre-push qui ne dépend PAS du dépôt frère
+# adision-monorepo — mêmes tests, mêmes gardes-fous.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# LA LIGNE DE PARTAGE — ce qui tourne ICI et ce qui reste au pre-push local
+# ─────────────────────────────────────────────────────────────────────────────
+# TOURNE ICI (pur Python, aucun réseau, aucun dépôt frère) :
+#   - test_pdf_critical.py              rapport/devis/émission (incl. Invariant C
+#                                        — émission relais ventilation par lot,
+#                                        PDF émis byte-identique à celui téléversé)
+#   - test_divergences_ecran_rapport.py xfail D3/D4 (défauts documentés)
+#   - test_devis_contract.py            contrat GET /devis
+#   - test_devis_emit_relay.py          émission relais devis (Option B)
+#   - test_verrou_production_heures.py  heures_effectives, tous les cas de
+#                                        l'incident 2026-08-20 (source Python)
+#   - test_invariant_a_coutant_total.py Invariant A — coûtant total (lot = CSI
+#                                        = mat+mo+st), chantier 20 août 2026
+#
+# NE TOURNE PAS ICI, ET CE N'EST PAS UN OUBLI (besoin du dépôt frère
+# adision-monorepo + node — checkout d'un second dépôt privé = jeton
+# multi-dépôt, même décision déjà actée côté monorepo pour la direction
+# inverse, cf. son ci.yml) :
+#   - test_devis_fidelity.py / test_report_fidelity.py / check_detention_seuil.py
+#   - test_budget_fingerprint_agreement.py (accord empreinte Python↔JS)
+#   - test_invariant_b_ligne_python_js.py  (Invariant B — LE PLUS IMPORTANT,
+#     ligne budget Python == JS écran) — reste réservé au pre-push local,
+#     où les deux dépôts sont déjà frères sur le poste de Simon.
+#   - test_budget_fingerprint_production_valeur_discovery.py (découverte xfail,
+#     même contrainte que l'Invariant B)
+#
+# AUCUN SECRET DE PRODUCTION N'EST RÉFÉRENCÉ ICI — pas de base, pas de réseau
+# externe (tous les tests ci-dessus monkeypatchent hub_service / get_conn).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Tests Python (chemins critiques + Invariant A)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Installer les dépendances
+        run: pip install -r requirements.txt
+
+      - name: Tests PDF critiques (rapport/devis/émission, incl. Invariant C)
+        run: pytest tests/test_pdf_critical.py -v
+
+      # ⚠ Lancé comme SCRIPT (python tests/…), pas via `pytest` : ses deux
+      # test_d3_*/test_d4_* échouent TOUJOURS sous un runner pytest nu (leur
+      # xfail est géré à la main par run_all()/__main__, pas par
+      # @pytest.mark.xfail) — même invocation que hooks/pre-push. Lancer ce
+      # fichier via `pytest` rendrait ce job rouge en permanence pour un
+      # défaut DÉJÀ documenté, exactement l'anti-motif que ce chantier corrige
+      # ailleurs (cf. l'avertissement `npm run contraste` du ci.yml monorepo).
+      - name: Divergences écran↔rapport connues (D3/D4, xfail)
+        run: python tests/test_divergences_ecran_rapport.py
+
+      - name: Contrat GET /devis
+        run: pytest tests/test_devis_contract.py -v
+
+      - name: Émission relais devis (Option B)
+        run: pytest tests/test_devis_emit_relay.py -v
+
+      - name: Verrou production_valeur (heures_effectives, incident 2026-08-20)
+        run: pytest tests/test_verrou_production_heures.py -v
+
+      - name: Invariant A — coûtant total (lot = CSI = mat+mo+st)
+        run: pytest tests/test_invariant_a_coutant_total.py -v
