@@ -33,6 +33,7 @@ from modules.ad_export_gabarits_api import register_ad_export_gabarits_routes
 from modules.ad_devis_api import register_ad_devis_routes
 from modules.ad_budget_matlink_api import register_ad_budget_matlink_routes
 from modules.taux_horaires_api import register_taux_horaires_routes
+from modules.bud_presence import register_bud_presence_routes
 from modules.auth_jwt import make_jwt_deps
 import os
 import secrets
@@ -536,6 +537,7 @@ app.include_router(register_ad_devis_routes(get_conn))
 app.include_router(register_ad_budget_matlink_routes(get_conn))
 app.include_router(register_ad_ana_routes(get_conn))
 app.include_router(register_taux_horaires_routes(get_conn))
+app.include_router(register_bud_presence_routes(get_conn))
 
 # JWT auth deps (vérifie signature + module ad_bud, auto-provisionne dans
 # ad_budget.users).
