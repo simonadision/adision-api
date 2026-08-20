@@ -1,4 +1,4 @@
-"""HARNAIS DE FIDELITE du RAPPORT DE CALCUL — jsPDF (@adision/report-pdf) vs
+"""HARNAIS DE FIDELITE du RAPPORT DE CALCUL â€” jsPDF (@adision/report-pdf) vs
 reportlab servi (_build_projet_report).
 
 Pour CHAQUE temoin (packages/report-pdf/harness/fixtures/R*.json) :
@@ -12,7 +12,7 @@ layout n'ancre que 5 chaines fixes et ne voit AUCUNE cellule de table : un
 decalage de cellule lui est invisible (cf. R01, 5,5 pt, vert a tort).
 
 Chaque temoin porte ses OPTIONS de rendu + une date figee (today) -> master et
-candidat portent la MEME « Date du jour ».
+candidat portent la MEME Â« Date du jour Â».
 
 DISCIPLINE DE BASCULE (tests/report_fidelity/bascule.json) :
   - default_engine='reportlab' + strict=false -> RAPPORT SEUL (exit 0). reportlab
@@ -52,8 +52,8 @@ REPORT_ANCHORS = [
     ("titre_rapport", "Rapport de budget"),
     ("bloc_client", "CLIENT"),
     ("bloc_entrepreneur", "ENTREPRENEUR"),
-    ("footer", "Propulsé par"),
-    ("total_general", "TOTAL GÉNÉRAL"),
+    ("footer", "PropulsÃ© par"),
+    ("total_general", "TOTAL GÃ‰NÃ‰RAL"),
 ]
 
 
@@ -84,18 +84,18 @@ def _render_jspdf(fixture_path):
 def _fmt_case(name, res):
     t, l, v = res["texte"], res["layout"], res["visuel"]
     mark = lambda ok: "OK " if ok else "X  "
-    print(f"\n  ── {name} ──")
+    print(f"\n  â”€â”€ {name} â”€â”€")
     dt = t["detail"]
     print(f"    [{mark(t['ok'])}] TEXTE   : {dt['n_cand']}/{dt['n_master']} mots"
           + ("" if t["ok"] else f" | manq={dt['manquantes'][:4]} trop={dt['en_trop'][:4]}"))
     worst = max((abs(r.get("dx", 0)) for r in l["detail"] if "dx" in r), default=0)
     worsty = max((abs(r.get("dy", 0)) for r in l["detail"] if "dy" in r), default=0)
-    print(f"    [{mark(l['ok'])}] LAYOUT  : |Δx|max={worst:.1f}pt |Δy|max={worsty:.1f}pt (tol {C.TOL_LAYOUT_PT}pt)")
+    print(f"    [{mark(l['ok'])}] LAYOUT  : |Î”x|max={worst:.1f}pt |Î”y|max={worsty:.1f}pt (tol {C.TOL_LAYOUT_PT}pt)")
     for r in l["detail"]:
         if "dx" in r and not r.get("ok"):
-            print(f"           · {r['ancre']}: Δx={r['dx']} Δy={r['dy']} (p{r['page_m']}->p{r['page_c']})")
+            print(f"           Â· {r['ancre']}: Î”x={r['dx']} Î”y={r['dy']} (p{r['page_m']}->p{r['page_c']})")
         elif r.get("etat") == "ABSENTE":
-            print(f"           · {r['ancre']}: ABSENTE (m={r['master']} c={r['cand']})")
+            print(f"           Â· {r['ancre']}: ABSENTE (m={r['master']} c={r['cand']})")
     c = res.get("cellules")
     if c:
         cd = c["detail"]
@@ -106,10 +106,10 @@ def _fmt_case(name, res):
               f" (tol {C.TOL_LAYOUT_PT}pt)")
         for r in cd:
             if r.get("etat"):
-                print(f"           · {r['ancre']}: {r['etat']} "
+                print(f"           Â· {r['ancre']}: {r['etat']} "
                       f"(m={r['master']} c={r['cand']})")
             elif "dx" in r and not r.get("ok"):
-                print(f"           · {r['ancre']}: Δx={r['dx']} Δy={r['dy']} {r.get('quoi','')}")
+                print(f"           Â· {r['ancre']}: Î”x={r['dx']} Î”y={r['dy']} {r.get('quoi','')}")
     vd = v["detail"]
     fr = ", ".join(f"p{p['page']}={p['frac']*100:.1f}%" for p in vd["pages"])
     print(f"    [{mark(v['ok'])}] VISUEL  : {fr} (tol {C.TOL_VISUAL_FRAC*100:.0f}%) pages {vd['n_cand']}/{vd['n_master']}")
@@ -145,12 +145,12 @@ def run_all(save_diffs=True):
                 import fitz  # noqa: E402
                 d = fitz.open(stream=cand, filetype="pdf")
                 ok_robuste = cand[:5] == b"%PDF-" and d.page_count >= 1
-                print(f"\n  ── {name} ── (ROBUSTESSE, hors fidelite)")
+                print(f"\n  â”€â”€ {name} â”€â”€ (ROBUSTESSE, hors fidelite)")
                 print(f"    reportlab PLANTE : {type(e).__name__}: {emsg}")
                 print(f"    [{'OK ' if ok_robuste else 'X  '}] jsPDF rend un PDF valide de {d.page_count} page(s) sans crash")
             except Exception as e2:  # noqa: BLE001
                 ok_robuste = False
-                print(f"\n  ── {name} ── (ROBUSTESSE)\n    [X  ] jsPDF a AUSSI echoue : {e2}")
+                print(f"\n  â”€â”€ {name} â”€â”€ (ROBUSTESSE)\n    [X  ] jsPDF a AUSSI echoue : {e2}")
             results.append((name, {"ok": ok_robuste, "robustness": True, "reportlab_crash": emsg}))
             continue
         cand = _render_jspdf(fx_path)
@@ -176,7 +176,7 @@ def run_all(save_diffs=True):
     print(f"  BILAN FIDELITE RAPPORT : {n_ok}/{len(fidelite)} temoins jugeables verts sur 4 axes")
     if robust:
         rob_ok = sum(1 for _, r in robust if r["ok"])
-        print(f"  ROBUSTESSE (reportlab plante) : {rob_ok}/{len(robust)} rendus jsPDF valides — {[n for n, _ in robust]}")
+        print(f"  ROBUSTESSE (reportlab plante) : {rob_ok}/{len(robust)} rendus jsPDF valides â€” {[n for n, _ in robust]}")
     if save_diffs:
         print(f"  Diffs visuels : {diff_dir}")
     print(f"{'='*64}")
@@ -205,11 +205,11 @@ def main():
     tolerees = [n for n in rouges if n in connus]
     bloquants = [n for n in rouges if n not in connus]
     for n in tolerees:
-        print(f"  [TOLERE] {n} — rouge CONNU et documente, hors chemin critique :")
+        print(f"  [TOLERE] {n} â€” rouge CONNU et documente, hors chemin critique :")
         print(f"           {connus[n]}")
     for n, r in results:
         if r["ok"] and n in connus:
-            print(f"  [!] {n} est desormais VERT — retirer sa derogation de bascule.json.")
+            print(f"  [!] {n} est desormais VERT â€” retirer sa derogation de bascule.json.")
     all_green = bool(results) and not bloquants
     if strict:
         if not all_green:
@@ -221,11 +221,27 @@ def main():
 
 
 def test_report_fidelity_gate():
-    _bascule, strict = _load_bascule()
+    """Portillon pre-push. DOIT respecter la meme derogation "rouges_connus"
+    que main() (bascule.json) -- sinon un temoin ROUGE TOLERE et documente
+    (ex. R01-defaut-portrait, hors perimetre) bloque le push a tort, et
+    l'equipe est poussee a contourner le portillon avec --no-verify au lieu
+    de le corriger. C'est exactement l'incident du 18 aout 2026 : ce
+    contournement a laisse un correctif financier (Coutant total) partir
+    en prod sans etre relu. Le portillon reste BLOQUANT sur tout rouge
+    NON documente -- seule la derogation explicite, nommee et justifiee
+    dans bascule.json est toleree.
+    """
+    bascule, strict = _load_bascule()
     _n_ok, results = run_all(save_diffs=False)
-    if strict:
-        assert results and all(r["ok"] for _, r in results), \
-            "fidelite/robustesse rapport jsPDF<->reportlab hors tolerance (mode strict)"
+    if not strict:
+        return
+    connus = _rouges_connus(bascule)
+    rouges = [n for n, r in results if not r["ok"]]
+    bloquants = [n for n in rouges if n not in connus]
+    assert results and not bloquants, (
+        "fidelite/robustesse rapport jsPDF<->reportlab hors tolerance (mode strict) "
+        f"-- temoins non declares dans bascule.json[rouges_connus] : {bloquants}"
+    )
 
 
 if __name__ == "__main__":
