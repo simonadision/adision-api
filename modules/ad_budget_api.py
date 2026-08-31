@@ -191,6 +191,11 @@ HUB_REGION_CODE_TO_LABEL = {
 }
 DATE_ADJ_ALLOWED_FOR_STATUTS = {"adjuge", "complet", "perdu"}
 
+# Brief 31 août 2026 — deux pastilles de tri sur la page Projets d'Ad BUD,
+# glisser-déposer. NULL = aucune catégorie (défaut à la naissance du projet).
+# Distinct du `statut` métier : purement une organisation de la vue.
+ALLOWED_CATEGORIES_AFFICHAGE = {"en_cours", "archive"}
+
 # === Sprint B : statuts qui figent le budget (snapshot dans app_ana) ===
 # Quand un projet bascule depuis un statut hors de ce set vers un statut dedans,
 # le hook PUT /projets/{id} declenche la creation d'un snapshot consomme par
@@ -219,6 +224,10 @@ def _validate_projet_fields(data: dict, current_statut: Optional[str] = None) ->
     """
     if "statut" in data and data["statut"] not in ALLOWED_STATUTS:
         raise HTTPException(status_code=400, detail="Statut invalide")
+    if "categorie_affichage" in data:
+        v = data["categorie_affichage"]
+        if v not in (None, "") and v not in ALLOWED_CATEGORIES_AFFICHAGE:
+            raise HTTPException(status_code=400, detail="Catégorie d'affichage invalide")
     if "type_batiment" in data:
         v = data["type_batiment"]
         if v not in (None, "") and v not in ALLOWED_TYPES_BATIMENT:
@@ -2917,6 +2926,7 @@ def register_ad_budget_routes(get_conn):
             # Params globaux du tableau budget (persistes maintenant)
             "mobilisation", "surface_plancher",
             "hauteur_cloisons", "longueur_cloisons",
+            "categorie_affichage",
         }
         for field in [
             "nom", "client", "adresse", "description", "statut",
@@ -2950,6 +2960,9 @@ def register_ad_budget_routes(get_conn):
             # 'global' (défaut) ou 'ventile'. Migration sprint_admin_profit_mode.
             # CHECK BD bloque toute autre valeur (sécurité côté DB).
             "pct_admin_mode",
+            # 31 août 2026 — pastille de tri « Projet en cours » / « Projet
+            # archivé » sur la page Projets. NULL = pas de catégorie.
+            "categorie_affichage",
         ]:
             if field in data:
                 v = data[field]
