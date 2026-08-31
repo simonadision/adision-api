@@ -64,7 +64,8 @@ def register_ad_gabarits_routes(get_conn):
         """Charge l'en-tête d'un gabarit en SCOPE STRICT org. 404 sinon
         (vaut aussi pour un gabarit d'une autre org → invisible)."""
         cur.execute(
-            "SELECT id, organization_id, nom, description, created_at, updated_at "
+            "SELECT id, organization_id, nom, description, regroupements, "
+            "created_at, updated_at "
             "FROM ad_budget.gabarits WHERE id = %s AND organization_id = %s",
             (gabarit_id, org),
         )
@@ -72,6 +73,26 @@ def register_ad_gabarits_routes(get_conn):
         if not g:
             raise HTTPException(status_code=404, detail="Gabarit introuvable")
         return g
+
+    def _normaliser_regroupements(data):
+        """Valide/nettoie la liste de regroupements reçue du client — une
+        liste vide est valide (aucun regroupement, comportement d'avant).
+        Chaque entrée : {nom, divisions: [code, …]}. Une entrée sans nom OU
+        sans aucune division retenue est écartée plutôt que rejetée : un
+        regroupement à moitié rempli ne doit pas bloquer l'enregistrement du
+        reste du gabarit."""
+        out = []
+        for r in data or []:
+            if not isinstance(r, dict):
+                continue
+            nom = (r.get("nom") or "").strip()
+            divisions = [
+                (d or "").strip() for d in (r.get("divisions") or []) if (d or "").strip()
+            ]
+            if not nom or not divisions:
+                continue
+            out.append({"nom": nom[:200], "divisions": divisions})
+        return out
 
     def _full_gabarit(cur, gabarit_id):
         """Hiérarchie 3 niveaux ordonnée (gabarit déjà autorisé) :
@@ -736,6 +757,11 @@ def register_ad_gabarits_routes(get_conn):
             gid = cur.fetchone()["id"]
             if data.get("sections"):
                 _replace_structure(cur, gid, data["sections"])
+            if data.get("regroupements"):
+                cur.execute(
+                    "UPDATE ad_budget.gabarits SET regroupements=%s WHERE id=%s",
+                    (json.dumps(_normaliser_regroupements(data["regroupements"])), gid),
+                )
             conn.commit()
             return {"status": "created", "id": gid}
         except HTTPException:
@@ -753,6 +779,7 @@ def register_ad_gabarits_routes(get_conn):
         try:
             g = _load_gabarit_scoped(cur, gabarit_id, org)
             g["sections"] = _full_gabarit(cur, gabarit_id)
+            g["regroupements"] = g.get("regroupements") or []
             return g
         finally:
             cur.close()
@@ -768,11 +795,24 @@ def register_ad_gabarits_routes(get_conn):
         cur = conn.cursor(row_factory=dict_row)
         try:
             _load_gabarit_scoped(cur, gabarit_id, org)
-            cur.execute(
-                "UPDATE ad_budget.gabarits SET nom=%s, description=%s, updated_at=NOW() "
-                "WHERE id=%s AND organization_id=%s",
-                (nom, (data.get("description") or "").strip() or None, gabarit_id, org),
-            )
+            # `regroupements` suit le même contrat que `sections` : présent
+            # dans le payload → remplace en entier ; absent → inchangé (un
+            # appelant qui ignore ce champ ne l'efface pas silencieusement).
+            if "regroupements" in data:
+                cur.execute(
+                    "UPDATE ad_budget.gabarits SET nom=%s, description=%s, "
+                    "regroupements=%s, updated_at=NOW() "
+                    "WHERE id=%s AND organization_id=%s",
+                    (nom, (data.get("description") or "").strip() or None,
+                     json.dumps(_normaliser_regroupements(data["regroupements"])),
+                     gabarit_id, org),
+                )
+            else:
+                cur.execute(
+                    "UPDATE ad_budget.gabarits SET nom=%s, description=%s, updated_at=NOW() "
+                    "WHERE id=%s AND organization_id=%s",
+                    (nom, (data.get("description") or "").strip() or None, gabarit_id, org),
+                )
             if "sections" in data:
                 _replace_structure(cur, gabarit_id, data["sections"])
             conn.commit()
@@ -856,9 +896,10 @@ def register_ad_gabarits_routes(get_conn):
             # l'original (la copie est un gabarit neuf, indépendant).
             cur.execute(
                 "INSERT INTO ad_budget.gabarits "
-                "(organization_id, nom, description, created_by, created_by_email) "
-                "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                "(organization_id, nom, description, regroupements, created_by, created_by_email) "
+                "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
                 (org, (g["nom"] + " (copie)")[:200], g["description"],
+                 json.dumps(g.get("regroupements") or []),
                  user.get("id"), user.get("email")),
             )
             gid = cur.fetchone()["id"]
@@ -968,6 +1009,39 @@ def register_ad_gabarits_routes(get_conn):
             conn.close()
 
     # ─── Volet 4 : insérer un gabarit dans un budget ──────────────────────
+    @router.get("/projets/{projet_id}/regroupements")
+    def get_projet_regroupements(projet_id: int, user=Depends(jwt_user)):
+        """Regroupements de total en vigueur pour ce budget — résolus depuis
+        son `source_gabarit_id`, JAMAIS copiés (même principe que la
+        résolution des titres CSI : un changement posé sur le gabarit se
+        répercute dans tous les budgets qui en sont nés). Un projet sans
+        gabarit d'origine, ou dont le gabarit n'a aucun regroupement, ou dont
+        le gabarit d'origine a depuis été supprimé, rend une liste vide —
+        jamais une erreur : c'est un affichage optionnel, pas une donnée
+        dont le budget dépend."""
+        org = _org(user)
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute(
+                "SELECT source_gabarit_id FROM ad_budget.projets WHERE id=%s", (projet_id,),
+            )
+            row = cur.fetchone()
+            gabarit_id = row and row.get("source_gabarit_id")
+            if not gabarit_id:
+                return {"regroupements": [], "gabarit_id": None}
+            cur.execute(
+                "SELECT regroupements FROM ad_budget.gabarits "
+                "WHERE id=%s AND organization_id=%s",
+                (gabarit_id, org),
+            )
+            g = cur.fetchone()
+            return {"regroupements": (g and g.get("regroupements")) or [], "gabarit_id": gabarit_id}
+        finally:
+            cur.close()
+            conn.close()
+
     @router.post("/projets/{projet_id}/insert-gabarit")
     def insert_gabarit(projet_id: int, data: dict,
                        authorization: Optional[str] = Header(None),

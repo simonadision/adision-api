@@ -1,0 +1,31 @@
+-- Ad BUD — Regroupements de total dans le gabarit (31 août 2026).
+--
+-- Demande Simon : pouvoir nommer un regroupement de plusieurs DIVISIONS
+-- (ex. « Système électromécanique et autres » = 22+23+26+27) et lui faire
+-- porter un sous-total = somme des divisions qui lui sont assignées. Les
+-- divisions non assignées à un regroupement explicite tombent dans « le
+-- reste » (calculé côté client, jamais stocké). Le grand total du budget
+-- ne change pas : il reste la somme de TOUTES les lignes — les
+-- regroupements ne font qu'en présenter une DÉCOMPOSITION, jamais un
+-- double comptage (chaque division n'appartient qu'à un seul groupe).
+--
+-- Aucune valeur (qté/prix) n'est stockée ici — cohérent avec la règle du
+-- gabarit ("AUCUNE valeur, c'est une TRAME", cf. GabaritEditorPage.jsx).
+-- Seule la STRUCTURE du regroupement (nom + divisions membres, identifiées
+-- par leur CODE CSI — LE CODE EST L'IDENTITÉ, migration 067_csi_titres.sql)
+-- est persistée.
+--
+-- Résolu au niveau GABARIT SEULEMENT (pas de portée projet/organisation
+-- pour l'instant, contrairement à csi_titres) : un budget né du gabarit lit
+-- les regroupements de son `source_gabarit_id` à la lecture, jamais copiés
+-- — même principe que la résolution des titres CSI.
+--
+-- Forme JSON : [{ "nom": "Système électromécanique et autres",
+--                  "divisions": ["22 00 00", "23 00 00", "26 00 00", "27 00 00"] }, …]
+--
+-- Migration non destructive : ADD COLUMN nullable avec défaut, IF NOT
+-- EXISTS par sécurité. Trackée ad_budget.schema_migrations (jouée une
+-- fois par le runner, ordre alphabétique).
+
+ALTER TABLE ad_budget.gabarits
+  ADD COLUMN IF NOT EXISTS regroupements JSONB NOT NULL DEFAULT '[]'::jsonb;
