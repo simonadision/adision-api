@@ -27,6 +27,7 @@ from typing import Optional
 import httpx
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException
 from psycopg.rows import dict_row
+from psycopg.types.json import Json
 
 from modules import typ_service
 from modules.auth_jwt import SESSION_COOKIE_NAME, make_jwt_deps, _extract_bearer
@@ -76,10 +77,12 @@ def register_ad_gabarits_routes(get_conn):
     def _full_gabarit(cur, gabarit_id):
         """Hiérarchie 3 niveaux ordonnée (gabarit déjà autorisé) :
         divisions (gabarit_sections) → sous_sections → lignes."""
-        # Niveau 1 — divisions.
+        # Niveau 1 — divisions (et lignes TOTAL, même table, même ordre —
+        # voir sprint_gabarits_v3_lignes_total.sql : `type` distingue les
+        # deux, `total_membres` ne porte de sens que pour type='total').
         cur.execute(
-            "SELECT id, nom_section, numero, ordre FROM ad_budget.gabarit_sections "
-            "WHERE gabarit_id = %s ORDER BY ordre, id",
+            "SELECT id, nom_section, numero, ordre, type, total_membres "
+            "FROM ad_budget.gabarit_sections WHERE gabarit_id = %s ORDER BY ordre, id",
             (gabarit_id,),
         )
         divisions = cur.fetchall()
@@ -119,26 +122,43 @@ def register_ad_gabarits_routes(get_conn):
         return divisions
 
     def _replace_structure(cur, gabarit_id, sections):
-        """Remplace TOUTE la structure 3 niveaux (CASCADE delete puis recrée).
-        `sections` = divisions : chacune {numero, nom_section, ordre, sous_sections};
-        chaque sous-section {code_csi, libelle, ordre, lignes}."""
+        """Remplace TOUTE la structure (CASCADE delete puis recrée).
+        `sections` = une liste ORDONNÉE mêlant deux types de ligne, dans
+        l'ORDRE VOULU par le glisser-déposer de l'éditeur :
+          - {type:'division', numero, nom_section, ordre, sous_sections}
+          - {type:'total', nom_section (= titre), ordre, total_membres}
+        Un total n'a ni `numero` ni `sous_sections` — c'est une ligne de
+        calcul, pas une division CSI. `total_membres` = codes CSI (chaînes,
+        telles que saisies sur les divisions) des divisions qu'elle
+        additionne ; jamais d'autre total dans la liste (pas de total de
+        total, pas demandé)."""
         cur.execute(
             "DELETE FROM ad_budget.gabarit_sections WHERE gabarit_id = %s",
             (gabarit_id,),
         )
         for si, sec in enumerate(sections or []):
+            est_total = sec.get("type") == "total"
+            membres = None
+            if est_total:
+                membres = Json([
+                    str(m).strip() for m in (sec.get("total_membres") or []) if str(m).strip()
+                ])
             cur.execute(
                 "INSERT INTO ad_budget.gabarit_sections "
-                "(gabarit_id, nom_section, numero, ordre) VALUES (%s, %s, %s, %s) "
-                "RETURNING id",
+                "(gabarit_id, nom_section, numero, ordre, type, total_membres) "
+                "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
                 (
                     gabarit_id,
                     (sec.get("nom_section") or "").strip(),
-                    (sec.get("numero") or "").strip() or None,
+                    None if est_total else ((sec.get("numero") or "").strip() or None),
                     sec.get("ordre", si),
+                    "total" if est_total else "division",
+                    membres,
                 ),
             )
             div_id = cur.fetchone()["id"]
+            if est_total:
+                continue  # pas de sous-sections pour une ligne de calcul
             for ssi, ss in enumerate(sec.get("sous_sections") or []):
                 cur.execute(
                     "INSERT INTO ad_budget.gabarit_sous_sections "
@@ -741,6 +761,43 @@ def register_ad_gabarits_routes(get_conn):
         except HTTPException:
             conn.rollback()
             raise
+        finally:
+            cur.close()
+            conn.close()
+
+    # Routes GET /budget/projets/{id}/regroupements — appelée par le
+    # récapitulatif d'App.jsx depuis la nuit du 31 août 2026 (App.jsx:2731),
+    # mais jamais servie côté serveur jusqu'ici : le champ `regroupements`
+    # envoyé par l'éditeur de gabarit (PR #66) n'était même pas persisté
+    # (create_gabarit/update_gabarit l'ignoraient). Un projet ne porte pas
+    # ses propres lignes-total : elles vivent sur le GABARIT dont il est né
+    # (`source_gabarit_id`), pour rester une TRAME modifiable, pas une
+    # copie figée au moment de l'insertion.
+    @router.get("/projets/{projet_id}/regroupements")
+    def projet_regroupements(projet_id: int, user=Depends(jwt_user)):
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute(
+                "SELECT source_gabarit_id FROM ad_budget.projets WHERE id = %s",
+                (projet_id,),
+            )
+            row = cur.fetchone()
+            gabarit_id = row.get("source_gabarit_id") if row else None
+            if not gabarit_id:
+                return {"regroupements": []}
+            cur.execute(
+                "SELECT nom_section, total_membres FROM ad_budget.gabarit_sections "
+                "WHERE gabarit_id = %s AND type = 'total' ORDER BY ordre, id",
+                (gabarit_id,),
+            )
+            regroupements = [
+                {"nom": r["nom_section"] or "", "divisions": r["total_membres"] or []}
+                for r in cur.fetchall()
+                if (r["nom_section"] or "").strip() and (r["total_membres"] or [])
+            ]
+            return {"regroupements": regroupements}
         finally:
             cur.close()
             conn.close()
