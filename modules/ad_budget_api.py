@@ -4865,29 +4865,55 @@ def register_ad_budget_routes(get_conn):
         except (ValueError, TypeError):
             _sec_labels = {}
 
+        # Un code MAISON à points, SANS espace ("09.1", "09.4.1" — la
+        # numérotation d'un bordereau importé de PDF, jamais du MasterFormat)
+        # est gardé TEL QUEL, jamais réduit à ses seuls chiffres puis
+        # redécoupé en fausses paires CSI. Un vrai code CSI espacé, y
+        # compris suffixé d'un 2e exemplaire Ad TYP ("06 40 00.01"), garde
+        # son comportement d'origine — l'espace avant le point est le
+        # discriminant. MIROIR EXACT du front, csiPrefixKeys.js
+        # (getPrefix/divisionKeyOf) — ne JAMAIS diverger de cette règle sans
+        # changer les deux côtés. Simon, en direct, 1er sept 2026, capture à
+        # l'appui : "je ne veux pas que tu intègre le gabarit dans des
+        # section CSI de ad BUD... un vrai copier coller."
+        def _est_code_maison(s):
+            raw = (s or "").strip()
+            return "." in raw and " " not in raw
+
         def _csi_division(s):
-            d = re.sub(r"\D", "", s or "")
+            raw = (s or "").strip()
+            if _est_code_maison(raw):
+                return raw.split(".")[0]
+            d = re.sub(r"\D", "", raw)
             return d[:2] if len(d) >= 2 else "Divers"
 
         def _csi_prefix(s):
-            d = re.sub(r"\D", "", s or "")
+            raw = (s or "").strip()
+            if _est_code_maison(raw):
+                return raw
+            d = re.sub(r"\D", "", raw)
             if len(d) >= 4:
                 return f"{d[:2]} {d[2:4]}"
             if len(d) >= 2:
                 return f"{d[:2]} 00"
             return "Divers"
 
+        # Bandeaux d'en-tête : le CODE affiché est la clé de regroupement
+        # TELLE QUELLE, plus jamais complétée en fausse notation CSI
+        # ("09.1 00"/"09 00 00" n'existent nulle part dans un bordereau
+        # maison). MIROIR EXACT du front, grandeSectionLabel/
+        # grandeDivisionLabel (App.jsx) — même correctif, même jour.
         def _div_header_label(div):
             if div == "Divers":
                 return "Divers"
             t = _div_labels.get(div)
-            return f"{div} 00 00 — {t}" if t else f"{div} 00 00"
+            return f"{div} — {t}" if t else div
 
         def _sub_header_label(prefix):
             if prefix == "Divers":
                 return "Divers"
             t = _sec_labels.get(prefix)
-            return f"{prefix} 00 — {t}" if t else f"{prefix} 00"
+            return f"{prefix} — {t}" if t else prefix
 
         # ── PRÉ-PASSE — totaux par Division et Sous-section CSI ──────────────
         # Injectés directement DANS les bandeaux (libellé à gauche, total à droite)
