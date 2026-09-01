@@ -1053,6 +1053,67 @@ def register_ad_gabarits_routes(get_conn):
             cur.close()
             conn.close()
 
+    @router.get("/projets/{projet_id}/titres-gabarit")
+    def get_projet_titres_gabarit(projet_id: int, user=Depends(jwt_user)):
+        """Titres de division/sous-section EN VIGUEUR pour ce budget, résolus
+        directement depuis son `source_gabarit_id` (gabarit_sections/
+        gabarit_sous_sections) — JAMAIS copiés, même principe que
+        /regroupements ci-dessus.
+
+        LECTURE DIRECTE EN BASE, PAS DE RELAIS AD EST. insert_gabarit
+        (Volet 4, plus bas) tente aussi de pousser ces mêmes titres vers
+        csi_titres (portée « gabarit », partagé avec Ad EST) — best-effort,
+        laissé en place pour le cas où un renommage manuel ultérieur dans
+        l'éditeur en dépend. Mais en pratique, constaté en direct le 1er
+        septembre 2026 (Simon, plusieurs gabarits testés, capture à
+        l'appui) : AUCUNE écriture n'a jamais abouti via ce relais — un
+        seul titre gabarit existe dans app_est.csi_titres sur toute la
+        table, datant du 7 août, posé à la main via l'éditeur, jamais par
+        insert_gabarit. La cause exacte (auth cross-service ? autre ?)
+        n'est pas élucidée, et ne DEVRAIT plus avoir besoin de l'être :
+        cet endpoint ne dépend d'aucun autre service, ne peut pas échouer
+        de la même façon silencieuse — c'est LUI que le front consulte
+        désormais en priorité (voir App.jsx, grandeSectionLabel/
+        grandeDivisionLabel).
+
+        Un projet sans gabarit d'origine, ou dont le gabarit d'origine a
+        disparu, rend un dict vide — jamais une erreur : affichage
+        optionnel, pas une donnée dont le budget dépend."""
+        org = _org(user)
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute(
+                "SELECT source_gabarit_id FROM ad_budget.projets WHERE id=%s", (projet_id,),
+            )
+            row = cur.fetchone()
+            gabarit_id = row and row.get("source_gabarit_id")
+            if not gabarit_id:
+                return {"titres": {}, "gabarit_id": None}
+            cur.execute(
+                "SELECT id FROM ad_budget.gabarits WHERE id=%s AND organization_id=%s",
+                (gabarit_id, org),
+            )
+            if not cur.fetchone():
+                return {"titres": {}, "gabarit_id": None}
+            divisions = _full_gabarit(cur, gabarit_id)
+            titres = {}
+            for d in divisions:
+                numero = (d.get("numero") or "").strip()
+                nom = (d.get("nom_section") or "").strip()
+                if numero and nom:
+                    titres[numero] = nom
+                for ss in (d.get("sous_sections") or []):
+                    code = (ss.get("code_csi") or "").strip()
+                    libelle = (ss.get("libelle") or "").strip()
+                    if code and libelle:
+                        titres[code] = libelle
+            return {"titres": titres, "gabarit_id": gabarit_id}
+        finally:
+            cur.close()
+            conn.close()
+
     @router.post("/projets/{projet_id}/insert-gabarit")
     def insert_gabarit(projet_id: int, data: dict,
                        authorization: Optional[str] = Header(None),
