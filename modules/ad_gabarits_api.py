@@ -1165,6 +1165,58 @@ def register_ad_gabarits_routes(get_conn):
                         else:
                             _insert_manual(cur, projet_id, sec_code, desc)
                             inserted += 1
+
+            # Répercute les noms personnalisés du gabarit (nom_section /
+            # libelle) dans le système csi_titres (portée « gabarit »,
+            # partagé avec Ad EST — cf. bandeau plus haut « Titres
+            # personnalisés de section CSI »). SANS ce relais, un import PDF
+            # (qui écrit nom_section directement, sans jamais passer par le
+            # bouton renommer de CsiSectionSelect/csiTitres) reste invisible
+            # pour resoudre_titres : sa portée « gabarit » ne contient rien,
+            # la résolution retombe sur le libellé MasterFormat officiel —
+            # exactement le symptôme rapporté par Simon en direct, 1er sept
+            # 2026 : « Ce n'est pas du tout le bordereau que j'ai monté. Je
+            # veux une reproduction exacte du gabarit, pas une invention
+            # inspirée du gabarit. » Rejoué à CHAQUE insertion (idempotent,
+            # pas seulement à la création du gabarit) pour couvrir aussi les
+            # gabarits déjà existants, jamais renommés une seule fois.
+            # Best-effort et jamais bloquant — un titre est un affichage, pas
+            # une donnée dont l'insertion du budget dépend (même philosophie
+            # que /projets/{id}/regroupements ci-dessus) ; un Ad EST injoignable
+            # coupe court après le premier échec réseau plutôt que de rejouer
+            # le même timeout N fois.
+            gabarit_ref = f"ad_bud:{gabarit_id}"
+            est_indisponible = False
+
+            def _pousser_titre_gabarit(code, titre):
+                nonlocal est_indisponible
+                if est_indisponible or not code or not titre:
+                    return
+                try:
+                    _relais_est(
+                        "PUT", "/reference/csi-titres", jwt_token,
+                        corps={"portee": "gabarit", "ref": gabarit_ref,
+                               "code": code, "titre": titre},
+                    )
+                except HTTPException as e:
+                    logger.warning(
+                        "insert_gabarit %s : titre '%s' non répercuté vers Ad EST (%s)",
+                        gabarit_id, code, e.detail,
+                    )
+                    if e.status_code == 502:
+                        est_indisponible = True
+
+            for div in sections:
+                _pousser_titre_gabarit(
+                    (div.get("numero") or "").strip(),
+                    (div.get("nom_section") or "").strip(),
+                )
+                for ss in (div.get("sous_sections") or []):
+                    _pousser_titre_gabarit(
+                        (ss.get("code_csi") or "").strip(),
+                        (ss.get("libelle") or "").strip(),
+                    )
+
             # D'OÙ VIENT CE BUDGET. Sans ce lien, un budget né d'un gabarit
             # ne peut pas hériter des titres de section personnalisés qui y
             # ont été posés, ni les lui remonter. COALESCE : le PREMIER
