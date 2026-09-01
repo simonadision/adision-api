@@ -77,10 +77,19 @@ def register_ad_gabarits_routes(get_conn):
     def _normaliser_regroupements(data):
         """Valide/nettoie la liste de regroupements reçue du client — une
         liste vide est valide (aucun regroupement, comportement d'avant).
-        Chaque entrée : {nom, divisions: [code, …]}. Une entrée sans nom OU
-        sans aucune division retenue est écartée plutôt que rejetée : un
-        regroupement à moitié rempli ne doit pas bloquer l'enregistrement du
-        reste du gabarit."""
+        Chaque entrée : {nom, divisions: [code, …], apres}. Une entrée sans
+        nom OU sans aucune division retenue est écartée plutôt que rejetée :
+        un regroupement à moitié rempli ne doit pas bloquer l'enregistrement
+        du reste du gabarit.
+
+        `apres` : le NUMÉRO (code CSI) de la division après laquelle ce
+        regroupement s'affiche dans la liste des divisions du gabarit, ou
+        None s'il précède toutes les divisions — c'est la position visuelle
+        du regroupement, glissé-déposé par l'utilisateur au même titre
+        qu'une division (brief Simon, 31 août 2026, 2e demande). Une valeur
+        pointant vers une division disparue n'est PAS rejetée : elle reste
+        en base telle quelle, le client la traite comme "en fin de liste"
+        au rendu plutôt que de planter."""
         out = []
         for r in data or []:
             if not isinstance(r, dict):
@@ -91,7 +100,9 @@ def register_ad_gabarits_routes(get_conn):
             ]
             if not nom or not divisions:
                 continue
-            out.append({"nom": nom[:200], "divisions": divisions})
+            apres = r.get("apres")
+            apres = apres.strip()[:20] if isinstance(apres, str) and apres.strip() else None
+            out.append({"nom": nom[:200], "divisions": divisions, "apres": apres})
         return out
 
     def _full_gabarit(cur, gabarit_id):
