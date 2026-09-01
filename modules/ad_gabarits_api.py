@@ -1077,14 +1077,36 @@ def register_ad_gabarits_routes(get_conn):
             for div in sections:
                 # Code de division (fallback pour les sous-sections sans code CSI).
                 div_code = ((div.get("numero") or div.get("nom_section") or "").strip())
-                for ss in div.get("sous_sections", []):
+                sous_sections = div.get("sous_sections") or []
+                # Division SANS AUCUNE sous-section (ex. import PDF de bordereau,
+                # qui ne détecte que les numéros de section, jamais les lignes —
+                # cf. GabaritEditorPage.jsx/confirmerImportPdf) : sans ce cas, la
+                # division n'insère RIEN, donc n'apparaît dans AUCUNE ligne du
+                # budget — le budget entier semble vide (« Aucun item dans ce
+                # projet ») même quand le gabarit a 18 divisions et 2
+                # regroupements de définis. Une ligne vide « à remplir » rend la
+                # division visible et éditable, exactement comme dans l'éditeur
+                # de gabarit (« + Ajouter une sous-section »). Simon, en direct,
+                # 1er sept 2026 : « JE veux voir mes divisions et mes deux total ».
+                if not sous_sections:
+                    _insert_manual(cur, projet_id, div_code or "Divers", "")
+                    inserted += 1
+                    continue
+                for ss in sous_sections:
                     # Section du budget = code CSI de la SOUS-SECTION (section fine,
                     # ex. "09 91 00") → se regroupe correctement par 2 paires avec
                     # le regroupement budget ACTUEL (Temps 1). Fallback : code de la
                     # division, sinon "Divers". On respecte l'organisation du gabarit.
                     sec_code = ((ss.get("code_csi") or "").strip()
                                 or div_code or "Divers")
-                    for lg in ss["lignes"]:
+                    lignes_ss = ss["lignes"]
+                    # Même raisonnement : une sous-section sans aucune ligne
+                    # n'insère rien et disparaît du budget sans cette ligne vide.
+                    if not lignes_ss:
+                        _insert_manual(cur, projet_id, sec_code, "")
+                        inserted += 1
+                        continue
+                    for lg in lignes_ss:
                         desc = lg.get("description") or ""
                         code = (lg.get("code_typ") or "").strip() or None
                         if lg.get("type") == "ad_typ" and code:
