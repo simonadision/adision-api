@@ -2882,7 +2882,20 @@ def register_ad_budget_routes(get_conn):
     def update_projet(projet_id: int, data: dict, user=Depends(jwt_user),
                       authorization: Optional[str] = Header(None), session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
         # PHASE 3A — authentification + autorisation (écriture).
-        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        #
+        # Simon, en direct, 2 sept 2026, capture à l'appui — glisser un
+        # projet VERROUILLÉ vers « Projet archivé » échouait toujours
+        # (« Le classement du projet n'a pas pu être enregistré »), sans
+        # explication. Cause : le verrou de contenu (check_lock, ci-dessous)
+        # bloque TOUT write sur ce endpoint générique, y compris
+        # `categorie_affichage` — qui n'est POURTANT PAS du contenu budget,
+        # juste « dans quelle pastille cette carte s'affiche » (voir son
+        # propre commentaire plus bas, "une organisation PURE de la vue").
+        # Un PUT qui ne touche QUE ce champ passe donc désormais SANS
+        # vérifier le verrou — un vrai changement de contenu (n'importe quel
+        # autre champ de cette route) reste bloqué normalement.
+        _seulement_categorie = bool(data) and set(data.keys()) <= {"categorie_affichage"}
+        _load_and_authorize_projet(get_conn, projet_id, user, "write", check_lock=not _seulement_categorie)
         # Brief 5a — identité projet = source unique Ad HUB. Refus 403 explicite.
         _forbidden = sorted(set((data or {}).keys()) & _HUB_OWNED_BUD_FIELDS)
         if _forbidden:
