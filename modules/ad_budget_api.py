@@ -3701,6 +3701,24 @@ def register_ad_budget_routes(get_conn):
                 (user["id"], user["organization_id"], int(new_hub_id), projet_id))
             new_projet = cur.fetchone()
             new_id = new_projet["id"]
+            # Simon, en direct, 2 sept 2026, capture à l'appui (projet
+            # dupliqué) : "les montant sous traitant n'est pas calculer. le
+            # total est erroné." Cause : cette liste de colonnes omettait
+            # PLUSIEURS drapeaux `_override` et `prix_unitaire_st` -- sans
+            # eux, resoudreMontantSousTraitant (apps/ad-bud/src/utils/
+            # sousTraitantMontant.js) ignore la valeur pourtant copiée
+            # (sous_traitant_montant_override retombe à FALSE par défaut à
+            # l'INSERT -> le montant stocké est traité comme un résidu
+            # périmé, jamais comme une vraie saisie) -- même chose pour le
+            # mode CALCULÉ (qté × PU-ST), dont prix_unitaire_st manquait
+            # tout autant. Complété avec TOUT ce qui influence un total
+            # affiché : les 7 drapeaux _override existants, prix_unitaire_st
+            # (+ son propre override), la production (heures calculées),
+            # l'ordre d'affichage, et les liens catalogue (Ad MAT/Ad TYP/Ad
+            # VIU/contact sous-traitant) pour ne pas perdre leur traçabilité
+            # dans la copie. `lot_id` reste volontairement EXCLU : les lots
+            # sont propres à CHAQUE projet, un lot_id de la source pointerait
+            # vers un lot qui n'existe pas dans la copie.
             cur.execute(
                 """
                 INSERT INTO ad_budget.budget_lignes
@@ -3708,12 +3726,28 @@ def register_ad_budget_routes(get_conn):
                    qte, ajustement_pct, note, actif, prix_unitaire_override,
                    heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
                    ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
-                   sous_traitant_type, sous_traitant_montant)
+                   sous_traitant_type, sous_traitant_montant,
+                   qte_override, taux_horaire_override,
+                   ajust_materiaux_override, ajust_main_oeuvre_override, ajust_sous_traitant_override,
+                   sous_traitant_montant_override, prix_unitaire_st, prix_unitaire_st_override,
+                   ordre, a_completer, sous_traitant_contact_id,
+                   item_id_ad_mat, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
+                   source_typ_code, source_typ_snapshot_at,
+                   source_viu_analysis_id, source_viu_item_id,
+                   production_valeur, production_unite, production_auto)
                 SELECT %s, source_item_id, section, description, unite, prix_unitaire,
                        qte, ajustement_pct, note, actif, prix_unitaire_override,
                        heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
                        ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
-                       sous_traitant_type, sous_traitant_montant
+                       sous_traitant_type, sous_traitant_montant,
+                       qte_override, taux_horaire_override,
+                       ajust_materiaux_override, ajust_main_oeuvre_override, ajust_sous_traitant_override,
+                       sous_traitant_montant_override, prix_unitaire_st, prix_unitaire_st_override,
+                       ordre, a_completer, sous_traitant_contact_id,
+                       item_id_ad_mat, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
+                       source_typ_code, source_typ_snapshot_at,
+                       source_viu_analysis_id, source_viu_item_id,
+                       production_valeur, production_unite, production_auto
                 FROM ad_budget.budget_lignes WHERE projet_id = %s
                 """,
                 (new_id, projet_id))
@@ -3807,6 +3841,24 @@ def register_ad_budget_routes(get_conn):
                 (user["id"], user["organization_id"], int(new_hub_id), projet_id))
             new_projet = cur.fetchone()
             new_id = new_projet["id"]
+            # Simon, en direct, 2 sept 2026, capture à l'appui (projet
+            # dupliqué) : "les montant sous traitant n'est pas calculer. le
+            # total est erroné." Cause : cette liste de colonnes omettait
+            # PLUSIEURS drapeaux `_override` et `prix_unitaire_st` -- sans
+            # eux, resoudreMontantSousTraitant (apps/ad-bud/src/utils/
+            # sousTraitantMontant.js) ignore la valeur pourtant copiée
+            # (sous_traitant_montant_override retombe à FALSE par défaut à
+            # l'INSERT -> le montant stocké est traité comme un résidu
+            # périmé, jamais comme une vraie saisie) -- même chose pour le
+            # mode CALCULÉ (qté × PU-ST), dont prix_unitaire_st manquait
+            # tout autant. Complété avec TOUT ce qui influence un total
+            # affiché : les 7 drapeaux _override existants, prix_unitaire_st
+            # (+ son propre override), la production (heures calculées),
+            # l'ordre d'affichage, et les liens catalogue (Ad MAT/Ad TYP/Ad
+            # VIU/contact sous-traitant) pour ne pas perdre leur traçabilité
+            # dans la copie. `lot_id` reste volontairement EXCLU : les lots
+            # sont propres à CHAQUE projet, un lot_id de la source pointerait
+            # vers un lot qui n'existe pas dans la copie.
             cur.execute(
                 """
                 INSERT INTO ad_budget.budget_lignes
@@ -3814,12 +3866,28 @@ def register_ad_budget_routes(get_conn):
                    qte, ajustement_pct, note, actif, prix_unitaire_override,
                    heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
                    ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
-                   sous_traitant_type, sous_traitant_montant)
+                   sous_traitant_type, sous_traitant_montant,
+                   qte_override, taux_horaire_override,
+                   ajust_materiaux_override, ajust_main_oeuvre_override, ajust_sous_traitant_override,
+                   sous_traitant_montant_override, prix_unitaire_st, prix_unitaire_st_override,
+                   ordre, a_completer, sous_traitant_contact_id,
+                   item_id_ad_mat, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
+                   source_typ_code, source_typ_snapshot_at,
+                   source_viu_analysis_id, source_viu_item_id,
+                   production_valeur, production_unite, production_auto)
                 SELECT %s, source_item_id, section, description, unite, prix_unitaire,
                        qte, ajustement_pct, note, actif, prix_unitaire_override,
                        heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
                        ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
-                       sous_traitant_type, sous_traitant_montant
+                       sous_traitant_type, sous_traitant_montant,
+                       qte_override, taux_horaire_override,
+                       ajust_materiaux_override, ajust_main_oeuvre_override, ajust_sous_traitant_override,
+                       sous_traitant_montant_override, prix_unitaire_st, prix_unitaire_st_override,
+                       ordre, a_completer, sous_traitant_contact_id,
+                       item_id_ad_mat, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
+                       source_typ_code, source_typ_snapshot_at,
+                       source_viu_analysis_id, source_viu_item_id,
+                       production_valeur, production_unite, production_auto
                 FROM ad_budget.budget_lignes WHERE projet_id = %s
                 """,
                 (new_id, projet_id))
