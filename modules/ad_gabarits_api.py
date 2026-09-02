@@ -1047,24 +1047,43 @@ def register_ad_gabarits_routes(get_conn):
     # ─── Volet 4 : insérer un gabarit dans un budget ──────────────────────
     @router.get("/projets/{projet_id}/regroupements")
     def get_projet_regroupements(projet_id: int, user=Depends(jwt_user)):
-        """Regroupements de total en vigueur pour ce budget — résolus depuis
-        son `source_gabarit_id`, JAMAIS copiés (même principe que la
-        résolution des titres CSI : un changement posé sur le gabarit se
-        répercute dans tous les budgets qui en sont nés). Un projet sans
-        gabarit d'origine, ou dont le gabarit n'a aucun regroupement, ou dont
-        le gabarit d'origine a depuis été supprimé, rend une liste vide —
-        jamais une erreur : c'est un affichage optionnel, pas une donnée
-        dont le budget dépend."""
+        """Sous-totaux (regroupements) EN VIGUEUR pour ce budget.
+
+        CHANGÉ 2 sept 2026 -- nouvelle méthode, décidée par Simon en direct
+        après plusieurs itérations infructueuses sur un lien division ⇄
+        sous-total porté par le GABARIT (PR #90-94, jamais fiable une fois
+        le projet déjà créé -- un projet ne reflète jamais une réédition du
+        gabarit après coup) :
+
+        "je dois pouvoir créer des sous-total... je dois pouvoir placer mon
+        sous total ou je veux dans le tableau. Un fois le sous total
+        ajouter, une modale me demande quelle division y inclure."
+
+        `ad_budget.projets.regroupements` est désormais la SOURCE DE
+        VÉRITÉ, propre à ce projet -- créable/positionnable/modifiable
+        directement ici, sans plus jamais dépendre du gabarit d'origine.
+
+        Repli RÉTROCOMPATIBLE, lecture seule : un projet dont la colonne est
+        encore vide (créé avant ce chantier, ou par insert_gabarit qui l'a
+        seedée à `[]`) retombe sur les regroupements de son
+        `source_gabarit_id`, EXACTEMENT le comportement d'avant -- aucun
+        budget existant ne perd son affichage. Dès que Simon ajoute UN
+        sous-total natif, cette colonne cesse d'être vide et devient la
+        seule source consultée."""
         org = _org(user)
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         try:
             cur.execute(
-                "SELECT source_gabarit_id FROM ad_budget.projets WHERE id=%s", (projet_id,),
+                "SELECT source_gabarit_id, regroupements FROM ad_budget.projets WHERE id=%s",
+                (projet_id,),
             )
             row = cur.fetchone()
             gabarit_id = row and row.get("source_gabarit_id")
+            natifs = (row and row.get("regroupements")) or []
+            if natifs:
+                return {"regroupements": natifs, "gabarit_id": gabarit_id}
             if not gabarit_id:
                 return {"regroupements": [], "gabarit_id": None}
             cur.execute(
@@ -1074,6 +1093,30 @@ def register_ad_gabarits_routes(get_conn):
             )
             g = cur.fetchone()
             return {"regroupements": (g and g.get("regroupements")) or [], "gabarit_id": gabarit_id}
+        finally:
+            cur.close()
+            conn.close()
+
+    @router.put("/projets/{projet_id}/regroupements")
+    def set_projet_regroupements(projet_id: int, data: dict, user=Depends(jwt_user)):
+        """Remplace la liste COMPLÈTE des sous-totaux natifs de ce projet --
+        bouton "Sous-total", 2 sept 2026 (voir GET ci-dessus pour le
+        contexte complet). Même validation que le gabarit
+        (_normaliser_regroupements, même contrat {nom, divisions, apres}) :
+        `apres` porte la POSITION choisie par Simon ("où je veux dans le
+        tableau"), le NUMÉRO de la division après laquelle ce sous-total
+        s'affiche."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        regroupements = _normaliser_regroupements(data.get("regroupements"))
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute(
+                "UPDATE ad_budget.projets SET regroupements=%s WHERE id=%s",
+                (json.dumps(regroupements), projet_id),
+            )
+            conn.commit()
+            return {"regroupements": regroupements}
         finally:
             cur.close()
             conn.close()
