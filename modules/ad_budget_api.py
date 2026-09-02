@@ -10,7 +10,7 @@ from typing import Optional
 
 import httpx
 import openpyxl
-from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Body, Cookie, Depends, Header, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from psycopg.errors import UniqueViolation
 from psycopg.rows import dict_row
@@ -3546,6 +3546,182 @@ def register_ad_budget_routes(get_conn):
         cur.close()
         conn.close()
         return {"status": "duplicated", "projet": new_projet, "nb_lignes_copiees": nb_lignes}
+
+    # ─────────────────────────────────────────────────────────────────
+    # POST /budget/projets/{id}/dupliquer
+    # COPIE INDÉPENDANTE d'un projet (brief Simon, 2 sept 2026). À ne PAS
+    # confondre avec les deux voisins :
+    #   - /reviser-projet  -> nouvelle VERSION du MÊME projet hub (la famille
+    #                         de révisions grandit, un seul projet).
+    #   - /duplicate       -> l'ANCÊTRE GELÉ (410) : il copiait le budget en
+    #                         LOCAL sans jamais créer de projet hub, donc une
+    #                         copie sans identité — c'est ce défaut-là qui a
+    #                         fait retirer la fonctionnalité. Laissé inerte.
+    # Ici on crée un VRAI projet Ad HUB DISTINCT (POST /api/projects, comme le
+    # mode B de create_projet) puis on lie un budget neuf à CE projet-là. La
+    # garde anti-double-budget n'est donc jamais violée : le hub qu'on vient de
+    # créer n'a par construction aucun budget actif.
+    # ─────────────────────────────────────────────────────────────────
+
+    # Champs d'IDENTITÉ recopiés du projet hub SOURCE vers le nouveau projet
+    # hub. Miroir du corps de create_project (adision-app-api,
+    # modules/projects_api.py) — le hub ignore les clés qu'il ne connaît pas,
+    # mais on reste sur une liste EXPLICITE pour que l'ajout d'un champ côté
+    # hub soit une décision, pas un effet de bord.
+    #
+    # VOLONTAIREMENT ABSENTS, et ce n'est pas un oubli :
+    #   - `code`  : UNIQUE par organisation côté hub (idx_projects_org_code) —
+    #               le recopier ferait échouer l'INSERT. La copie reçoit son
+    #               propre code.
+    #   - `donneur_ouvrage_id` / `code_type_mandat_id` / `code_lot_id` : ce
+    #               sont les entrées de la GÉNÉRATION DE CODE. Les recopier
+    #               fabriquerait un code quasi identique à celui de la source,
+    #               et un référentiel devenu inactif entre-temps ferait échouer
+    #               toute la duplication en 422 pour une raison sans rapport.
+    #   - `id`, `created_at`, les compteurs de révision, les snapshots Ad ANA :
+    #               propres à la source.
+    _HUB_CHAMPS_COPIES = (
+        "client_nom", "statut", "creneau", "region", "date_adjudication",
+        "superficie_pi2", "notes", "architecte_firme", "type_batiment",
+        "nombre_etages", "budget_client_min", "budget_client_max",
+        "date_debut_construction", "date_livraison_prevue",
+        "ville", "code_postal", "secteur", "sous_type_batiment",
+        "numero_seao", "numero_bsdq", "type_soumission", "contact_responsable",
+        "type_structure", "type_enveloppe", "type_fondation", "hauteur_metres",
+        "annee_construction_origine", "occupation_durant_travaux",
+        "accessibilite_chantier", "type_contrat", "type_donneur_ouvrage",
+        "saison_construction",
+        "adresse", "client_contact_nom", "client_email", "client_telephone",
+        "entrepreneur_nom", "entrepreneur_email", "entrepreneur_telephone",
+        "description", "numero_projet_externe",
+        "type_mandat", "modules_actifs", "folder_id", "zone_id",
+    )
+
+    @router.post("/projets/{projet_id}/dupliquer")
+    def dupliquer_projet(
+        projet_id: int, data: Optional[dict] = Body(default=None), user=Depends(jwt_user),
+        authorization: Optional[str] = Header(None),
+        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
+    ):
+        # Source : on la LIT, on en crée un autre. check_lock=False — un projet
+        # verrouillé se copie (on ne le modifie pas), même raison que la révision.
+        _load_and_authorize_projet(get_conn, projet_id, user, "write", check_lock=False)
+
+        _c = get_conn(); _cur = _c.cursor(row_factory=dict_row)
+        try:
+            _cur.execute("SELECT * FROM ad_budget.projets WHERE id=%s", (projet_id,))
+            src = _cur.fetchone()
+        finally:
+            _cur.close(); _c.close()
+        if not src:
+            raise HTTPException(status_code=404, detail="Projet introuvable")
+        hub_id = src.get("ad_hub_project_id")
+        if hub_id is None:
+            # Depuis Phase 6 l'identité vit dans Ad HUB : un budget sans lien hub
+            # n'a pas de nom à copier. On refuse clairement plutôt que de
+            # fabriquer une copie anonyme — le défaut exact de l'ancien /duplicate.
+            raise HTTPException(
+                status_code=400,
+                detail="Ce budget n'est pas lié à un projet Ad HUB — duplication impossible.")
+
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
+        if not jwt_token:
+            raise HTTPException(status_code=401, detail="Bearer JWT requis")
+
+        # 1. Identité de la SOURCE, lue au hub (source unique).
+        try:
+            _src_hub = hub_service.fetch_project(jwt_token, int(hub_id))
+        except hub_service.HubServiceError as e:
+            raise HTTPException(
+                status_code=502 if e.status_code is None else e.status_code,
+                detail=f"Ad HUB (lecture du projet source) : {e.detail}")
+        hub_src = (_src_hub or {}).get("project") if isinstance(_src_hub, dict) else None
+        if not isinstance(hub_src, dict):
+            raise HTTPException(
+                status_code=404,
+                detail="Le projet Ad HUB source est introuvable — duplication impossible.")
+
+        # 2. Nom de la copie : celui demandé, sinon « <nom source> (copie) ».
+        nom_demande = ((data or {}).get("nom") or "").strip()
+        nom_source = (hub_src.get("name") or "").strip() or f"Projet {hub_id}"
+        nouveau_nom = nom_demande or f"{nom_source} (copie)"
+
+        payload = {k: hub_src.get(k) for k in _HUB_CHAMPS_COPIES
+                   if hub_src.get(k) not in (None, "")}
+        payload["name"] = nouveau_nom
+
+        # 3. Création du VRAI nouveau projet hub.
+        try:
+            hub_new = hub_service.create_project(jwt_token, payload)
+        except hub_service.HubServiceError as e:
+            # Rien n'a encore été écrit côté Ad BUD : rien à défaire.
+            raise HTTPException(
+                status_code=502 if e.status_code is None else e.status_code,
+                detail=f"Ad HUB (création de la copie) : {e.detail}")
+        new_hub_id = hub_new.get("id")
+        if not new_hub_id:
+            raise HTTPException(
+                status_code=502,
+                detail="Ad HUB a accepté la création mais n'a pas retourné d'id")
+
+        # 4. Budget neuf lié à CE projet hub + copie des lignes. Même règle que
+        #    la révision : AUCUNE identité écrite en local (elle vit au hub), on
+        #    ne copie que les champs PROPRES à Ad BUD.
+        conn = get_conn(); cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute(
+                """
+                INSERT INTO ad_budget.projets
+                  (user_id, organization_id, statut, notes,
+                   pct_admin_conditions, pct_admin_architecture,
+                   pct_admin_mecanique, pct_admin_excavation,
+                   ad_hub_project_id, client_id,
+                   arrondi_dollar, pct_admin_mode)
+                SELECT %s, %s, statut, notes,
+                       pct_admin_conditions, pct_admin_architecture,
+                       pct_admin_mecanique, pct_admin_excavation,
+                       %s, client_id,
+                       arrondi_dollar, pct_admin_mode
+                FROM ad_budget.projets WHERE id = %s
+                RETURNING *
+                """,
+                (user["id"], user["organization_id"], int(new_hub_id), projet_id))
+            new_projet = cur.fetchone()
+            new_id = new_projet["id"]
+            cur.execute(
+                """
+                INSERT INTO ad_budget.budget_lignes
+                  (projet_id, source_item_id, section, description, unite, prix_unitaire,
+                   qte, ajustement_pct, note, actif, prix_unitaire_override,
+                   heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
+                   ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
+                   sous_traitant_type, sous_traitant_montant)
+                SELECT %s, source_item_id, section, description, unite, prix_unitaire,
+                       qte, ajustement_pct, note, actif, prix_unitaire_override,
+                       heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
+                       ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
+                       sous_traitant_type, sous_traitant_montant
+                FROM ad_budget.budget_lignes WHERE projet_id = %s
+                """,
+                (new_id, projet_id))
+            nb_lignes = cur.rowcount
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            # Le projet hub existe déjà mais n'aura jamais de budget : on le
+            # soft-delete pour ne pas laisser une coquille dans Ad HUB.
+            try:
+                hub_service.soft_delete_project(jwt_token, int(new_hub_id))
+            except Exception:  # noqa: BLE001
+                pass
+            raise HTTPException(status_code=500, detail=f"Échec de la copie du budget : {e}")
+        finally:
+            cur.close(); conn.close()
+
+        # 5. Snapshot du nouveau budget vers la fiche hub (fire-and-forget).
+        _push_budget_snapshot(get_conn, new_id, authorization, session_cookie)
+        return {"status": "duplicated", "projet": new_projet,
+                "nb_lignes_copiees": nb_lignes, "hub_project": hub_new}
 
     # ─────────────────────────────────────────────────────────────────
     # POST /budget/projets/{id}/reviser-projet
