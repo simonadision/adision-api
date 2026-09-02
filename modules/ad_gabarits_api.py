@@ -1115,26 +1115,35 @@ def register_ad_gabarits_routes(get_conn):
             row = cur.fetchone()
             gabarit_id = row and row.get("source_gabarit_id")
             if not gabarit_id:
-                return {"titres": {}, "gabarit_id": None}
+                return {"titres": {}, "sous_totaux": [], "gabarit_id": None}
             cur.execute(
                 "SELECT id FROM ad_budget.gabarits WHERE id=%s AND organization_id=%s",
                 (gabarit_id, org),
             )
             if not cur.fetchone():
-                return {"titres": {}, "gabarit_id": None}
+                return {"titres": {}, "sous_totaux": [], "gabarit_id": None}
             divisions = _full_gabarit(cur, gabarit_id)
             titres = {}
+            # Divisions marquées Sous-total (bouton vert, éditeur de gabarit,
+            # 2 sept 2026) -- répercuté ici pour la MÊME raison que `titres` :
+            # ce budget doit voir ce que Simon a posé sur le gabarit, sans
+            # jamais dépendre d'une copie. Un budget déjà créé AVANT ce
+            # champ (gabarit non réédité depuis) ne verra simplement aucun
+            # sous-total ici -- comportement d'avant, pas une régression.
+            sous_totaux = []
             for d in divisions:
                 numero = (d.get("numero") or "").strip()
                 nom = (d.get("nom_section") or "").strip()
                 if numero and nom:
                     titres[numero] = nom
+                if numero and d.get("est_sous_total"):
+                    sous_totaux.append(numero)
                 for ss in (d.get("sous_sections") or []):
                     code = (ss.get("code_csi") or "").strip()
                     libelle = (ss.get("libelle") or "").strip()
                     if code and libelle:
                         titres[code] = libelle
-            return {"titres": titres, "gabarit_id": gabarit_id}
+            return {"titres": titres, "sous_totaux": sous_totaux, "gabarit_id": gabarit_id}
         finally:
             cur.close()
             conn.close()
