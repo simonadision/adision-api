@@ -191,10 +191,15 @@ HUB_REGION_CODE_TO_LABEL = {
 }
 DATE_ADJ_ALLOWED_FOR_STATUTS = {"adjuge", "complet", "perdu"}
 
-# Brief 31 août 2026 — deux pastilles de tri sur la page Projets d'Ad BUD,
+# Brief 31 août 2026 — pastilles de tri sur la page Projets d'Ad BUD,
 # glisser-déposer. NULL = aucune catégorie (défaut à la naissance du projet).
 # Distinct du `statut` métier : purement une organisation de la vue.
-ALLOWED_CATEGORIES_AFFICHAGE = {"en_cours", "archive"}
+# "en_soumission" ajouté le 2 sept 2026 (Simon, en direct : "Il faudrait
+# ajouter un onglet Projet en soumission... Donc sur la page de projet on y
+# voit seulement les projets non classé") -- chaque pastille devient un
+# FILTRE EXCLUSIF (cliquer = ne montrer que cette catégorie), la page
+# principale ne montre plus que categorie_affichage IS NULL.
+ALLOWED_CATEGORIES_AFFICHAGE = {"en_cours", "archive", "en_soumission"}
 
 # === Sprint B : statuts qui figent le budget (snapshot dans app_ana) ===
 # Quand un projet bascule depuis un statut hors de ce set vers un statut dedans,
