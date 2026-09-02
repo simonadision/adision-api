@@ -128,7 +128,8 @@ def register_ad_gabarits_routes(get_conn):
         divisions (gabarit_sections) → sous_sections → lignes."""
         # Niveau 1 — divisions.
         cur.execute(
-            "SELECT id, nom_section, numero, ordre FROM ad_budget.gabarit_sections "
+            "SELECT id, nom_section, numero, ordre, est_sous_total "
+            "FROM ad_budget.gabarit_sections "
             "WHERE gabarit_id = %s ORDER BY ordre, id",
             (gabarit_id,),
         )
@@ -170,8 +171,13 @@ def register_ad_gabarits_routes(get_conn):
 
     def _replace_structure(cur, gabarit_id, sections):
         """Remplace TOUTE la structure 3 niveaux (CASCADE delete puis recrée).
-        `sections` = divisions : chacune {numero, nom_section, ordre, sous_sections};
-        chaque sous-section {code_csi, libelle, ordre, lignes}."""
+        `sections` = divisions : chacune {numero, nom_section, ordre, sous_sections,
+        est_sous_total}; chaque sous-section {code_csi, libelle, ordre, lignes}.
+
+        `est_sous_total` : drapeau MANUEL (bouton "Sous-total" de l'éditeur,
+        Simon — 2 sept 2026) — cette division REPRÉSENTE un sous-total du
+        bordereau, posé par Simon lui-même, jamais déduit. Fond vert côté
+        client tant qu'il reste actif."""
         cur.execute(
             "DELETE FROM ad_budget.gabarit_sections WHERE gabarit_id = %s",
             (gabarit_id,),
@@ -179,13 +185,14 @@ def register_ad_gabarits_routes(get_conn):
         for si, sec in enumerate(sections or []):
             cur.execute(
                 "INSERT INTO ad_budget.gabarit_sections "
-                "(gabarit_id, nom_section, numero, ordre) VALUES (%s, %s, %s, %s) "
-                "RETURNING id",
+                "(gabarit_id, nom_section, numero, ordre, est_sous_total) "
+                "VALUES (%s, %s, %s, %s, %s) RETURNING id",
                 (
                     gabarit_id,
                     (sec.get("nom_section") or "").strip(),
                     (sec.get("numero") or "").strip() or None,
                     sec.get("ordre", si),
+                    bool(sec.get("est_sous_total")),
                 ),
             )
             div_id = cur.fetchone()["id"]
