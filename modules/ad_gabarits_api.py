@@ -89,7 +89,16 @@ def register_ad_gabarits_routes(get_conn):
         qu'une division (brief Simon, 31 août 2026, 2e demande). Une valeur
         pointant vers une division disparue n'est PAS rejetée : elle reste
         en base telle quelle, le client la traite comme "en fin de liste"
-        au rendu plutôt que de planter."""
+        au rendu plutôt que de planter.
+
+        `division_liee` : le NUMÉRO de la division-mère que ce regroupement
+        totalise, quand ce regroupement a été créé EN DUO avec une division
+        (ex. "09", auto-détecté à l'import PDF, PR #82 — reste une division
+        ET devient un regroupement). Sert côté client à distinguer un
+        sous-total « = une division du gabarit » (fond vert) d'un simple
+        regroupement, et à répercuter un renommage du sous-total sur cette
+        division (Simon, en direct, 2 sept 2026). None pour un regroupement
+        posé à la main (pas de division liée) — jamais rejeté pour autant."""
         out = []
         for r in data or []:
             if not isinstance(r, dict):
@@ -102,7 +111,16 @@ def register_ad_gabarits_routes(get_conn):
                 continue
             apres = r.get("apres")
             apres = apres.strip()[:20] if isinstance(apres, str) and apres.strip() else None
-            out.append({"nom": nom[:200], "divisions": divisions, "apres": apres})
+            division_liee = r.get("division_liee")
+            division_liee = (
+                division_liee.strip()[:20]
+                if isinstance(division_liee, str) and division_liee.strip()
+                else None
+            )
+            out.append({
+                "nom": nom[:200], "divisions": divisions, "apres": apres,
+                "division_liee": division_liee,
+            })
         return out
 
     def _full_gabarit(cur, gabarit_id):
