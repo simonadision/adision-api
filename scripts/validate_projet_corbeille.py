@@ -21,11 +21,22 @@ CE QUI EST PROUVÉ ICI :
      GET /budget/projets, ET les budget_lignes sont toujours les mêmes ids
      qu'en A (rien reconstruit, UPDATE minimal des deux seules colonnes).
   F. Un utilisateur NON-gestionnaire (org_role != 'admin', pas non plus
-     staff plateforme) reçoit 403 sur les deux routes /admin/*.
+     staff plateforme) reçoit 403 sur les trois routes /admin/*.
+  G. DELETE /budget/admin/projets/{id}/definitif — sortie DÉFINITIVE de la
+     corbeille, demandée par Simon en direct ("une fois supprimé dans la
+     corbeille [...] c'est définitif") : la row projets ET ses budget_lignes
+     disparaissent pour de vrai (CASCADE), le projet n'est plus JOIGNABLE
+     nulle part, ni GET /projets ni la corbeille elle-même.
+  H. Garde-fou : DELETE .../definitif sur un projet qui n'est PAS dans la
+     corbeille (supprime_le IS NULL, jamais soft-supprimé) renvoie 404 et ne
+     touche à rien — jamais un raccourci pour effacer un projet vivant sans
+     passer par la corbeille d'abord.
 
-Fixture jetable : un user + un projet créés directement en base (pas besoin
-du hub — le projet n'a pas de ad_hub_project_id, donc soft_delete_project
-côté hub n'est jamais appelé). Cleanup INTÉGRAL en fin de script.
+Fixture jetable : un user + un/deux projets créés directement en base (pas
+besoin du hub — aucun projet n'a de ad_hub_project_id, donc
+soft_delete_project côté hub n'est jamais appelé). Cleanup INTÉGRAL en fin
+de script (idempotent : le projet du test G est déjà parti, ses DELETE de
+cleanup sont alors des no-ops silencieux).
 
     railway run python scripts/validate_projet_corbeille.py
 """
@@ -73,6 +84,7 @@ def main():
     cur = conn.cursor()
 
     projet_id = None
+    projet_vivant_id = None
     try:
         # Fixture : projet + 2 lignes, sans lien hub.
         cur.execute(
@@ -135,10 +147,46 @@ def main():
         ids = [p["id"] for p in r.json()] if r.status_code == 200 else []
         check("E. réapparu dans GET /projets", projet_id in ids)
 
+        # H (avant G) — garde-fou : un projet VIVANT (jamais soft-supprimé)
+        # ne peut pas être effacé définitivement en contournant la corbeille.
+        cur.execute(
+            "INSERT INTO ad_budget.projets (organization_id, nom, statut) "
+            "VALUES (%s, %s, 'brouillon') RETURNING id",
+            (org, f"TEST-QA-corbeille-vivant-{SUF}"),
+        )
+        projet_vivant_id = cur.fetchone()["id"]
+        r = httpx.delete(f"{BUD_URL}/budget/admin/projets/{projet_vivant_id}/definitif", headers=h_admin, timeout=20)
+        check("H. definitif refuse un projet vivant (404)", r.status_code == 404, str(r.status_code))
+        cur.execute("SELECT id FROM ad_budget.projets WHERE id=%s", (projet_vivant_id,))
+        check("H. projet vivant toujours présent", cur.fetchone() is not None)
+
+        # G — re-soft-delete puis suppression définitive pour de vrai.
+        r = httpx.delete(f"{BUD_URL}/budget/projets/{projet_id}", headers=h_user, timeout=20)
+        check("G. re-DELETE (soft) 200 avant le test définitif", r.status_code == 200, str(r.status_code))
+
+        r = httpx.delete(f"{BUD_URL}/budget/admin/projets/{projet_id}/definitif", headers=h_user, timeout=20)
+        check("F. DELETE definitif refuse un non-admin (403)", r.status_code == 403, str(r.status_code))
+
+        r = httpx.delete(f"{BUD_URL}/budget/admin/projets/{projet_id}/definitif", headers=h_admin, timeout=20)
+        check("G. DELETE definitif 200", r.status_code == 200, str(r.status_code))
+
+        cur.execute("SELECT id FROM ad_budget.projets WHERE id=%s", (projet_id,))
+        check("G. projet disparu de la table projets", cur.fetchone() is None)
+        cur.execute("SELECT id FROM ad_budget.budget_lignes WHERE projet_id=%s", (projet_id,))
+        check("G. budget_lignes disparues (CASCADE)", cur.fetchall() == [])
+
+        r = httpx.get(f"{BUD_URL}/budget/admin/projets-supprimes", headers=h_admin, timeout=20)
+        corbeille_apres = r.json() if r.status_code == 200 else []
+        check("G. absent de la corbeille après suppression définitive",
+              not any(p["id"] == projet_id for p in corbeille_apres))
+
     finally:
         if projet_id:
             cur.execute("DELETE FROM ad_budget.budget_lignes WHERE projet_id=%s", (projet_id,))
             cur.execute("DELETE FROM ad_budget.projets WHERE id=%s", (projet_id,))
+        if projet_vivant_id:
+            cur.execute("DELETE FROM ad_budget.budget_lignes WHERE projet_id=%s", (projet_vivant_id,))
+            cur.execute("DELETE FROM ad_budget.projets WHERE id=%s", (projet_vivant_id,))
         cur.close()
         conn.close()
 

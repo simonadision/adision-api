@@ -3256,6 +3256,46 @@ def register_ad_budget_routes(get_conn):
             )
         return {"status": "restaure", "id": projet_id}
 
+    @router.delete("/admin/projets/{projet_id}/definitif")
+    def admin_supprimer_definitif_projet(projet_id: int, _admin=Depends(jwt_org_admin)):
+        """Suppression PHYSIQUE — pour de vrai, cette fois. DELETE FROM
+        ad_budget.projets ; CASCADE (vérifié en direct sur la prod, 3 sept
+        2026 : budget_lignes_projet_id_fkey, devis_projet_id_fkey,
+        lots_projet_id_fkey sont les 3 seules FK qui référencent projets, et
+        les 3 sont ON DELETE CASCADE — aucun orphelin possible) emporte
+        budget_lignes, devis et lots avec le projet. Aucune récupération
+        possible après ce point.
+
+        Garde-fou : n'agit QUE sur un projet DÉJÀ dans la corbeille
+        (supprime_le IS NOT NULL, même WHERE que restaurer() ci-dessus) —
+        jamais un raccourci pour effacer un projet vivant sans d'abord
+        passer par la corbeille. Demandé par Simon en direct : "dans la
+        corbeille je dois avoir un bouton supprimer définitif [...] une
+        fois supprimé dans la corbeille ce n'est plus une erreur, c'est
+        définitif."
+
+        Ne touche pas la fiche Ad HUB : elle a déjà été soft-supprimée (best-
+        effort) au moment du premier DELETE /projets/{id} qui a mis ce
+        projet dans la corbeille — voir delete_projet() plus haut."""
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        cur.execute(
+            "DELETE FROM ad_budget.projets "
+            "WHERE id = %s AND supprime_le IS NOT NULL "
+            "RETURNING id",
+            (projet_id,),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+        if not row:
+            raise HTTPException(
+                status_code=404,
+                detail="Projet introuvable dans la corbeille",
+            )
+        return {"status": "supprime_definitivement", "id": projet_id}
+
     @router.get("/projets/{projet_id}/export-for-con")
     def export_projet_for_con(projet_id: int, user=Depends(jwt_user),
                               authorization: Optional[str] = Header(None), session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
