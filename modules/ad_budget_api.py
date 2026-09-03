@@ -1602,6 +1602,85 @@ def _extraire_montant_pdf_lot(pdf_bytes: bytes):
     return None, None
 
 
+# Simon, en direct, 3 sept 2026, capture à l'appui (projet "Rénovation
+# intérieure d'unités de logements", 9 lots nommés) : "je ne vois pas mes
+# lots dans la copie dupliquée. L'outils duplication doit emmettre un
+# copie exact du projet." Les montants de la copie étaient déjà exacts
+# (aucune ligne perdue) -- le défaut était structurel : la vue Par lot de
+# la copie ne montrait qu'un seul bloc HORS LOT, parce que dupliquer_projet
+# ET reviser_projet_version EXCLUAIENT délibérément lot_id de la copie de
+# budget_lignes. Ce choix était CORRECT en soi (copier le lot_id brut
+# aurait pointé vers un lot d'un AUTRE projet) mais sa suite -- dupliquer
+# les LOTS eux-mêmes puis réassigner chaque ligne à son nouveau lot -- n'a
+# jamais été faite. Extrait en fonction PARTAGÉE (plutôt que dupliqué dans
+# les deux endpoints comme le reste de leur logique de copie) précisément
+# parce que cette page a déjà divergé silencieusement une fois aujourd'hui
+# (montants sous-traitant manquants, même cause : deux listes de colonnes
+# copiées-collées qui cessent de s'accorder). Une seule fonction ne peut
+# pas diverger d'elle-même.
+def _dupliquer_lots_et_lignes(cur, projet_id_source, new_id):
+    """Duplique les LOTS de `projet_id_source` vers `new_id` (correspondance
+    ancien_lot_id -> nouveau_lot_id, un lot à la fois avec RETURNING pour une
+    correspondance fiable), puis copie budget_lignes en réassignant lot_id
+    via cette correspondance -- une ligne hors-lot (lot_id NULL) le reste.
+    Retourne le nombre de lignes copiées. Appelée dans une transaction déjà
+    ouverte par l'appelant (aucun commit/rollback ici)."""
+    cur.execute(
+        "SELECT id, nom, nb_logements, ordre FROM ad_budget.lots "
+        "WHERE projet_id=%s ORDER BY ordre, id",
+        (projet_id_source,))
+    lots_src = cur.fetchall()
+    lot_id_map = {}
+    for lot in lots_src:
+        cur.execute(
+            "INSERT INTO ad_budget.lots (projet_id, nom, nb_logements, ordre) "
+            "VALUES (%s, %s, %s, %s) RETURNING id",
+            (new_id, lot["nom"], lot["nb_logements"], lot["ordre"]))
+        lot_id_map[lot["id"]] = cur.fetchone()["id"]
+
+    if lot_id_map:
+        case_when = " ".join("WHEN %s THEN %s" for _ in lot_id_map)
+        lot_id_expr = f"CASE lot_id {case_when} ELSE NULL END"
+        case_params = [v for pair in lot_id_map.items() for v in pair]
+    else:
+        lot_id_expr = "NULL"
+        case_params = []
+
+    cur.execute(
+        f"""
+        INSERT INTO ad_budget.budget_lignes
+          (projet_id, lot_id, source_item_id, section, description, unite, prix_unitaire,
+           qte, ajustement_pct, note, actif, prix_unitaire_override,
+           heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
+           ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
+           sous_traitant_type, sous_traitant_montant,
+           qte_override, taux_horaire_override,
+           ajust_materiaux_override, ajust_main_oeuvre_override, ajust_sous_traitant_override,
+           sous_traitant_montant_override, prix_unitaire_st, prix_unitaire_st_override,
+           ordre, a_completer, sous_traitant_contact_id,
+           item_id_ad_mat, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
+           source_typ_code, source_typ_snapshot_at,
+           source_viu_analysis_id, source_viu_item_id,
+           production_valeur, production_unite, production_auto)
+        SELECT %s, {lot_id_expr}, source_item_id, section, description, unite, prix_unitaire,
+               qte, ajustement_pct, note, actif, prix_unitaire_override,
+               heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
+               ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
+               sous_traitant_type, sous_traitant_montant,
+               qte_override, taux_horaire_override,
+               ajust_materiaux_override, ajust_main_oeuvre_override, ajust_sous_traitant_override,
+               sous_traitant_montant_override, prix_unitaire_st, prix_unitaire_st_override,
+               ordre, a_completer, sous_traitant_contact_id,
+               item_id_ad_mat, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
+               source_typ_code, source_typ_snapshot_at,
+               source_viu_analysis_id, source_viu_item_id,
+               production_valeur, production_unite, production_auto
+        FROM ad_budget.budget_lignes WHERE projet_id = %s
+        """,
+        (new_id, *case_params, projet_id_source))
+    return cur.rowcount
+
+
 def register_ad_budget_routes(get_conn):
 
     jwt_user, jwt_user_or_token, jwt_admin, _ = make_jwt_deps(get_conn)
@@ -3694,12 +3773,12 @@ def register_ad_budget_routes(get_conn):
                    pct_admin_conditions, pct_admin_architecture,
                    pct_admin_mecanique, pct_admin_excavation,
                    ad_hub_project_id, client_id,
-                   arrondi_dollar, pct_admin_mode)
+                   arrondi_dollar, pct_admin_mode, regroupements)
                 SELECT %s, %s, statut, notes,
                        pct_admin_conditions, pct_admin_architecture,
                        pct_admin_mecanique, pct_admin_excavation,
                        %s, client_id,
-                       arrondi_dollar, pct_admin_mode
+                       arrondi_dollar, pct_admin_mode, regroupements
                 FROM ad_budget.projets WHERE id = %s
                 RETURNING *
                 """,
@@ -3721,42 +3800,10 @@ def register_ad_budget_routes(get_conn):
             # (+ son propre override), la production (heures calculées),
             # l'ordre d'affichage, et les liens catalogue (Ad MAT/Ad TYP/Ad
             # VIU/contact sous-traitant) pour ne pas perdre leur traçabilité
-            # dans la copie. `lot_id` reste volontairement EXCLU : les lots
-            # sont propres à CHAQUE projet, un lot_id de la source pointerait
-            # vers un lot qui n'existe pas dans la copie.
-            cur.execute(
-                """
-                INSERT INTO ad_budget.budget_lignes
-                  (projet_id, source_item_id, section, description, unite, prix_unitaire,
-                   qte, ajustement_pct, note, actif, prix_unitaire_override,
-                   heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
-                   ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
-                   sous_traitant_type, sous_traitant_montant,
-                   qte_override, taux_horaire_override,
-                   ajust_materiaux_override, ajust_main_oeuvre_override, ajust_sous_traitant_override,
-                   sous_traitant_montant_override, prix_unitaire_st, prix_unitaire_st_override,
-                   ordre, a_completer, sous_traitant_contact_id,
-                   item_id_ad_mat, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
-                   source_typ_code, source_typ_snapshot_at,
-                   source_viu_analysis_id, source_viu_item_id,
-                   production_valeur, production_unite, production_auto)
-                SELECT %s, source_item_id, section, description, unite, prix_unitaire,
-                       qte, ajustement_pct, note, actif, prix_unitaire_override,
-                       heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
-                       ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
-                       sous_traitant_type, sous_traitant_montant,
-                       qte_override, taux_horaire_override,
-                       ajust_materiaux_override, ajust_main_oeuvre_override, ajust_sous_traitant_override,
-                       sous_traitant_montant_override, prix_unitaire_st, prix_unitaire_st_override,
-                       ordre, a_completer, sous_traitant_contact_id,
-                       item_id_ad_mat, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
-                       source_typ_code, source_typ_snapshot_at,
-                       source_viu_analysis_id, source_viu_item_id,
-                       production_valeur, production_unite, production_auto
-                FROM ad_budget.budget_lignes WHERE projet_id = %s
-                """,
-                (new_id, projet_id))
-            nb_lignes = cur.rowcount
+            # dans la copie. lot_id N'EST PLUS exclu (3 sept 2026) : voir
+            # _dupliquer_lots_et_lignes, qui duplique d'abord les LOTS
+            # eux-mêmes puis réassigne chaque ligne à son nouveau lot.
+            nb_lignes = _dupliquer_lots_et_lignes(cur, projet_id, new_id)
             conn.commit()
         except Exception as e:
             conn.rollback()
@@ -3834,12 +3881,12 @@ def register_ad_budget_routes(get_conn):
                    pct_admin_conditions, pct_admin_architecture,
                    pct_admin_mecanique, pct_admin_excavation,
                    ad_hub_project_id,
-                   arrondi_dollar, pct_admin_mode)
+                   arrondi_dollar, pct_admin_mode, regroupements)
                 SELECT %s, %s, statut, notes,
                        pct_admin_conditions, pct_admin_architecture,
                        pct_admin_mecanique, pct_admin_excavation,
                        %s,
-                       arrondi_dollar, pct_admin_mode
+                       arrondi_dollar, pct_admin_mode, regroupements
                 FROM ad_budget.projets WHERE id = %s
                 RETURNING *
                 """,
@@ -3861,42 +3908,10 @@ def register_ad_budget_routes(get_conn):
             # (+ son propre override), la production (heures calculées),
             # l'ordre d'affichage, et les liens catalogue (Ad MAT/Ad TYP/Ad
             # VIU/contact sous-traitant) pour ne pas perdre leur traçabilité
-            # dans la copie. `lot_id` reste volontairement EXCLU : les lots
-            # sont propres à CHAQUE projet, un lot_id de la source pointerait
-            # vers un lot qui n'existe pas dans la copie.
-            cur.execute(
-                """
-                INSERT INTO ad_budget.budget_lignes
-                  (projet_id, source_item_id, section, description, unite, prix_unitaire,
-                   qte, ajustement_pct, note, actif, prix_unitaire_override,
-                   heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
-                   ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
-                   sous_traitant_type, sous_traitant_montant,
-                   qte_override, taux_horaire_override,
-                   ajust_materiaux_override, ajust_main_oeuvre_override, ajust_sous_traitant_override,
-                   sous_traitant_montant_override, prix_unitaire_st, prix_unitaire_st_override,
-                   ordre, a_completer, sous_traitant_contact_id,
-                   item_id_ad_mat, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
-                   source_typ_code, source_typ_snapshot_at,
-                   source_viu_analysis_id, source_viu_item_id,
-                   production_valeur, production_unite, production_auto)
-                SELECT %s, source_item_id, section, description, unite, prix_unitaire,
-                       qte, ajustement_pct, note, actif, prix_unitaire_override,
-                       heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
-                       ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
-                       sous_traitant_type, sous_traitant_montant,
-                       qte_override, taux_horaire_override,
-                       ajust_materiaux_override, ajust_main_oeuvre_override, ajust_sous_traitant_override,
-                       sous_traitant_montant_override, prix_unitaire_st, prix_unitaire_st_override,
-                       ordre, a_completer, sous_traitant_contact_id,
-                       item_id_ad_mat, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
-                       source_typ_code, source_typ_snapshot_at,
-                       source_viu_analysis_id, source_viu_item_id,
-                       production_valeur, production_unite, production_auto
-                FROM ad_budget.budget_lignes WHERE projet_id = %s
-                """,
-                (new_id, projet_id))
-            nb_lignes = cur.rowcount
+            # dans la copie. lot_id N'EST PLUS exclu (3 sept 2026) : voir
+            # _dupliquer_lots_et_lignes, qui duplique d'abord les LOTS
+            # eux-mêmes puis réassigne chaque ligne à son nouveau lot.
+            nb_lignes = _dupliquer_lots_et_lignes(cur, projet_id, new_id)
             conn.commit()
         except Exception as e:
             conn.rollback()

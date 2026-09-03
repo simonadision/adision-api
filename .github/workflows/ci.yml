@@ -120,3 +120,10 @@ jobs:
       # temporaire et verifie qu'il la detecte pour de vrai.
       - name: Source unique - le controle mord-il pour de vrai (filet)
         run: pytest tests/test_verifier_source_unique.py -v
+
+      # 3 sept 2026 — duplication de projet : les LOTS n'étaient jamais
+      # copiés (lot_id exclu sans jamais dupliquer les lots eux-mêmes, cf.
+      # _dupliquer_lots_et_lignes). Pur Python, fausse DB en mémoire,
+      # aucune dépendance réseau.
+      - name: Duplication de budget - les lots sont copiés et réassignés
+        run: pytest tests/test_dupliquer_lots_et_lignes.py -v
