@@ -21,7 +21,7 @@ from modules.ad_budget_constants import AD_VIU_BLINDSPOT_DIVISIONS
 from modules.aggregates import adapt_budget_lines, compute_aggregates, _js_round
 from modules.aggregates import heures_effectives as _heures_effectives
 from modules.lots_calc import compute_lot_totals
-from modules.auth_jwt import SESSION_COOKIE_NAME, _extract_bearer, make_jwt_deps
+from modules.auth_jwt import SESSION_COOKIE_NAME, _extract_bearer, make_jwt_deps, make_jwt_org_admin
 from modules.taux_horaires_api import (
     _load_taux_default_map,
     _resolve_taux_default,
@@ -1684,6 +1684,10 @@ def _dupliquer_lots_et_lignes(cur, projet_id_source, new_id):
 def register_ad_budget_routes(get_conn):
 
     jwt_user, jwt_user_or_token, jwt_admin, _ = make_jwt_deps(get_conn)
+    # Gestionnaire (admin d'ORGANISATION, "niveau 3") -- distinct de jwt_admin
+    # (staff PLATEFORME Adision). Voir make_jwt_org_admin (auth_jwt.py) pour
+    # le pourquoi complet -- corbeille de projets, 3 sept 2026.
+    jwt_org_admin = make_jwt_org_admin(jwt_user)
 
     # Toutes les routes /budget/* exigent un JWT valide avec module ad_bud.
     # Les routes admin imposent en plus role="admin" (Depends(jwt_admin)).
@@ -3182,7 +3186,7 @@ def register_ad_budget_routes(get_conn):
     # ══════════════════════════════════════════════════════════
 
     @router.get("/admin/projets-supprimes")
-    def admin_list_projets_supprimes(_admin=Depends(jwt_admin)):
+    def admin_list_projets_supprimes(_admin=Depends(jwt_org_admin)):
         """Liste des projets dans la corbeille. Identité (nom/client) lue
         depuis hub_identity_snapshot — le MIROIR local, pas un appel hub :
         cette liste doit rester consultable même hub indisponible, et un
@@ -3219,7 +3223,7 @@ def register_ad_budget_routes(get_conn):
         return out
 
     @router.post("/admin/projets/{projet_id}/restaurer")
-    def admin_restaurer_projet(projet_id: int, _admin=Depends(jwt_admin)):
+    def admin_restaurer_projet(projet_id: int, _admin=Depends(jwt_org_admin)):
         """Sort un projet de la corbeille. UPDATE MINIMAL — seulement les deux
         colonnes de la corbeille, jamais une reconstruction de ligne complète
         (même famille de risque que le bug déjà trouvé 2x sur ce dépôt : une

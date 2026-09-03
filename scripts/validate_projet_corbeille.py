@@ -12,14 +12,16 @@ CE QUI EST PROUVÉ ICI :
      nombre de lignes, mêmes ids) — c'était le risque nommé par le brief :
      un DELETE physique faisait un vrai CASCADE, un UPDATE n'en fait aucun.
   C. Le projet supprimé disparaît de GET /budget/projets (scope='mine').
-  D. GET /budget/admin/projets-supprimes (jwt_admin) le liste, avec
+  D. GET /budget/admin/projets-supprimes (jwt_org_admin -- gestionnaire
+     d'ORGANISATION, PAS jwt_admin/staff plateforme -- corrigé 3 sept 2026,
+     Simon en direct : "niveau 3 = gestionnaire suffit") le liste, avec
      supprime_le/supprime_par posés et l'identité lue depuis le miroir
      hub_identity_snapshot.
   E. POST /budget/admin/projets/{id}/restaurer le fait réapparaître dans
      GET /budget/projets, ET les budget_lignes sont toujours les mêmes ids
      qu'en A (rien reconstruit, UPDATE minimal des deux seules colonnes).
-  F. Un utilisateur NON-admin reçoit 403 sur les deux routes /admin/*
-     (même gate jwt_admin que le reste du fichier — pas de mécanisme neuf).
+  F. Un utilisateur NON-gestionnaire (org_role != 'admin', pas non plus
+     staff plateforme) reçoit 403 sur les deux routes /admin/*.
 
 Fixture jetable : un user + un projet créés directement en base (pas besoin
 du hub — le projet n'a pas de ad_hub_project_id, donc soft_delete_project

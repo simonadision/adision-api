@@ -248,3 +248,36 @@ def make_jwt_deps(get_conn):
     # On garde jwt_user_or_token comme alias pour la lisibilité des routes
     # de download (PDF / Excel), mais c'est exactement la même fonction.
     return jwt_user, jwt_user, jwt_admin, jwt_super_admin
+
+
+def make_jwt_org_admin(jwt_user):
+    """Fabrique une dependency FastAPI réservée aux GESTIONNAIRES (admin
+    d'ORGANISATION, "niveau 3") — PAS jwt_admin ci-dessus (staff PLATEFORME
+    Adision, un cran plus haut). Factory SÉPARÉE de make_jwt_deps plutôt
+    qu'un 5e élément dans son tuple : ~10 appelants déballent déjà ce tuple
+    positionnellement (`_, _, jwt_admin, _ = make_jwt_deps(...)`), en
+    ajouter un élément aurait cassé chacun d'eux. `jwt_user` (déjà bound à
+    get_conn par l'appelant via make_jwt_deps) suffit ici.
+
+    Trouvé en direct, 3 sept 2026 : la corbeille de projets Ad BUD
+    (admin_list_projets_supprimes/admin_restaurer_projet) réutilisait
+    jwt_admin par erreur — Simon (org_role='admin' réel côté hub) recevait
+    "Accès admin plateforme Adision requis" alors qu'un gestionnaire
+    d'organisation doit suffire ("niveau 3 = gestionnaire suffit"). Même
+    gate que isOrgAdmin côté frontend (App.jsx) pour son axe réel
+    (org_role) : org_role='admin' OU déjà admin plateforme (staff/
+    super_admin — un admin plateforme peut toujours agir comme gestionnaire
+    de n'importe quelle org).
+
+    NE VÉRIFIE PAS le rôle legacy `role` (contrairement à isOrgAdmin côté
+    écran, qui reste un simple gate d'AFFICHAGE, l'API tranche pour vrai) —
+    même hotfix sécurité 2026-07-02 que jwt_admin ci-dessus, même raison :
+    `role` legacy peut valoir 'super_admin' sur un compte d'org cliente
+    sans prouver aucun accès réel, jamais un raccourci d'escalade ici non
+    plus.
+    """
+    def jwt_org_admin(user: dict = Depends(jwt_user)) -> dict:
+        if user.get("org_role") != "admin" and user.get("platform_role") not in ("staff", "super_admin"):
+            raise HTTPException(status_code=403, detail="Accès gestionnaire (admin d'organisation) requis")
+        return user
+    return jwt_org_admin
