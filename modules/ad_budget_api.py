@@ -3693,19 +3693,57 @@ def register_ad_budget_routes(get_conn):
                   (user_id, organization_id, statut, notes,
                    pct_admin_conditions, pct_admin_architecture,
                    pct_admin_mecanique, pct_admin_excavation,
+                   pct_admin_conditions_mat, pct_admin_conditions_mo, pct_admin_conditions_st,
+                   pct_admin_architecture_mat, pct_admin_architecture_mo, pct_admin_architecture_st,
+                   pct_admin_mecanique_mat, pct_admin_mecanique_mo, pct_admin_mecanique_st,
+                   pct_admin_excavation_mat, pct_admin_excavation_mo, pct_admin_excavation_st,
                    ad_hub_project_id, client_id,
-                   arrondi_dollar, pct_admin_mode)
+                   arrondi_dollar, pct_admin_mode, regroupements)
                 SELECT %s, %s, statut, notes,
                        pct_admin_conditions, pct_admin_architecture,
                        pct_admin_mecanique, pct_admin_excavation,
+                       pct_admin_conditions_mat, pct_admin_conditions_mo, pct_admin_conditions_st,
+                       pct_admin_architecture_mat, pct_admin_architecture_mo, pct_admin_architecture_st,
+                       pct_admin_mecanique_mat, pct_admin_mecanique_mo, pct_admin_mecanique_st,
+                       pct_admin_excavation_mat, pct_admin_excavation_mo, pct_admin_excavation_st,
                        %s, client_id,
-                       arrondi_dollar, pct_admin_mode
+                       arrondi_dollar, pct_admin_mode, regroupements
                 FROM ad_budget.projets WHERE id = %s
                 RETURNING *
                 """,
                 (user["id"], user["organization_id"], int(new_hub_id), projet_id))
             new_projet = cur.fetchone()
             new_id = new_projet["id"]
+            # Simon, en direct, 3 sept 2026, capture à l'appui (projet
+            # "Renovation interieure d'unites de logements", 9 lots) : "je
+            # ne vois pas mes lots dans la copie dupliquee." Cause : les
+            # LOTS (ad_budget.lots) n'étaient jamais copiés, et lot_id sur
+            # budget_lignes était exclu SANS remplacement -- toute la
+            # structure par lot retombait dans un unique bloc "HORS LOT".
+            # On copie d'abord les lots (une ligne à la fois, RETURNING id,
+            # pour construire une correspondance FIABLE ancien -> nouveau,
+            # y compris si deux lots portent le même nom) puis on
+            # réassigne lot_id des lignes via cette correspondance.
+            _lot_map = {}
+            cur.execute(
+                "SELECT id, nom, nb_logements, ordre FROM ad_budget.lots"
+                " WHERE projet_id = %s ORDER BY id",
+                (projet_id,))
+            for _lot in cur.fetchall():
+                cur.execute(
+                    """
+                    INSERT INTO ad_budget.lots (projet_id, nom, nb_logements, ordre)
+                    VALUES (%s, %s, %s, %s) RETURNING id
+                    """,
+                    (new_id, _lot["nom"], _lot["nb_logements"], _lot["ordre"]))
+                _lot_map[_lot["id"]] = cur.fetchone()["id"]
+            if _lot_map:
+                _lot_case_sql = "CASE lot_id " + " ".join(
+                    "WHEN %s THEN %s" for _ in _lot_map) + " ELSE NULL END"
+                _lot_case_params = [v for pair in _lot_map.items() for v in pair]
+            else:
+                _lot_case_sql = "NULL"
+                _lot_case_params = []
             # Simon, en direct, 2 sept 2026, capture à l'appui (projet
             # dupliqué) : "les montant sous traitant n'est pas calculer. le
             # total est erroné." Cause : cette liste de colonnes omettait
@@ -3716,14 +3754,13 @@ def register_ad_budget_routes(get_conn):
             # l'INSERT -> le montant stocké est traité comme un résidu
             # périmé, jamais comme une vraie saisie) -- même chose pour le
             # mode CALCULÉ (qté × PU-ST), dont prix_unitaire_st manquait
-            # tout autant. Complété avec TOUT ce qui influence un total
+            # tout antant. Complété avec TOUT ce qui influence un total
             # affiché : les 7 drapeaux _override existants, prix_unitaire_st
             # (+ son propre override), la production (heures calculées),
             # l'ordre d'affichage, et les liens catalogue (Ad MAT/Ad TYP/Ad
             # VIU/contact sous-traitant) pour ne pas perdre leur traçabilité
-            # dans la copie. `lot_id` reste volontairement EXCLU : les lots
-            # sont propres à CHAQUE projet, un lot_id de la source pointerait
-            # vers un lot qui n'existe pas dans la copie.
+            # dans la copie. `lot_id` est désormais RÉASSIGNÉ via _lot_map
+            # (voir plus haut) au lieu d'être simplement omis.
             cur.execute(
                 """
                 INSERT INTO ad_budget.budget_lignes
@@ -3739,7 +3776,7 @@ def register_ad_budget_routes(get_conn):
                    item_id_ad_mat, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
                    source_typ_code, source_typ_snapshot_at,
                    source_viu_analysis_id, source_viu_item_id,
-                   production_valeur, production_unite, production_auto)
+                   production_valeur, production_unite, production_auto, lot_id)
                 SELECT %s, source_item_id, section, description, unite, prix_unitaire,
                        qte, ajustement_pct, note, actif, prix_unitaire_override,
                        heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
@@ -3752,10 +3789,11 @@ def register_ad_budget_routes(get_conn):
                        item_id_ad_mat, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
                        source_typ_code, source_typ_snapshot_at,
                        source_viu_analysis_id, source_viu_item_id,
-                       production_valeur, production_unite, production_auto
+                       production_valeur, production_unite, production_auto, """
+                + _lot_case_sql + """
                 FROM ad_budget.budget_lignes WHERE projet_id = %s
                 """,
-                (new_id, projet_id))
+                tuple([new_id] + _lot_case_params + [projet_id]))
             nb_lignes = cur.rowcount
             conn.commit()
         except Exception as e:
@@ -3833,19 +3871,57 @@ def register_ad_budget_routes(get_conn):
                   (user_id, organization_id, statut, notes,
                    pct_admin_conditions, pct_admin_architecture,
                    pct_admin_mecanique, pct_admin_excavation,
+                   pct_admin_conditions_mat, pct_admin_conditions_mo, pct_admin_conditions_st,
+                   pct_admin_architecture_mat, pct_admin_architecture_mo, pct_admin_architecture_st,
+                   pct_admin_mecanique_mat, pct_admin_mecanique_mo, pct_admin_mecanique_st,
+                   pct_admin_excavation_mat, pct_admin_excavation_mo, pct_admin_excavation_st,
                    ad_hub_project_id,
-                   arrondi_dollar, pct_admin_mode)
+                   arrondi_dollar, pct_admin_mode, regroupements)
                 SELECT %s, %s, statut, notes,
                        pct_admin_conditions, pct_admin_architecture,
                        pct_admin_mecanique, pct_admin_excavation,
+                       pct_admin_conditions_mat, pct_admin_conditions_mo, pct_admin_conditions_st,
+                       pct_admin_architecture_mat, pct_admin_architecture_mo, pct_admin_architecture_st,
+                       pct_admin_mecanique_mat, pct_admin_mecanique_mo, pct_admin_mecanique_st,
+                       pct_admin_excavation_mat, pct_admin_excavation_mo, pct_admin_excavation_st,
                        %s,
-                       arrondi_dollar, pct_admin_mode
+                       arrondi_dollar, pct_admin_mode, regroupements
                 FROM ad_budget.projets WHERE id = %s
                 RETURNING *
                 """,
                 (user["id"], user["organization_id"], int(new_hub_id), projet_id))
             new_projet = cur.fetchone()
             new_id = new_projet["id"]
+            # Simon, en direct, 3 sept 2026, capture à l'appui (projet
+            # "Renovation interieure d'unites de logements", 9 lots) : "je
+            # ne vois pas mes lots dans la copie dupliquee." Cause : les
+            # LOTS (ad_budget.lots) n'étaient jamais copiés, et lot_id sur
+            # budget_lignes était exclu SANS remplacement -- toute la
+            # structure par lot retombait dans un unique bloc "HORS LOT".
+            # Même correctif que /dupliquer : on copie d'abord les lots
+            # (une ligne à la fois, RETURNING id, pour construire une
+            # correspondance FIABLE ancien -> nouveau) puis on réassigne
+            # lot_id des lignes via cette correspondance.
+            _lot_map = {}
+            cur.execute(
+                "SELECT id, nom, nb_logements, ordre FROM ad_budget.lots"
+                " WHERE projet_id = %s ORDER BY id",
+                (projet_id,))
+            for _lot in cur.fetchall():
+                cur.execute(
+                    """
+                    INSERT INTO ad_budget.lots (projet_id, nom, nb_logements, ordre)
+                    VALUES (%s, %s, %s, %s) RETURNING id
+                    """,
+                    (new_id, _lot["nom"], _lot["nb_logements"], _lot["ordre"]))
+                _lot_map[_lot["id"]] = cur.fetchone()["id"]
+            if _lot_map:
+                _lot_case_sql = "CASE lot_id " + " ".join(
+                    "WHEN %s THEN %s" for _ in _lot_map) + " ELSE NULL END"
+                _lot_case_params = [v for pair in _lot_map.items() for v in pair]
+            else:
+                _lot_case_sql = "NULL"
+                _lot_case_params = []
             # Simon, en direct, 2 sept 2026, capture à l'appui (projet
             # dupliqué) : "les montant sous traitant n'est pas calculer. le
             # total est erroné." Cause : cette liste de colonnes omettait
@@ -3861,9 +3937,8 @@ def register_ad_budget_routes(get_conn):
             # (+ son propre override), la production (heures calculées),
             # l'ordre d'affichage, et les liens catalogue (Ad MAT/Ad TYP/Ad
             # VIU/contact sous-traitant) pour ne pas perdre leur traçabilité
-            # dans la copie. `lot_id` reste volontairement EXCLU : les lots
-            # sont propres à CHAQUE projet, un lot_id de la source pointerait
-            # vers un lot qui n'existe pas dans la copie.
+            # dans la copie. `lot_id` est désormais RÉASSIGNÉ via _lot_map
+            # (voir plus haut) au lieu d'être simplement omis.
             cur.execute(
                 """
                 INSERT INTO ad_budget.budget_lignes
@@ -3879,7 +3954,7 @@ def register_ad_budget_routes(get_conn):
                    item_id_ad_mat, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
                    source_typ_code, source_typ_snapshot_at,
                    source_viu_analysis_id, source_viu_item_id,
-                   production_valeur, production_unite, production_auto)
+                   production_valeur, production_unite, production_auto, lot_id)
                 SELECT %s, source_item_id, section, description, unite, prix_unitaire,
                        qte, ajustement_pct, note, actif, prix_unitaire_override,
                        heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
@@ -3892,10 +3967,11 @@ def register_ad_budget_routes(get_conn):
                        item_id_ad_mat, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
                        source_typ_code, source_typ_snapshot_at,
                        source_viu_analysis_id, source_viu_item_id,
-                       production_valeur, production_unite, production_auto
+                       production_valeur, production_unite, production_auto, """
+                + _lot_case_sql + """
                 FROM ad_budget.budget_lignes WHERE projet_id = %s
                 """,
-                (new_id, projet_id))
+                tuple([new_id] + _lot_case_params + [projet_id]))
             nb_lignes = cur.rowcount
             conn.commit()
         except Exception as e:
