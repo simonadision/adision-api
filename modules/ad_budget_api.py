@@ -1861,6 +1861,10 @@ def register_ad_budget_routes(get_conn):
         # remplacé par ce `scope` explicite. Voir _projets_scope_where.
         # Les projets d'une AUTRE organisation ne sont visibles dans AUCUN onglet.
         where, params = _projets_scope_where(user, scope)
+        # Corbeille — un projet soft-supprimé ne réapparaît dans AUCUNE liste
+        # par erreur. Se restaure uniquement via l'écran dédié (org_role admin,
+        # GET /admin/projets-supprimes + POST /admin/projets/{id}/restaurer).
+        where.append("p.supprime_le IS NULL")
         # Statut = PROPRE Ad BUD (cycle de vie local) -> filtre LOCAL, aucun appel hub.
         if statut:
             where.append("p.statut = %s")
@@ -1966,7 +1970,7 @@ def register_ad_budget_routes(get_conn):
                 ) AS nb_sections
             FROM ad_budget.projets p
             LEFT JOIN ad_budget.budget_lignes bl ON bl.projet_id = p.id
-            WHERE p.user_id = %s
+            WHERE p.user_id = %s AND p.supprime_le IS NULL
             GROUP BY p.id, p.ad_hub_project_id, p.updated_at
             ORDER BY p.updated_at DESC
             """,
@@ -3057,19 +3061,24 @@ def register_ad_budget_routes(get_conn):
         authorization: Optional[str] = Header(None),
         session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
     ):
+        # Corbeille (couche 1, 2026-09) — CE N'EST PLUS UN DELETE PHYSIQUE.
+        # Avant : DELETE FROM ad_budget.projets -> CASCADE -> budget_lignes
+        # perdues pour de bon, zéro récupération possible en cas d'erreur
+        # utilisateur. Maintenant : UPDATE supprime_le/supprime_par. Les
+        # budget_lignes ne sont JAMAIS touchées par ce endpoint : elles restent
+        # liées au projet, simplement invisibles parce que le projet parent
+        # est filtré des listes (voir _projets_scope_where et /projects/mine).
         # PHASE 3A — authentification + autorisation (écriture).
         _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        supprime_par = user.get("email") or (str(user.get("id")) if user.get("id") is not None else "inconnu")
         conn = get_conn()
         cur = conn.cursor()
-        # Les budget_lignes sont supprimées automatiquement (CASCADE).
-        # RETURNING ad_hub_project_id : on récupère le lien Ad HUB AVANT de
-        # perdre la row, pour soft-delete le master en aval (symétrie du fix
-        # create, Sprint C1). Sans ça, supprimer un projet hub-first laissait
-        # le master app_hub.projects vivant = orphelin (cf. fix create).
         cur.execute(
-            "DELETE FROM ad_budget.projets WHERE id = %s "
+            "UPDATE ad_budget.projets "
+            "SET supprime_le = now(), supprime_par = %s "
+            "WHERE id = %s AND supprime_le IS NULL "
             "RETURNING ad_hub_project_id",
-            (projet_id,),
+            (supprime_par, projet_id),
         )
         deleted = cur.fetchone()
         conn.commit()
@@ -3078,7 +3087,7 @@ def register_ad_budget_routes(get_conn):
 
         # Best-effort, APRÈS le commit local : si le projet était lié à un
         # master Ad HUB (mode A ou B), on le soft-delete aussi pour ne pas
-        # laisser d'orphelin. On log mais on ne re-raise pas — le DELETE BUD
+        # laisser d'orphelin. On log mais on ne re-raise pas — le "delete" BUD
         # a réussi, c'est ce qui compte pour l'utilisateur ; un master Ad HUB
         # résiduel reste auditable et nettoyable. Ordre (local puis hub) :
         # évite un lien cassé (hub soft-deleted mais local encore présent) si
@@ -3088,6 +3097,81 @@ def register_ad_budget_routes(get_conn):
             jwt_token = _extract_bearer(authorization, None, session_cookie)
             hub_service.soft_delete_project(jwt_token, ad_hub_project_id)
         return {"status": "deleted"}
+
+    # ══════════════════════════════════════════════════════════
+    # CORBEILLE (couche 1) — même gate que le reste des routes /admin/*.
+    # ══════════════════════════════════════════════════════════
+
+    @router.get("/admin/projets-supprimes")
+    def admin_list_projets_supprimes(_admin=Depends(jwt_admin)):
+        """Liste des projets dans la corbeille. Identité (nom/client) lue
+        depuis hub_identity_snapshot — le MIROIR local, pas un appel hub :
+        cette liste doit rester consultable même hub indisponible, et un
+        projet supprimé peut avoir un lien hub lui-même déjà soft-supprimé."""
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        cur.execute(
+            "SELECT id, ad_hub_project_id, statut, supprime_le, supprime_par, "
+            "hub_identity_snapshot "
+            "FROM ad_budget.projets "
+            "WHERE supprime_le IS NOT NULL "
+            "ORDER BY supprime_le DESC"
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        out = []
+        for r in rows:
+            snap = r.get("hub_identity_snapshot") or {}
+            if isinstance(snap, str):
+                try:
+                    snap = json.loads(snap)
+                except Exception:  # noqa: BLE001
+                    snap = {}
+            out.append({
+                "id": r["id"],
+                "ad_hub_project_id": r.get("ad_hub_project_id"),
+                "statut": r.get("statut"),
+                "nom": snap.get("nom"),
+                "nom_client": snap.get("nom_client"),
+                "supprime_le": r.get("supprime_le"),
+                "supprime_par": r.get("supprime_par"),
+            })
+        return out
+
+    @router.post("/admin/projets/{projet_id}/restaurer")
+    def admin_restaurer_projet(projet_id: int, _admin=Depends(jwt_admin)):
+        """Sort un projet de la corbeille. UPDATE MINIMAL — seulement les deux
+        colonnes de la corbeille, jamais une reconstruction de ligne complète
+        (même famille de risque que le bug déjà trouvé 2x sur ce dépôt : une
+        liste de colonnes copiée-collée qui diverge silencieusement, cf.
+        dupliquer_projet/reviser_projet_version — montants sous-traitants
+        manquants). Le budget et les lignes n'ont jamais été touchés par le
+        soft-delete : ils réapparaissent tels quels, rien à reconstruire.
+
+        Ne restaure PAS symétriquement la fiche Ad HUB : aucune route de
+        restauration n'existe côté hub (seulement un script manuel,
+        adision-app-api/scripts/restaurer_projets_supprimes.py). Limite
+        documentée, pas bloquante — voir le rapport de livraison."""
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        cur.execute(
+            "UPDATE ad_budget.projets "
+            "SET supprime_le = NULL, supprime_par = NULL "
+            "WHERE id = %s AND supprime_le IS NOT NULL "
+            "RETURNING id",
+            (projet_id,),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+        if not row:
+            raise HTTPException(
+                status_code=404,
+                detail="Projet introuvable dans la corbeille",
+            )
+        return {"status": "restaure", "id": projet_id}
 
     @router.get("/projets/{projet_id}/export-for-con")
     def export_projet_for_con(projet_id: int, user=Depends(jwt_user),
