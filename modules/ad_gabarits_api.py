@@ -269,6 +269,38 @@ def register_ad_gabarits_routes(get_conn):
         out = _fetch_csi_filtered(" 00 00")
         return {"divisions": out if out is not None else []}
 
+    # Sections fines, TOUT code à 3 segments (générique "XX YY 00" ET
+    # spécifique "XX YY ZZ" avec ZZ != "00", ex. "02 03 01" -- Démolition
+    # sélective) -- brief Simon, 8 sept 2026, en direct : "la description
+    # 02 03 est manquante Bug" (Récapitulatif, App.jsx). Root cause :
+    # /csi-sections (suffix " 00") ne renvoie QUE les codes génériques ;
+    # un code officiel comme "02 03 01" (pas de "02 03 00" correspondant
+    # dans la taxonomie MasterFormat) n'y apparaît JAMAIS -- alors que
+    # getPrefix() (App.jsx, csiPrefixKeys.js) réduit TOUT code CSI à 2
+    # segments ("02 03 01" -> "02 03") pour le regroupement du Récapitulatif
+    # et le "niveau 2" du tableau budget principal, quel que soit le 3e
+    # segment. RÉSERVÉ à la RÉSOLUTION DE TITRE (App.jsx, csiSectionLabels) --
+    # PAS au sélecteur CsiSectionSelect (GabaritEditorPage.jsx), qui garde
+    # /csi-sections tel quel (liste volontairement plus courte, générique).
+    @router.get("/csi-sections-titres")
+    def list_csi_sections_titres(user=Depends(jwt_user)):
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                r = client.get(f"{EST_API_URL}/reference/csi-sections")
+            r.raise_for_status()
+            raw = r.json().get("csi_sections", [])
+        except Exception as e:  # noqa: BLE001 — dégradation gracieuse
+            logger.warning("csi (titres) : taxonomie Ad EST injoignable : %s", e)
+            return {"sections": []}
+        out = []
+        for s in raw:
+            code = (s.get("code") or "").strip()
+            # N'importe quel code CSI à EXACTEMENT 3 segments de 2 chiffres
+            # ("AA BB CC") -- générique (CC="00") ou spécifique (CC!="00").
+            if re.match(r"^\d\d \d\d \d\d$", code):
+                out.append({"code": code, "libelle": s.get("label_fr") or ""})
+        return {"sections": out}
+
     # ─── Titres personnalisés de section CSI ──────────────────────────────
     #
     # LE CODE CSI EST L'IDENTITÉ, IL NE SE MODIFIE JAMAIS. Ces routes ne
