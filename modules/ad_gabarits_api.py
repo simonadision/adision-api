@@ -35,6 +35,7 @@ from modules.ad_budget_api import (
     _load_and_authorize_projet,
     _next_free_csi_suffix,
 )
+from modules.taux_horaires_api import _resolve_taux_default
 
 logger = logging.getLogger(__name__)
 
@@ -225,12 +226,25 @@ def register_ad_gabarits_routes(get_conn):
                     )
 
     def _insert_manual(cur, projet_id, section, description):
-        """Ligne manuelle dans un budget : valeurs vides (à remplir)."""
+        """Ligne manuelle dans un budget : valeurs vides (à remplir), taux
+        horaire par défaut résolu depuis la division CSI -- MÊME logique que
+        la création manuelle "+ Ligne" (_resolve_taux_default,
+        taux_horaires_api.py), pas un 0 codé en dur séparé. Brief Simon,
+        8 sept 2026, en direct : "quand un nouvelle item est ajouter et
+        aucun taux horaire nest défini, appliquer le taux charpentier
+        menuisier compagnon par defaut" -- une ligne manuelle insérée depuis
+        un gabarit est un "nouvel item" comme un autre, elle doit recevoir
+        le même défaut division-par-division (voir la migration
+        sprint_csi_division_02_32_33_charpentier_default.sql), pas un 0
+        systématique. `cur.connection` (psycopg3) : pas de nouvelle
+        connexion, réutilise celle de la transaction en cours.
+        """
+        taux = _resolve_taux_default(section, cur.connection)
         cur.execute(
             "INSERT INTO ad_budget.budget_lignes "
             "(projet_id, section, description, unite, prix_unitaire, qte, actif, taux_horaire) "
-            "VALUES (%s, %s, %s, 'global', 0, 0, TRUE, 0)",
-            (projet_id, section, description),
+            "VALUES (%s, %s, %s, 'global', 0, 0, TRUE, %s)",
+            (projet_id, section, description, taux if taux is not None else 0),
         )
 
     # ─── Taxonomie CSI pour les sélecteurs de l'éditeur (2 niveaux) ───────
