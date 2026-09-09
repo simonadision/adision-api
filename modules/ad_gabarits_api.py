@@ -78,10 +78,20 @@ def register_ad_gabarits_routes(get_conn):
     def _normaliser_regroupements(data):
         """Valide/nettoie la liste de regroupements reçue du client — une
         liste vide est valide (aucun regroupement, comportement d'avant).
-        Chaque entrée : {nom, divisions: [code, …], apres}. Une entrée sans
-        nom OU sans aucune division retenue est écartée plutôt que rejetée :
-        un regroupement à moitié rempli ne doit pas bloquer l'enregistrement
-        du reste du gabarit.
+        Chaque entrée : {nom, divisions: [code, …], sections: [code, …],
+        apres}. Une entrée sans nom, ou sans AUCUN membre (ni division ni
+        section), est écartée plutôt que rejetée : un regroupement à moitié
+        rempli ne doit pas bloquer l'enregistrement du reste du gabarit.
+
+        `sections` (9 septembre 2026, Simon : « Sous total que je viens de
+        sélectionner doit pouvoir devenir une ligne et je dois pouvoir éditer
+        le titre ») : membres à la granularité SECTION, choisis par sélection
+        dans le Récapitulatif. `divisions` ne savait grouper que des divisions
+        entières ("09", "22") — impossible d'y exprimer « 09.1 + 09.2 » sans
+        avaler tout le 09, ni « 02 56 » seul. Les deux listes COEXISTENT dans
+        une même entrée et s'additionnent : un sous-total existant, qui n'a
+        que `divisions`, continue de fonctionner à l'identique et ressort tel
+        quel — aucune migration, aucun recalcul.
 
         `apres` : le NUMÉRO (code CSI) de la division après laquelle ce
         regroupement s'affiche dans la liste des divisions du gabarit, ou
@@ -108,7 +118,13 @@ def register_ad_gabarits_routes(get_conn):
             divisions = [
                 (d or "").strip() for d in (r.get("divisions") or []) if (d or "").strip()
             ]
-            if not nom or not divisions:
+            sections = [
+                (c or "").strip() for c in (r.get("sections") or []) if (c or "").strip()
+            ]
+            # Un membre SUFFIT, quelle que soit sa granularité. Exiger
+            # `divisions` comme avant rejetterait en silence tout sous-total
+            # créé depuis une sélection de sections.
+            if not nom or (not divisions and not sections):
                 continue
             apres = r.get("apres")
             apres = apres.strip()[:20] if isinstance(apres, str) and apres.strip() else None
@@ -119,8 +135,8 @@ def register_ad_gabarits_routes(get_conn):
                 else None
             )
             out.append({
-                "nom": nom[:200], "divisions": divisions, "apres": apres,
-                "division_liee": division_liee,
+                "nom": nom[:200], "divisions": divisions, "sections": sections,
+                "apres": apres, "division_liee": division_liee,
             })
         return out
 
