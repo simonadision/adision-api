@@ -257,6 +257,18 @@ def _validate_projet_fields(data: dict, current_statut: Optional[str] = None) ->
                     status_code=400,
                     detail="La superficie doit être supérieure à 0",
                 )
+    if "duree_semaines" in data:
+        v = data["duree_semaines"]
+        if v not in (None, ""):
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="Durée de chantier invalide")
+            if fv <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="La durée du chantier doit être supérieure à 0",
+                )
     if "date_adjudication" in data and data["date_adjudication"] not in (None, ""):
         # Statut effectif après ce PUT/POST : valeur du payload si présente,
         # sinon valeur actuelle en BD.
@@ -3032,6 +3044,10 @@ def register_ad_budget_routes(get_conn):
             "mobilisation", "surface_plancher",
             "hauteur_cloisons", "longueur_cloisons",
             "categorie_affichage",
+            # Durée du chantier (bulle MAIN-D'ŒUVRE) — vider le champ à
+            # l'écran doit EFFACER l'indicateur, pas écrire 0 : 0 ferait
+            # une division par zéro et le CHECK BD le refuserait.
+            "duree_semaines",
         }
         for field in [
             "nom", "client", "adresse", "description", "statut",
@@ -3068,6 +3084,12 @@ def register_ad_budget_routes(get_conn):
             # 31 août 2026 — pastille de tri « Projet en cours » / « Projet
             # archivé » sur la page Projets. NULL = pas de catégorie.
             "categorie_affichage",
+            # 9 septembre 2026 — durée du chantier en semaines, saisie dans
+            # la bulle MAIN-D'ŒUVRE du récap. Champ PROPRE à Ad BUD (pas
+            # une donnée d'identité Ad HUB) et volontairement HORS de
+            # SNAPSHOT_AFFECTING_FIELDS : c'est une hypothèse de
+            # planification, elle ne déplace aucun montant.
+            "duree_semaines",
         ]:
             if field in data:
                 v = data[field]
