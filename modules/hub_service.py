@@ -312,9 +312,25 @@ _HUB_IDENTITY_MAP = {
     "contact_client": "client_contact_nom",
     "email_client": "client_email",
     "telephone_client": "client_telephone",
-    "contact_entrepreneur": "entrepreneur_nom",
-    "email_entrepreneur": "entrepreneur_email",
-    "telephone_entrepreneur": "entrepreneur_telephone",
+    # ENTREPRENEUR — brief Simon, 9 septembre 2026, capture du bloc à l'appui :
+    # « le contact de l'entrepreneur = personne ressources, avec ses
+    # informations », puis « Donc ici Simon Hachey avec mon courriel et # de
+    # téléphone ». Le rapport imprimait « Contact entrepreneur : Contracta »,
+    # c'est-à-dire le nom de l'ENTREPRISE sous une étiquette qui annonce une
+    # PERSONNE, avec l'adresse générique info@ et la ligne principale. Ces
+    # trois clés visent maintenant la personne ressource ; le nom de
+    # l'entreprise garde sa propre clé (entreprise_entrepreneur) et n'est donc
+    # pas perdu — il est simplement à sa place.
+    #
+    # Le REPLI sur les champs d'entreprise est appliqué juste après le mapping
+    # (voir map_project_to_identity) : un projet dont la personne ressource
+    # n'est pas renseignée continue d'afficher le contact d'entreprise plutôt
+    # qu'un « — ». Aucun rapport existant ne perd d'information.
+    "contact_entrepreneur": "entrepreneur_pr_nom",
+    "fonction_entrepreneur": "entrepreneur_pr_fonction",
+    "email_entrepreneur": "entrepreneur_pr_email",
+    "telephone_entrepreneur": "entrepreneur_pr_telephone",
+    "entreprise_entrepreneur": "entrepreneur_nom",
     "type_batiment": "type_batiment",
     "superficie_m2": "superficie_m2",
     "date_adjudication": "date_adjudication",
@@ -367,6 +383,18 @@ def map_project_to_identity(hub_project: dict) -> dict:
     out = {local: p.get(hub_field) for local, hub_field in _HUB_IDENTITY_MAP.items()}
     rc = p.get("region")
     out["region"] = _REGION_CODE_TO_LABEL.get(rc, rc)
+    # REPLI personne ressource -> entreprise. Les trois clés ci-dessus visent la
+    # personne ressource depuis le 9 septembre 2026 ; un projet saisi avant, ou
+    # dont la personne ressource n'est pas remplie, doit continuer d'imprimer le
+    # contact d'entreprise. Un rapport qui perd une coordonnee au profit d'un
+    # « — » serait une régression silencieuse, visible seulement du client.
+    def _vide(v):
+        return v is None or (isinstance(v, str) and not v.strip())
+    for cle, repli in (("contact_entrepreneur", "entrepreneur_nom"),
+                       ("email_entrepreneur", "entrepreneur_email"),
+                       ("telephone_entrepreneur", "entrepreneur_telephone")):
+        if _vide(out.get(cle)):
+            out[cle] = p.get(repli)
     return out
 
 
