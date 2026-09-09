@@ -1332,13 +1332,42 @@ def register_ad_gabarits_routes(get_conn):
                             # unité) est préservé → quand l'user saisit une qté, MAT
                             # scale live et MO/ST sont re-snapshotés via apply-typ.
                             m = _map_typ_to_budget_cols(typ, 0)
-                            # section = CODE CSI COMPLET de l'item (m["section"] =
-                            # typ["code"], ex. « 06 40 00.01 »), comme apply-typ —
-                            # PAS le code de sous-section du gabarit (sec_code).
-                            # Le regroupement budget dérive division/sous-section
-                            # des 4 premiers chiffres → le suffixe « .01 » n'altère
-                            # pas le rangement. Fallback sec_code si m["section"] vide.
-                            line_section = m["section"] or sec_code
+                            # ═══════════════════════════════════════════════
+                            # LA SOUS-SECTION DU GABARIT GAGNE (9 sept 2026)
+                            # ═══════════════════════════════════════════════
+                            # Simon : « pourquoi j'ai encore resultat communs en
+                            # plomberie alors que j'ai changé le gabarit ... les
+                            # changements doivent être toujours appliqués ».
+                            #
+                            # La ligne prenait le code CSI de l'ITEM catalogue
+                            # (m["section"] = typ["code"]) plutôt que celui de la
+                            # sous-section où l'utilisateur l'avait rangée. Le
+                            # commentaire d'origine justifiait ça par « le
+                            # regroupement dérive des 4 premiers chiffres, donc le
+                            # suffixe .01 n'altère pas le rangement » — vrai pour
+                            # le SUFFIXE, faux pour le PRÉFIXE.
+                            #
+                            # Cas réel : sous-section « 22 10 00 — Tuyauterie et
+                            # raccords de plomberie », contenant les items
+                            # « 22 05 00.01 » et « 22 20 00.01 ». Les 4 premiers
+                            # chiffres ne sont PAS ceux de la sous-section : les
+                            # lignes atterrissaient dans « 22 05 » et « 22 20 »,
+                            # et le projet affichait « Résultats communs pour la
+                            # plomberie » — un titre MasterFormat que Simon n'a
+                            # jamais choisi — au lieu de sa propre sous-section.
+                            # Réorganiser le gabarit ne changeait donc rien.
+                            #
+                            # L'ORGANISATION DU GABARIT EST UN CHOIX, pas un
+                            # accident : c'est elle qui range, pas le catalogue.
+                            # Rien n'est perdu — le code catalogue reste sur la
+                            # ligne dans `source_typ_code` (colonne dédiée, lue
+                            # par ⟳ re-tarif et apply-typ).
+                            #
+                            # apply-typ garde son comportement : piocher un item
+                            # DIRECTEMENT dans le budget n'a aucune sous-section
+                            # de référence, le code de l'item est alors la seule
+                            # information disponible.
+                            line_section = sec_code or m["section"]
                             # Sprint PU_ST référence Ad TYP — pré-remplissage à
                             # l'insertion gabarit. override = FALSE (héritage
                             # carnet). Le mode COMPUTED côté Ad BUD prend le
