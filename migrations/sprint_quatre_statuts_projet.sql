@@ -26,9 +26,33 @@
 -- est écrite quand même, pour les projets créés avant ce jour dans d'autres
 -- environnements et pour rendre la règle lisible.
 
--- 1. Le CHECK d'abord : sans ça l'UPDATE serait refusé par l'ancienne
+-- 1. LES CHECKS D'ABORD : sans ça l'UPDATE serait refusé par l'ancienne
 --    contrainte, qui ne connaît ni « en_soumission » ni « perdu ».
+--
+--    INCIDENT DU 9 SEPTEMBRE 2026, 17 h — cette migration a fait tomber
+--    api-bud.adision.ca (502, « Connexion au serveur impossible… » dans
+--    Ad BUD), pour la MÊME raison que sa jumelle 175 côté Ad HUB une heure
+--    plus tôt. Le détail qui a coûté les deux fois :
+--
+--    la contrainte sur `statut` s'appelle `projet_statut_check` — au
+--    SINGULIER, alors que la table s'appelle `projets`. Déclarée en ligne
+--    dans le CREATE TABLE d'origine, Postgres l'a nommée d'après le nom que
+--    la table portait ALORS ; la table a été renommée depuis, pas la
+--    contrainte. Son nom n'est donc devinable NI par la convention
+--    (`_chk` vs `_check`) NI par le nom actuel de la table.
+--
+--    L'étape 5 plus bas affirmait « il n'en avait AUCUN jusqu'ici ». C'était
+--    faux, et le `IF EXISTS` a rendu l'erreur muette : le DROP ne trouvait
+--    rien, ne levait rien, et l'UPDATE juste en dessous violait une
+--    contrainte toujours vivante. Migration en erreur, `_bootstrap_db`
+--    relève, l'API ne démarre pas du tout.
+--
+--    RÈGLE : avant de remplacer une contrainte, lire son vrai nom dans
+--    pg_constraint. Jamais le déduire.
 ALTER TABLE ad_budget.projets DROP CONSTRAINT IF EXISTS projets_categorie_affichage_chk;
+ALTER TABLE ad_budget.projets DROP CONSTRAINT IF EXISTS projet_statut_check;
+ALTER TABLE ad_budget.projets DROP CONSTRAINT IF EXISTS projets_statut_check;
+ALTER TABLE ad_budget.projets DROP CONSTRAINT IF EXISTS projets_statut_chk;
 
 -- 2. Les statuts.
 UPDATE ad_budget.projets SET statut = 'en_soumission' WHERE statut = 'brouillon';
@@ -47,10 +71,11 @@ ALTER TABLE ad_budget.projets
 --    première création.
 ALTER TABLE ad_budget.projets ALTER COLUMN statut SET DEFAULT 'en_soumission';
 
--- 5. Garde-fou sur le statut lui-même. Il n'en avait AUCUN jusqu'ici : la
---    validation vivait uniquement côté application (ALLOWED_STATUTS). Une
---    écriture directe en base pouvait donc y poser n'importe quoi.
-ALTER TABLE ad_budget.projets DROP CONSTRAINT IF EXISTS projets_statut_chk;
+-- 5. Garde-fou sur le statut lui-même. Il en avait DÉJÀ un, `projet_statut_check`
+--    (les cinq anciennes valeurs) — contrairement à ce que cette étape a
+--    d'abord affirmé, et c'est précisément ce qui a fait tomber l'API : voir
+--    l'incident décrit à l'étape 1, où les anciens noms sont maintenant
+--    supprimés, AVANT les UPDATE.
 ALTER TABLE ad_budget.projets
   ADD CONSTRAINT projets_statut_chk
   CHECK (statut IN ('en_soumission', 'en_cours', 'perdu', 'archive'));
