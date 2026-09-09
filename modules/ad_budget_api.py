@@ -154,7 +154,28 @@ def _frca_num(value):
     return f"{v:,.2f}".replace(",", " ").replace(".", ",")
 
 # === Sprint A : whitelists pour validation des champs projet ===
-ALLOWED_STATUTS = {"brouillon", "adjuge", "complet", "perdu", "archive"}
+# QUATRE STATUTS, UN SEUL VOCABULAIRE (9 septembre 2026, decision Simon).
+#
+# « Les statuts sont maintenant : Projet en soumission, projet en cours et
+# projet archive. Partout. par defaut. » -- puis, devant la perte de la
+# distinction gagne/perdu qu'imposaient trois valeurs : « Ajouter un onglet
+# projet perdu. »
+#
+# Le quatrieme statut n'est pas un ornement : sans lui, un projet PERDU
+# deviendrait « archive » au meme titre qu'un projet simplement range, et le
+# taux de reussite d'Ad ANA (ViewByClient) n'aurait plus rien a lire.
+#
+# MEME VOCABULAIRE que categorie_affichage (les onglets de la page Projets) :
+# les deux champs disaient deja la meme chose dans deux langues differentes.
+# Ils ne sont pas fusionnes ici -- l'un est le statut metier, l'autre le
+# rangement visuel glissable -- mais ils parlent enfin pareil.
+#
+# Correspondance appliquee par la migration :
+#   brouillon                       -> en_soumission
+#   adjuge, complet                 -> en_cours      (regle de Simon)
+#   perdu                           -> perdu
+#   archive                         -> archive
+ALLOWED_STATUTS = {"en_soumission", "en_cours", "perdu", "archive"}
 ALLOWED_TYPES_BATIMENT = {
     "residentiel", "commercial", "institutionnel", "industriel", "mixte",
 }
@@ -189,7 +210,10 @@ HUB_REGION_CODE_TO_LABEL = {
     "monteregie": "Montérégie",
     "centre_du_quebec": "Centre-du-Québec",
 }
-DATE_ADJ_ALLOWED_FOR_STATUTS = {"adjuge", "complet", "perdu"}
+# Une date d'adjudication n'a de sens qu'une fois le sort du projet connu :
+# gagne (en_cours) ou perdu. Pas en soumission -- rien n'est encore adjuge --
+# ni sur un projet simplement archive.
+DATE_ADJ_ALLOWED_FOR_STATUTS = {"en_cours", "perdu"}
 
 # Brief 31 août 2026 — pastilles de tri sur la page Projets d'Ad BUD,
 # glisser-déposer. NULL = aucune catégorie (défaut à la naissance du projet).
@@ -199,14 +223,16 @@ DATE_ADJ_ALLOWED_FOR_STATUTS = {"adjuge", "complet", "perdu"}
 # voit seulement les projets non classé") -- chaque pastille devient un
 # FILTRE EXCLUSIF (cliquer = ne montrer que cette catégorie), la page
 # principale ne montre plus que categorie_affichage IS NULL.
-ALLOWED_CATEGORIES_AFFICHAGE = {"en_cours", "archive", "en_soumission"}
+# Quatrieme onglet « Projet perdu » (Simon, 9 septembre 2026 : « Ajouter un
+# onglet projet perdu »). Meme vocabulaire que ALLOWED_STATUTS ci-dessus.
+ALLOWED_CATEGORIES_AFFICHAGE = {"en_soumission", "en_cours", "perdu", "archive"}
 
 # === Sprint B : statuts qui figent le budget (snapshot dans app_ana) ===
 # Quand un projet bascule depuis un statut hors de ce set vers un statut dedans,
 # le hook PUT /projets/{id} declenche la creation d'un snapshot consomme par
 # Ad ANA. Note : le set est identique a DATE_ADJ_ALLOWED_FOR_STATUTS, mais
 # semantiquement different (figement vs UI date picker), donc constante separee.
-DEFINITIVE_STATUSES = {"adjuge", "complet", "perdu"}
+DEFINITIVE_STATUSES = {"en_cours", "perdu"}
 
 # Brief 5a — IDENTITÉ PROJET = source unique Ad HUB. Ces champs sont REFUSÉS au
 # PATCH Ad BUD (403) : ils se modifient UNIQUEMENT dans Ad HUB. Ils restent lisibles
