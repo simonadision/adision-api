@@ -221,6 +221,22 @@ _HUB_OWNED_BUD_FIELDS = {
 }
 
 
+def _est_zero(valeur) -> bool:
+    """Un taux « vide » — ni renseigné, ni zéro, ni une chaîne vide.
+
+    Le tableau budget envoie toujours un NOMBRE (normalizeNumber côté écran),
+    donc « pas de taux » arrive sous la forme `0`, jamais `None`. Traiter les
+    deux pareil est ce qui rend le défaut réellement applicable depuis
+    l'écran.
+    """
+    if valeur is None:
+        return True
+    try:
+        return float(valeur) == 0.0
+    except (TypeError, ValueError):
+        return True
+
+
 def _validate_projet_fields(data: dict, current_statut: Optional[str] = None) -> None:
     """Valide les champs Sprint A dans `data`. Lève HTTPException 400 si invalide.
 
@@ -6387,12 +6403,18 @@ def register_ad_budget_routes(get_conn):
             unite = data.get("unite", "global")
             prix_unitaire = data.get("prix_unitaire", 0)
 
-        # D5 — auto-fill du taux horaire par défaut. On ne l'applique QUE si
-        # l'appelant n'a pas fourni de taux explicite (ne jamais écraser une
-        # valeur saisie). _resolve_taux_default -> None (division non mappée
-        # ou section vide) => 0.
+        # D5 — auto-fill du taux horaire par défaut.
+        #
+        # ZÉRO COMPTE COMME ABSENT (9 septembre 2026). Le test ne portait que
+        # sur `None`, or le tableau budget envoie TOUJOURS un nombre —
+        # `normalizeNumber(edit.tauxHoraire ?? ligne.taux_horaire ?? 0)`, donc
+        # `0` quand rien n'est saisi. Le défaut n'était donc JAMAIS appliqué
+        # depuis l'écran : chaque ligne créée là partait à 0 $/h, et ses heures
+        # ne coûtaient rien dans la soumission.
+        #
+        # Un taux saisi > 0 reste intouchable — on ne remplace que le vide.
         taux_horaire = data.get("taux_horaire")
-        if taux_horaire is None:
+        if taux_horaire is None or _est_zero(taux_horaire):
             resolved = _resolve_taux_default(section, conn)
             taux_horaire = resolved if resolved is not None else 0
 
@@ -7105,6 +7127,37 @@ def register_ad_budget_routes(get_conn):
                 data["sous_traitant_type"] = None
         conn = get_conn()
         cur = conn.cursor()
+        # TAUX HORAIRE JAMAIS À 0 À LA MODIFICATION (9 septembre 2026).
+        # Simon : « toutes les lignes, modifiees ou ajoutees sans taux horaire
+        # doivent prendre le taux horaire charpentier menuisier compagnon par
+        # defaut ... actuellement j'edite des materiaux et je n'ai pas de taux
+        # donc ma main d'oeuvre reste a 0$ === tres dangereux. »
+        #
+        # La création avait déjà son auto-fill ; la MODIFICATION n'en avait
+        # aucun. Éditer un prix de matériaux sur une ligne dont le taux était
+        # resté à 0 la laissait à 0 — ses heures ne coûtaient rien dans la
+        # soumission, sans le moindre signe à l'écran.
+        #
+        # On ne touche QUE le vide : un taux > 0, saisi ou déjà en base, n'est
+        # jamais remplacé. La section prise pour résoudre la division est celle
+        # du PUT si elle change, sinon celle en base — sinon déplacer une ligne
+        # d'une division à l'autre résoudrait sur l'ancienne.
+        if "taux_horaire" in data and _est_zero(data.get("taux_horaire")):
+            cur_sec = conn.cursor(row_factory=dict_row)
+            try:
+                cur_sec.execute(
+                    "SELECT section FROM ad_budget.budget_lignes "
+                    "WHERE id = %s AND projet_id = %s",
+                    (ligne_id, projet_id),
+                )
+                _row_sec = cur_sec.fetchone()
+            finally:
+                cur_sec.close()
+            _section = data.get("section") or (_row_sec or {}).get("section")
+            _resolu = _resolve_taux_default(_section, conn)
+            if _resolu is not None:
+                data["taux_horaire"] = _resolu
+
         fields = []
         values = []
         for field in [

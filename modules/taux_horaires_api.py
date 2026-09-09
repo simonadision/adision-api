@@ -71,6 +71,40 @@ class CsiMappingPatch(BaseModel):
 # Helper — résolution du taux par défaut depuis une section CSI
 # ─────────────────────────────────────────────────────────────────────────
 
+# Métier de repli quand la division n'est mappée nulle part — décision Simon,
+# 9 septembre 2026 : « toutes les lignes, modifiees ou ajoutees sans taux
+# horaire doivent prendre le taux horaire charpentier menuisier compagnon par
+# defaut ». Un taux à 0 sur une ligne qui a des heures rend la main-d'œuvre
+# GRATUITE dans la soumission, sans le moindre signe à l'écran. Ses mots :
+# « tres dangereux ».
+METIER_REPLI = "CHARPENTIER_C"
+
+
+def _division_csi(csi_section):
+    """Division MasterFormat (2 chiffres) d'une section, quelle que soit sa forme.
+
+    `csi_division` est stocké sur 2 CHIFFRES ("06"). Prendre les 2 premiers
+    caractères de la section marchait pour « 06 40 00 » mais PAS pour
+    « 6 11 00.01 » — écriture réelle trouvée en production, sans zéro devant :
+    on en tirait « 6 » (espace comprise), qui ne correspond à aucune division,
+    donc aucun taux, donc 0 $ de main-d'œuvre. On extrait maintenant les
+    chiffres de tête et on complète à 2.
+    """
+    if not csi_section:
+        return None
+    tete = ""
+    for c in str(csi_section).strip():
+        if c.isdigit():
+            tete += c
+            if len(tete) == 2:
+                break
+        else:
+            break
+    if not tete:
+        return None
+    return tete.zfill(2)
+
+
 def _resolve_taux_default(csi_section: Optional[str], conn) -> Optional[Decimal]:
     """Résout le taux horaire par défaut d'une section MasterFormat via sa
     division (2 premiers caractères).
@@ -91,21 +125,29 @@ def _resolve_taux_default(csi_section: Optional[str], conn) -> Optional[Decimal]
     _load_taux_default_map (variante « batch », 1 requête pour les N lignes
     d'un push). Garder la logique de résolution synchronisée entre les deux.
     """
-    if not csi_section:
-        return None
-    division = csi_section.strip()[:2]
-    if len(division) < 2:
-        return None
+    division = _division_csi(csi_section)
     cur = conn.cursor(row_factory=dict_row)
     try:
+        if division:
+            cur.execute(
+                """
+                SELECT t.taux_col17
+                FROM ad_budget.csi_division_default_metier m
+                JOIN ad_budget.taux_horaires t ON t.id = m.taux_id
+                WHERE m.csi_division = %s AND t.actif = TRUE
+                """,
+                (division,),
+            )
+            row = cur.fetchone()
+            if row:
+                return row["taux_col17"]
+        # REPLI : division absente, illisible, ou non mappée. On ne rend plus
+        # None (qui devenait 0 chez tous les appelants) — un taux nul est un
+        # coût de main-d'œuvre nul, jamais ce que veut dire « je ne sais pas ».
         cur.execute(
-            """
-            SELECT t.taux_col17
-            FROM ad_budget.csi_division_default_metier m
-            JOIN ad_budget.taux_horaires t ON t.id = m.taux_id
-            WHERE m.csi_division = %s AND t.actif = TRUE
-            """,
-            (division,),
+            "SELECT taux_col17 FROM ad_budget.taux_horaires "
+            "WHERE code = %s AND actif = TRUE",
+            (METIER_REPLI,),
         )
         row = cur.fetchone()
     finally:
