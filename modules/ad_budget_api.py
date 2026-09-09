@@ -347,7 +347,48 @@ def _persist_hub_identity_snapshot(cur, projet_id, identity: dict) -> None:
         print(f"[hub_identity_snapshot] persist échec projet={projet_id}: {e}", flush=True)
 
 
-def _build_client_entrepreneur_header(total_w, ident: dict):
+def _fmt_date_ident(v):
+    """Date d'identité -> "AAAA-MM-JJ". Vide -> "" (le tiret gris est posé par
+    l'appelant). Partagé par le bloc CLIENT/ENTREPRENEUR et le bloc de dates."""
+    if v is None or v == "":
+        return ""
+    if hasattr(v, "strftime"):
+        return v.strftime("%Y-%m-%d")
+    return str(v)
+
+
+def _field_line_ident(label, value):
+    """« <b>label</b> : valeur », tiret gris si vide. MÊME rendu que fieldLine
+    côté jsPDF (clientEntrepreneurBlock.js) — c'est cette égalité que le
+    cliquet de fidélité vérifie à chaque push."""
+    if value:
+        return f"<b>{label}</b> : {value}"
+    return f"<b>{label}</b> : <font color='#94a3b8'>—</font>"
+
+
+def _build_dates_projet_para(ident: dict):
+    """Les QUATRE dates/repères du projet, en un Paragraph autonome.
+
+    Brief Simon, 9 septembre 2026, capture de l'en-tête à l'appui : « plus
+    simple, inscrit la date du jour, numéro de projet, date de début, date de
+    fin à côté du titre dans l'espace libre. »
+
+    Elles vivaient jusqu'ici dans la sous-colonne GAUCHE du bloc ENTREPRENEUR,
+    où elles n'avaient rien à faire : ce ne sont pas des coordonnées
+    d'entrepreneur, et leur présence repoussait le contact entrepreneur en
+    troisième position, loin du contact client auquel il répond. La rangée de
+    titre porte déjà une colonne latérale VIDE à droite (title_side) : c'est
+    l'espace libre que Simon désigne."""
+    style = ParagraphStyle("Dates", parent=getSampleStyleSheet()["Normal"], fontSize=9, leading=13)
+    return Paragraph("<br/>".join([
+        _field_line_ident("Date du jour", date.today().strftime("%Y-%m-%d")),
+        _field_line_ident("Numéro du projet", ident.get("numero_projet")),
+        _field_line_ident("Date début travaux", _fmt_date_ident(ident.get("date_debut"))),
+        _field_line_ident("Date fin travaux", _fmt_date_ident(ident.get("date_fin"))),
+    ]), style)
+
+
+def _build_client_entrepreneur_header(total_w, ident: dict, avec_dates: bool = True):
     """Bloc CLIENT / ENTREPRENEUR (2 colonnes) — PARTAGÉ par le rapport de
     calcul (_build_projet_report) et « Ventilation par lot »
     (export_projet_pdf_lots). Factorisé ici (brief priorité absolue,
@@ -414,10 +455,23 @@ def _build_client_entrepreneur_header(total_w, ident: dict):
     ent_right_para = Paragraph(ent_right_html, info_style)
 
     col_w = total_w / 2  # 2 colonnes égales (Client / Entrepreneur)
-    ent_subtable = Table(
-        [[ent_heading_para, ""], [ent_left_para, ent_right_para]],
-        colWidths=[col_w / 2, col_w / 2],
-    )
+    # `avec_dates=False` (brief Simon, 9 septembre 2026) : les dates montent
+    # dans la rangée de titre, à droite (voir _build_dates_projet_para). La
+    # colonne ENTREPRENEUR n'a alors plus de sous-colonnes — le contact
+    # entrepreneur occupe toute la demi-largeur et se retrouve EN FACE du
+    # contact client, ce que Simon demandait : « Contact entrepreneur à côté
+    # de contact client ». Les autres documents (Ventilation par lot) gardent
+    # la disposition d'origine : `avec_dates` y vaut True par défaut.
+    if avec_dates:
+        ent_subtable = Table(
+            [[ent_heading_para, ""], [ent_left_para, ent_right_para]],
+            colWidths=[col_w / 2, col_w / 2],
+        )
+    else:
+        ent_subtable = Table(
+            [[ent_heading_para, ""], [ent_right_para, ""]],
+            colWidths=[col_w, 0],
+        )
     ent_subtable.setStyle(TableStyle([
         ("SPAN", (0, 0), (1, 0)),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -425,8 +479,16 @@ def _build_client_entrepreneur_header(total_w, ident: dict):
         ("RIGHTPADDING", (0, 0), (-1, -1), 0),
         ("TOPPADDING", (0, 0), (-1, -1), 0),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-        ("RIGHTPADDING", (0, 1), (0, 1), 10),  # gap horizontal entre sous-cols
     ]))
+    # Gouttière de 10 pt ENTRE LES DEUX SOUS-COLONNES -- elle n'a de sens que
+    # s'il y en a deux. Sans ce garde, la colonne de contact perdrait 10 pt de
+    # largeur utile en mode `avec_dates=False` alors que le moteur jsPDF lui
+    # donne la demi-largeur pleine : un écart de repli des lignes longues
+    # (« Contact entrepreneur : ... ») que le cliquet de fidélité mesurerait.
+    if avec_dates:
+        ent_subtable.setStyle(TableStyle([
+            ("RIGHTPADDING", (0, 1), (0, 1), 10),  # gap horizontal entre sous-cols
+        ]))
 
     header_table = Table(
         [[client_para, ent_subtable]],
@@ -5048,8 +5110,16 @@ def register_ad_budget_routes(get_conn):
         # avec une petite marge ; centre = total_w - 380 (~147pt portrait,
         # 327pt landscape) pour que le titre tienne sur une seule ligne.
         title_side = 190
+        # Brief Simon, 9 septembre 2026 : « plus simple, inscrit la date du
+        # jour, numéro de projet, date de début, date de fin à côté du titre
+        # dans l'espace libre. » Cette troisième colonne était VIDE depuis
+        # toujours — elle n'existait que pour équilibrer la rangée et garder le
+        # titre centré sur la page. Elle porte maintenant les quatre dates, qui
+        # quittent la sous-colonne gauche du bloc ENTREPRENEUR (cf.
+        # avec_dates=False plus bas). Le titre reste centré : les deux colonnes
+        # latérales gardent la MÊME largeur.
         title_row = Table(
-            [[logo_flowable, title_cell, ""]],
+            [[logo_flowable, title_cell, _build_dates_projet_para(_ident)]],
             colWidths=[title_side, total_w - 2 * title_side, title_side],
         )
         title_row.setStyle(TableStyle([
@@ -5063,7 +5133,7 @@ def register_ad_budget_routes(get_conn):
         story.append(title_row)
         story.append(Spacer(1, 14))
 
-        story.append(_build_client_entrepreneur_header(total_w, _ident))
+        story.append(_build_client_entrepreneur_header(total_w, _ident, avec_dates=False))
         story.append(Spacer(1, 14))
 
 
