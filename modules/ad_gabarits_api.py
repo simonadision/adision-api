@@ -56,6 +56,49 @@ def _org(user) -> str:
     return str(org)
 
 
+def _texte_code(v):
+    """Un code membre (division, section, nom) ramené à du texte propre.
+
+    `(v or "").strip()` — la forme d'origine — tombe en AttributeError, donc
+    en 500, dès qu'un client envoie un NOMBRE : `divisions: [9]` au lieu de
+    `["09"]`. Un JSON malformé doit se faire ÉCARTER proprement (contrat de
+    _normaliser_regroupements : « une entrée à moitié remplie ne bloque pas
+    l'enregistrement du reste »), jamais faire tomber la route d'écriture
+    des sous-totaux. Un nombre est converti (l'intention est lisible), tout
+    autre type est écarté."""
+    if v is None or isinstance(v, bool):
+        return ""
+    if isinstance(v, str):
+        return v.strip()
+    if isinstance(v, (int, float)):
+        return str(v).strip()
+    return ""
+
+
+def _cle_division_membre(code):
+    """Clé CANONIQUE d'un membre `divisions` — le code réduit à ce qui
+    IDENTIFIE la division dans le budget.
+
+    QUATRIÈME COPIE ASSUMÉE de la même règle, et c'est la raison de ce
+    chantier. Les trois autres vivent côté monorepo :
+      - clePourDivisionPdf  packages/report-pdf/src/buildReportRows.js
+      - clePourDivision     apps/ad-bud/src/App.jsx::regroupementsCalc
+      - divisionKeyOf       apps/ad-bud/src/utils/csiPrefixKeys.js
+    Les deux premières sont des dédoublonnages de LECTURE, indépendants, donc
+    libres de diverger : c'est exactement ce qui a produit le montant faux de
+    la PR #101 (la grille dédoublonnait, le PDF non → 197 627 $ × 6). Celle-ci
+    est différente en nature : elle s'applique à l'ÉCRITURE, une seule fois,
+    et tarit la source. Une lecture qui oublierait de dédoublonner ne peut
+    plus donner un montant faux sur une donnée écrite depuis ce correctif.
+
+    "Divers" n'a que 6 lettres et jamais 2 chiffres CSI — ne JAMAIS le
+    tronquer comme un vrai code (même exception que les trois copies JS)."""
+    t = _texte_code(code)
+    if not t:
+        return ""
+    return t if t == "Divers" else t[:2]
+
+
 def register_ad_gabarits_routes(get_conn):
     jwt_user, _jwt_user_or_token, _jwt_admin, jwt_super_admin = make_jwt_deps(get_conn)
     router = APIRouter(prefix="/budget", tags=["Ad BUD — Gabarits"])
@@ -109,18 +152,62 @@ def register_ad_gabarits_routes(get_conn):
         sous-total « = une division du gabarit » (fond vert) d'un simple
         regroupement, et à répercuter un renommage du sous-total sur cette
         division (Simon, en direct, 2 sept 2026). None pour un regroupement
-        posé à la main (pas de division liée) — jamais rejeté pour autant."""
+        posé à la main (pas de division liée) — jamais rejeté pour autant.
+
+        DÉDOUBLONNAGE (9 septembre 2026, suite de la PR #101). Les membres
+        sont dédoublonnés ICI, à l'écriture, et plus seulement chez chaque
+        lecteur. Voir _cle_division_membre pour la clé et le pourquoi.
+
+        MEMBRE ORPHELIN — accepté, jamais rejeté, décision explicite. Une
+        division ou une section qui n'existe (plus) dans ce budget reste en
+        base telle quelle, exactement comme un `apres` qui pointe vers une
+        division disparue. Trois raisons : (1) les divisions d'un budget
+        VIVENT — supprimer la dernière ligne d'une division la fait
+        disparaître, la resaisir la fait revenir ; rejeter effacerait un
+        sous-total pour une absence temporaire ; (2) un membre orphelin
+        n'est pas dangereux, il vaut 0 chez tous les lecteurs — c'est un
+        montant MANQUANT, jamais un montant EN TROP, l'inverse exact du
+        défaut que Simon a qualifié de « très dangereux » ; (3) cette
+        fonction sert le gabarit ET le projet, deux périmètres où « exister »
+        ne se vérifie pas au même endroit — un rejet ferait échouer un
+        enregistrement pour une raison invisible à l'écran."""
         out = []
         for r in data or []:
             if not isinstance(r, dict):
                 continue
-            nom = (r.get("nom") or "").strip()
-            divisions = [
-                (d or "").strip() for d in (r.get("divisions") or []) if (d or "").strip()
-            ]
-            sections = [
-                (c or "").strip() for c in (r.get("sections") or []) if (c or "").strip()
-            ]
+            nom = _texte_code(r.get("nom"))
+            # DÉDOUBLONNAGE À L'ÉCRITURE — la racine du montant x6 (PR #101).
+            # `divisions` est réduit à sa CLÉ CANONIQUE avant comparaison :
+            # deux membres qui donnent la même clé désignent la MÊME division
+            # du budget, donc le second est un ALIAS, jamais un montant de
+            # plus. On garde le PREMIER code écrit tel quel (l'amont peut
+            # l'afficher) et on jette les alias suivants.
+            divisions, vues_div = [], set()
+            for brut in (r.get("divisions") or []):
+                code = _texte_code(brut)
+                if not code:
+                    continue
+                cle = _cle_division_membre(code)
+                if cle in vues_div:
+                    continue
+                vues_div.add(cle)
+                divisions.append(code)
+            # `sections` se dédoublonne sur le code EXACT, PAS sur une clé
+            # tronquée — et cette asymétrie est voulue. Les lecteurs indexent
+            # les totaux de sous-section par le code TEL QUEL (csiPrefix) :
+            # "09 91" et "09 91 00" sont deux entrées distinctes du même
+            # dictionnaire, et les replier l'une sur l'autre ferait PERDRE un
+            # montant au lieu d'en éviter un en trop. Seule la répétition
+            # exacte est, sans ambiguïté, un double compte : buildReportRows
+            # additionne cette liste SANS Set (contrairement à `divisions`),
+            # donc un code répété y compte deux fois.
+            sections, vues_sec = [], set()
+            for brut in (r.get("sections") or []):
+                code = _texte_code(brut)
+                if not code or code in vues_sec:
+                    continue
+                vues_sec.add(code)
+                sections.append(code)
             # Un membre SUFFIT, quelle que soit sa granularité. Exiger
             # `divisions` comme avant rejetterait en silence tout sous-total
             # créé depuis une sélection de sections.
@@ -997,7 +1084,11 @@ def register_ad_gabarits_routes(get_conn):
                 "(organization_id, nom, description, regroupements, created_by, created_by_email) "
                 "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
                 (org, (g["nom"] + " (copie)")[:200], g["description"],
-                 json.dumps(g.get("regroupements") or []),
+                 # Recopier tel quel propagerait les alias déjà en base d'un
+                 # gabarit écrit avant le dédoublonnage — la copie naîtrait
+                 # corrompue. La duplication est une ÉCRITURE : même passe
+                 # que le PUT.
+                 json.dumps(_normaliser_regroupements(g.get("regroupements") or [])),
                  user.get("id"), user.get("email")),
             )
             gid = cur.fetchone()["id"]
@@ -1145,7 +1236,17 @@ def register_ad_gabarits_routes(get_conn):
             gabarit_id = row and row.get("source_gabarit_id")
             natifs = (row and row.get("regroupements")) or []
             if natifs:
-                return {"regroupements": natifs, "gabarit_id": gabarit_id}
+                # Normalisé À LA SORTIE aussi : le correctif d'écriture ne
+                # nettoie que ce qui est écrit APRÈS lui, or les alias de la
+                # PR #101 sont DÉJÀ en base sur les projets existants. Sans
+                # cette passe, un lecteur qui oublierait de dédoublonner
+                # resommerait ces vieilles données. La DÉCISION « ce projet a
+                # des sous-totaux natifs » reste prise sur la valeur BRUTE :
+                # une liste non vide qui se normaliserait en vide ne doit pas
+                # faire retomber le projet sur les regroupements du gabarit,
+                # qui ne sont pas les siens.
+                return {"regroupements": _normaliser_regroupements(natifs),
+                        "gabarit_id": gabarit_id}
             if not gabarit_id:
                 return {"regroupements": [], "gabarit_id": None}
             cur.execute(
@@ -1154,7 +1255,10 @@ def register_ad_gabarits_routes(get_conn):
                 (gabarit_id, org),
             )
             g = cur.fetchone()
-            return {"regroupements": (g and g.get("regroupements")) or [], "gabarit_id": gabarit_id}
+            # Même normalisation en sortie que la branche « natifs » : le
+            # repli lit un gabarit écrit avant le dédoublonnage.
+            return {"regroupements": _normaliser_regroupements((g and g.get("regroupements")) or []),
+                    "gabarit_id": gabarit_id}
         finally:
             cur.close()
             conn.close()
