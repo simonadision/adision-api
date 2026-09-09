@@ -390,11 +390,23 @@ def _build_client_entrepreneur_header(total_w, ident: dict):
         field_line("Date début travaux", fmt_date(ident.get("date_debut"))),
         field_line("Date fin travaux", fmt_date(ident.get("date_fin"))),
     ])
-    ent_right_html = "<br/>".join([
+    # Brief Simon, 9 septembre 2026 : « le contact de l'entrepreneur = personne
+    # ressources, avec ses informations », puis « Donc ici Simon Hachey avec mon
+    # courriel et # de téléphone ». L'entreprise prend sa propre ligne ; le
+    # contact devient la personne ressource (voir _HUB_IDENTITY_MAP). MÊMES
+    # lignes, MÊME ordre que le moteur jsPDF (clientEntrepreneurBlock.js) —
+    # c'est cette égalité que le cliquet de fidélité vérifie à chaque push.
+    ent_right_lignes = [
+        field_line("Entrepreneur", ident.get("entreprise_entrepreneur")),
         field_line("Contact entrepreneur", ident.get("contact_entrepreneur")),
+    ]
+    if (ident.get("fonction_entrepreneur") or "").strip():
+        ent_right_lignes.append(field_line("Fonction", ident.get("fonction_entrepreneur")))
+    ent_right_lignes += [
         field_line("Courriel", ident.get("email_entrepreneur")),
         field_line("Téléphone", ident.get("telephone_entrepreneur")),
-    ])
+    ]
+    ent_right_html = "<br/>".join(ent_right_lignes)
 
     client_para = Paragraph(client_html, info_style)
     ent_heading_para = Paragraph(ent_heading_html, info_style)
