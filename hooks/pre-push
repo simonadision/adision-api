@@ -37,6 +37,24 @@ if ! python -m pytest tests/test_verifier_source_unique.py -q; then
   echo "[pre-push] ÉCHEC filet source unique — le contrôle ne détecte plus les copies injectées. Push BLOQUÉ." >&2
   exit 1
 fi
+# Sous-totaux Ad BUD — les membres d'un regroupement sont dédoublonnés À
+# L'ÉCRITURE (9 sept 2026). Deux montants faux d'affilée dans une soumission
+# client sont sortis de cette fonctionnalité (PR #100 absents du PDF, #101
+# comptés six fois) : la donnée doit être saine à la source, pas réparée par
+# chaque lecteur. Pur Python, fausse DB en mémoire.
+echo "[pre-push] Sous-totaux — dédoublonnage des membres à l'écriture…"
+if ! python -m pytest tests/test_regroupements_dedoublonnage.py -q; then
+  echo "[pre-push] ÉCHEC dédoublonnage des sous-totaux — un montant peut être compté deux fois. Push BLOQUÉ." >&2
+  exit 1
+fi
+# Copies de budget — DUPLIQUER et RÉVISER doivent copier les MÊMES colonnes.
+# Deux montants faux sont déjà sortis d'une divergence entre ces deux listes
+# écrites à la main (drapeaux _override, puis client_id).
+echo "[pre-push] Copies de budget — duplication et révision, mêmes colonnes…"
+if ! python -m pytest tests/test_copies_projet_memes_colonnes.py -q; then
+  echo "[pre-push] ÉCHEC — une copie de budget naîtrait amputée d'une colonne. Push BLOQUÉ." >&2
+  exit 1
+fi
 # Divergences écran↔rapport connues (D3/D4) : tests ATTENDUS-EN-ÉCHEC (xfail).
 # Exit 0 tant que le défaut est présent (attendu) ; exit 1 en XPASS = un défaut
 # documenté a été corrigé sans retirer le marqueur → mettre le fichier à jour.

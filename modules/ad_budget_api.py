@@ -4147,19 +4147,33 @@ def register_ad_budget_routes(get_conn):
             # Phase 6 Deploy 3 — la révision NE COPIE PLUS l'identité localement : elle
             # est liée à la nouvelle révision hub (ad_hub_project_id = new_hub_id) et lit
             # son identité depuis Ad HUB (le hub la copie du parent au /reviser). On ne
-            # copie que les champs PROPRES (statut, notes, A&P) + le lien hub.
+            # copie que les champs PROPRES (statut, notes, A&P) + les LIENS.
+            #
+            # client_id AJOUTÉ le 9 septembre 2026 — il manquait ici alors que
+            # dupliquer_projet le copiait déjà. Ce n'est PAS de l'identité (qui
+            # vit au hub) : c'est un LIEN propre à Ad BUD vers
+            # app_central.clients.id, rangé avec ad_hub_project_id dès la
+            # création du budget (« les liens (ad_hub_project_id, client_id) »).
+            # Sans lui, chaque révision naissait DÉLIÉE de son client, et le
+            # PDF de cette révision perdait le logo du client (rang 1 de
+            # _resolve_logo_b64, qui lit projet["client_id"]) pour retomber
+            # sur celui de l'organisation — sur un document envoyé au client.
+            # Même famille que les colonnes _override oubliées ci-dessous :
+            # deux copies du MÊME budget censées être en phase, une colonne
+            # présente d'un côté et absente de l'autre, sans rien qui le dise.
+            # tests/test_copies_projet_memes_colonnes.py tient l'invariant.
             cur.execute(
                 """
                 INSERT INTO ad_budget.projets
                   (user_id, organization_id, statut, notes,
                    pct_admin_conditions, pct_admin_architecture,
                    pct_admin_mecanique, pct_admin_excavation,
-                   ad_hub_project_id,
+                   ad_hub_project_id, client_id,
                    arrondi_dollar, pct_admin_mode, regroupements)
                 SELECT %s, %s, statut, notes,
                        pct_admin_conditions, pct_admin_architecture,
                        pct_admin_mecanique, pct_admin_excavation,
-                       %s,
+                       %s, client_id,
                        arrondi_dollar, pct_admin_mode, regroupements
                 FROM ad_budget.projets WHERE id = %s
                 RETURNING *
