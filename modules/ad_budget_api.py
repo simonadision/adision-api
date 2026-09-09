@@ -7298,6 +7298,84 @@ def register_ad_budget_routes(get_conn):
             conn.close()
         return {"status": "reordered", "nb": updated}
 
+    @router.post("/projets/{projet_id}/sections/renommer-code")
+    def renommer_code_section(projet_id: int, data: dict, user=Depends(jwt_user)):
+        """Change le CODE d'une section, dans CE projet seulement.
+
+        « je dois pouvoir editer le code d'une section dans certain projet »
+        — Simon, 9 septembre 2026.
+
+        UNE SECTION N'EST PAS UNE ENTITÉ. Côté projet, `budget_lignes.section`
+        est sa SEULE matérialisation : il n'existe aucune table de sections à
+        mettre à jour. Renommer un code, c'est donc réécrire ce champ sur
+        toutes les lignes du groupe — rien d'autre, et rien de moins.
+
+        LE PRÉFIXE EST REMPLACÉ, LE SUFFIXE EST CONSERVÉ. Une section groupe
+        des lignes dont le code est plus long que le préfixe affiché : sous
+        « 01 00 » vivent « 01 00 00.01 », « 01 00 00.02 »… Ces suffixes
+        distinguent les lignes entre elles (cf. _next_free_csi_suffix) —
+        les écraser fondrait dix lignes distinctes en dix codes identiques.
+        On remplace donc le préfixe et on garde la queue :
+            « 01 00 » -> « 01 05 »   donne  « 01 00 00.01 » -> « 01 05 00.01 »
+            « 09.4 »  -> « 09.7 »    donne  « 09.4 »        -> « 09.7 »
+        Un code maison est son propre préfixe : le remplacement y est exact.
+
+        FRONTIÈRE EXIGÉE. On ne remplace que si ce qui suit le préfixe est une
+        vraie frontière (fin de chaîne, espace ou point) : sans ça, renommer
+        « 01 0 » attraperait « 01 00 00.01 ».
+
+        Le titre (csi_titres, côté Ad EST) est déplacé par le CLIENT, qui
+        connaît la portée voulue — ce module n'y touche pas.
+        """
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        ancien = str((data or {}).get("ancien_code") or "").strip()
+        nouveau = str((data or {}).get("nouveau_code") or "").strip()
+        if not ancien or not nouveau:
+            raise HTTPException(
+                status_code=400,
+                detail="`ancien_code` et `nouveau_code` sont requis.",
+            )
+        if ancien == nouveau:
+            return {"status": "inchange", "nb": 0}
+        if len(nouveau) > 100:
+            raise HTTPException(status_code=400, detail="Code trop long (100 caractères maximum).")
+
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute(
+                """
+                UPDATE ad_budget.budget_lignes
+                   SET section = %s || substring(section FROM %s),
+                       updated_at = NOW()
+                 WHERE projet_id = %s
+                   AND (section = %s OR section LIKE %s OR section LIKE %s)
+                RETURNING id, section
+                """,
+                (
+                    nouveau, len(ancien) + 1, projet_id,
+                    ancien,
+                    ancien + " %",
+                    ancien + ".%",
+                ),
+            )
+            touchees = cur.fetchall()
+            conn.commit()
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception as e:  # noqa: BLE001
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Renommage de code échoué : {e}")
+        finally:
+            cur.close()
+            conn.close()
+        return {
+            "status": "renomme",
+            "nb": len(touchees),
+            "lignes": [{"id": r["id"], "section": r["section"]} for r in touchees],
+        }
+
     @router.patch("/projets/{projet_id}/lignes/{ligne_id}")
     def patch_budget_ligne(projet_id: int, ligne_id: int, data: dict,
                            user=Depends(jwt_user),
