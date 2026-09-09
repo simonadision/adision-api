@@ -27,6 +27,7 @@ from modules.taux_horaires_api import (
     _resolve_taux_default,
 )
 from reportlab.lib import colors
+from reportlab.lib.enums import TA_RIGHT
 from reportlab.lib.pagesizes import landscape, letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm, mm
@@ -379,7 +380,14 @@ def _build_dates_projet_para(ident: dict):
     troisième position, loin du contact client auquel il répond. La rangée de
     titre porte déjà une colonne latérale VIDE à droite (title_side) : c'est
     l'espace libre que Simon désigne."""
-    style = ParagraphStyle("Dates", parent=getSampleStyleSheet()["Normal"], fontSize=9, leading=13)
+    # ALIGNÉ À DROITE — brief Simon, 9 septembre 2026 : « Aligner les infos avec
+    # la marge droite. Donc avec l'encadré. » La cellule porte RIGHTPADDING 0
+    # (style de title_row), donc le bord droit de ces lignes tombe exactement
+    # sur celui du tableau qui suit. En drapeau à gauche, elles finissaient en
+    # escalier au milieu d'une colonne vide, sans rien pour les caler.
+    # Miroir de l'alignement calculé côté jsPDF (drawDatesProjet).
+    style = ParagraphStyle("Dates", parent=getSampleStyleSheet()["Normal"],
+                           fontSize=9, leading=13, alignment=TA_RIGHT)
     return Paragraph("<br/>".join([
         _field_line_ident("Date du jour", date.today().strftime("%Y-%m-%d")),
         _field_line_ident("Numéro du projet", ident.get("numero_projet")),
