@@ -48,6 +48,15 @@ fi
 # Contrat GET /devis (plomberie) — attrape « champ non exposé » / « source
 # divergente » / « mauvaise org » (le harnais de rendu ne peut pas les voir).
 # Sans réseau -> toujours bloquant.
+# Phase 7B (9 sept 2026) : les 19 colonnes d'identité de ad_budget.projets ont
+# été DROPpées (identité = Ad HUB, source unique). Une SQL qui les nomme encore
+# lève UndefinedColumn au premier appel. Lecture du SOURCE, sans base ni réseau
+# -> toujours bloquant.
+echo "[pre-push] Phase 7B — aucune SQL ne nomme une colonne d'identité DROPpée…"
+if ! python -m pytest tests/test_phase7b_colonnes_identite.py -q; then
+  echo "[pre-push] ÉCHEC Phase 7B — une SQL nomme une colonne supprimée. Push BLOQUÉ." >&2
+  exit 1
+fi
 echo "[pre-push] Contrat GET /devis (plomberie)…"
 if ! python tests/test_devis_contract.py; then
   echo "[pre-push] ÉCHEC contrat GET /devis — push BLOQUÉ." >&2

@@ -2113,32 +2113,17 @@ def register_ad_budget_routes(get_conn):
                 # le projet créé n'était PAS lié au hub → sans source d'identité
                 # (identité centralisée Ad HUB). 0 usage prod. Créer le projet dans
                 # Ad HUB d'abord, puis importer en mode=existing. mode=existing intact.
+                #
+                # Phase 7B — le corps inerte qui suivait a été SUPPRIMÉ : son
+                # `INSERT INTO ad_budget.projets (…, nom, statut)` nommait la colonne
+                # `nom`, DROPpée en Phase 7B. Même raison qu'au /duplicate ci-dessous :
+                # ce SQL ne pouvait plus tourner, le garder n'offrait pas un rollback
+                # mais une fausse piste. Historique git = archive.
                 raise HTTPException(
                     status_code=410,
                     detail=("Créer le projet d'abord dans Ad HUB, puis importer les lignes "
                             "Ad VIU dans le budget existant (mode=existing)."),
                 )
-                project_name = (data.get("project_name") or "").strip()
-                if not project_name:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="project_name requis pour mode=new",
-                    )
-                cur.execute(
-                    """
-                    INSERT INTO ad_budget.projets
-                        (user_id, organization_id, nom, statut)
-                    VALUES (%s, %s, %s, 'brouillon')
-                    RETURNING id, nom
-                    """,
-                    (user["id"], user["organization_id"], project_name),
-                )
-                proj = cur.fetchone()
-                # Squelette standard appliqué au nouveau projet — même logique
-                # que POST /budget/projets pour rester cohérent avec une création
-                # manuelle. Les lignes Ad VIU s'ajoutent ensuite par-dessus
-                # (coexistence assumée si même section, l'user choisit).
-                template_lines_added = _apply_master_template(cur, proj["id"])
             else:
                 project_id_in = data.get("project_id")
                 if not project_id_in:
@@ -2323,34 +2308,17 @@ def register_ad_budget_routes(get_conn):
                 # le projet créé n'était PAS lié au hub → sans source d'identité
                 # (identité centralisée Ad HUB). 0 usage prod. Créer le projet dans
                 # Ad HUB d'abord, puis importer en mode=existing. mode=existing intact.
+                #
+                # Phase 7B — le corps inerte qui suivait a été SUPPRIMÉ : son
+                # `INSERT INTO ad_budget.projets (…, nom, statut)` nommait la colonne
+                # `nom`, DROPpée en Phase 7B. Même raison qu'au /duplicate ci-dessous :
+                # ce SQL ne pouvait plus tourner, le garder n'offrait pas un rollback
+                # mais une fausse piste. Historique git = archive.
                 raise HTTPException(
                     status_code=410,
                     detail=("Créer le projet d'abord dans Ad HUB, puis importer les lignes "
                             "Ad VIU dans le budget existant (mode=existing)."),
                 )
-                project_name = (data.get("project_name") or "").strip()
-                if not project_name:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="project_name requis pour mode=new",
-                    )
-                cur.execute(
-                    """
-                    INSERT INTO ad_budget.projets
-                        (user_id, organization_id, nom, statut)
-                    VALUES (%s, %s, %s, 'brouillon')
-                    RETURNING id, nom
-                    """,
-                    (user["id"], user["organization_id"], project_name),
-                )
-                proj = cur.fetchone()
-                # Squelette complet sans filtre. Le DELETE REPLACE ci-dessous
-                # va immediatement effacer les lignes architecturales que ce
-                # squelette vient de creer — les seules lignes squelette
-                # conservees sont celles des divisions blindspot Ad VIU
-                # (mecanique, civil, conditions generales) que l'estimateur
-                # remplira manuellement (Ad VIU n'analyse pas ces divisions).
-                template_lines_added = _apply_master_template(cur, proj["id"])
             else:
                 project_id_in = data.get("project_id")
                 if not project_id_in:
@@ -3025,20 +2993,28 @@ def register_ad_budget_routes(get_conn):
         }
         # Champs qui doivent être normalisés à NULL si reçus en chaîne vide
         # (typés DATE, NUMERIC, ou VARCHAR optionnels).
+        # Phase 7B — date_debut / date_fin / type_batiment / region /
+        # date_adjudication / superficie_m2 RETIRÉS : ces colonnes n'existent
+        # plus en BD (migrations/sprint_phase7b_drop_identity.sql). Elles ne
+        # pouvaient déjà plus arriver jusqu'ici (le 403 _HUB_OWNED_BUD_FIELDS
+        # plus haut les intercepte toutes), mais les laisser listées laissait
+        # croire à un chemin d'écriture qui n'existe plus.
         NULLABLE_EMPTY_FIELDS = {
-            "date_debut", "date_fin",
-            "type_batiment", "region", "date_adjudication", "superficie_m2",
             # Params globaux du tableau budget (persistes maintenant)
             "mobilisation", "surface_plancher",
             "hauteur_cloisons", "longueur_cloisons",
             "categorie_affichage",
         }
+        # Phase 7B — les 19 champs d'IDENTITÉ ne figurent plus dans cette liste
+        # blanche : leurs colonnes ont été DROPpées de ad_budget.projets
+        # (migrations/sprint_phase7b_drop_identity.sql) et l'identité vit dans
+        # Ad HUB. Un PUT qui les nomme est déjà refusé 403 plus haut
+        # (_HUB_OWNED_BUD_FIELDS) — les garder ici ne rendait donc aucun champ
+        # éditable, mais fabriquait un `UPDATE ad_budget.projets SET nom = …`
+        # sur une colonne inexistante si jamais ce 403 était relâché. Voir
+        # tests/test_phase7b_colonnes_identite.py, qui interdit leur retour.
         for field in [
-            "nom", "client", "adresse", "description", "statut",
-            "nom_client", "contact_client", "email_client", "telephone_client",
-            "numero_projet", "date_debut", "date_fin",
-            "contact_entrepreneur", "email_entrepreneur", "telephone_entrepreneur",
-            "logo_base64",
+            "statut",
             "pct_admin_conditions", "pct_admin_architecture",
             "pct_admin_mecanique", "pct_admin_excavation",
             # Admin & profit par catégorie (12 champs ; NULL = hérite discipline)
@@ -3046,8 +3022,6 @@ def register_ad_budget_routes(get_conn):
             "pct_admin_architecture_mat", "pct_admin_architecture_mo", "pct_admin_architecture_st",
             "pct_admin_mecanique_mat", "pct_admin_mecanique_mo", "pct_admin_mecanique_st",
             "pct_admin_excavation_mat", "pct_admin_excavation_mo", "pct_admin_excavation_st",
-            # Sprint A
-            "type_batiment", "region", "date_adjudication", "superficie_m2",
             "dernier_snapshot_id",
             # Params globaux du tableau budget
             "mobilisation", "surface_plancher",
@@ -3707,70 +3681,23 @@ def register_ad_budget_routes(get_conn):
         # PAS liée au hub (garde anti-double-budget interdit 2 budgets actifs sur le
         # même projet hub) → incompatible avec l'identité centralisée (source unique
         # Ad HUB) : une copie sans lien hub n'aurait plus aucune source d'identité.
-        # 0 usage historique en prod. Le corps ci-dessous est CONSERVÉ INERTE
-        # (rollback facile = retirer ce raise) mais ne s'exécute jamais.
+        # 0 usage historique en prod. Le remplaçant est /dupliquer (plus bas), qui
+        # crée un VRAI projet hub distinct puis y lie un budget neuf.
+        #
+        # Phase 7B — le corps inerte qui suivait ce raise a été SUPPRIMÉ (et non
+        # plus « conservé pour rollback facile ») : son INSERT nommait les 19
+        # colonnes d'identité DROPpées de ad_budget.projets
+        # (migrations/sprint_phase7b_drop_identity.sql) et lisait src['nom'].
+        # Ce SQL ne pouvait plus s'exécuter contre la vraie base — retirer le raise
+        # n'aurait donc PAS restauré la fonctionnalité, il aurait rendu 500. Du code
+        # mort qui décrit un schéma disparu se lit comme une spec : il a déjà fait
+        # conclure à tort que « la duplication est cassée en prod » (9 sept 2026).
+        # L'historique git garde le corps d'origine si besoin d'archéologie.
         raise HTTPException(
             status_code=410,
             detail=("La duplication a été retirée. Utilisez « Réviser le projet » pour "
                     "une nouvelle version, ou « Nouveau projet » pour un projet distinct."),
         )
-        # PHASE 3A — authentification + autorisation (écriture : dupliquer le
-        # projet d'un autre user est refusé, même à un superviseur d'org).
-        # check_lock=False : la duplication LIT la source et CRÉE un nouveau projet
-        # (déverrouillé par défaut) — elle ne modifie pas le projet verrouillé.
-        _load_and_authorize_projet(get_conn, projet_id, user, "write", check_lock=False)
-        conn = get_conn()
-        cur = conn.cursor(row_factory=dict_row)
-        cur.execute("SELECT id, nom FROM ad_budget.projets WHERE id = %s", (projet_id,))
-        src = cur.fetchone()
-        if not src:
-            cur.close()
-            conn.close()
-            raise HTTPException(status_code=404, detail="Projet not found")
-        cur.execute("""
-            INSERT INTO ad_budget.projets
-              (user_id, organization_id, nom, client, adresse, description, statut, notes,
-               nom_client, contact_client, email_client, telephone_client,
-               numero_projet, date_debut, date_fin,
-               contact_entrepreneur, email_entrepreneur, telephone_entrepreneur,
-               logo_base64,
-               pct_admin_conditions, pct_admin_architecture,
-               pct_admin_mecanique, pct_admin_excavation,
-               arrondi_dollar, pct_admin_mode)
-            SELECT %s, %s, %s, client, adresse, description, statut, notes,
-                   nom_client, contact_client, email_client, telephone_client,
-                   numero_projet, date_debut, date_fin,
-                   contact_entrepreneur, email_entrepreneur, telephone_entrepreneur,
-                   logo_base64,
-                   pct_admin_conditions, pct_admin_architecture,
-                   pct_admin_mecanique, pct_admin_excavation,
-                   arrondi_dollar, pct_admin_mode
-            FROM ad_budget.projets
-            WHERE id = %s
-            RETURNING *
-        """, (user["id"], user["organization_id"], f"{src['nom']} (copie)", projet_id))
-        new_projet = cur.fetchone()
-        new_id = new_projet["id"]
-        cur.execute("""
-            INSERT INTO ad_budget.budget_lignes
-              (projet_id, source_item_id, section, description, unite, prix_unitaire,
-               qte, ajustement_pct, note, actif, prix_unitaire_override,
-               heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
-               ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
-               sous_traitant_type, sous_traitant_montant)
-            SELECT %s, source_item_id, section, description, unite, prix_unitaire,
-                   qte, ajustement_pct, note, actif, prix_unitaire_override,
-                   heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
-                   ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant,
-                   sous_traitant_type, sous_traitant_montant
-            FROM ad_budget.budget_lignes
-            WHERE projet_id = %s
-        """, (new_id, projet_id))
-        nb_lignes = cur.rowcount
-        conn.commit()
-        cur.close()
-        conn.close()
-        return {"status": "duplicated", "projet": new_projet, "nb_lignes_copiees": nb_lignes}
 
     # ─────────────────────────────────────────────────────────────────
     # POST /budget/projets/{id}/dupliquer
