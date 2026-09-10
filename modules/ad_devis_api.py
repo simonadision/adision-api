@@ -323,6 +323,23 @@ def register_ad_devis_routes(get_conn):
                 "neq": entreprise.get("neq"),
                 "courriel": entreprise.get("courriel"),
                 "telephone": entreprise.get("telephone"),
+                # PERSONNE RESSOURCE -- brief Simon, 10 septembre 2026, les deux
+                # blocs cote a cote en capture : « il faut reproduire les memes
+                # info entrepreneur que dans le rapport du budget ».
+                #
+                # Le devis n'affichait que la raison sociale et les coordonnees
+                # GENERIQUES de l'organisation (info@, ligne principale), alors
+                # que le rapport de budget nomme la personne ressource depuis la
+                # veille. Deux documents partant du meme projet, presentant deux
+                # interlocuteurs differents au meme client.
+                #
+                # MEME SOURCE que le rapport : _ident, ou _HUB_IDENTITY_MAP a
+                # deja pose le repli vers les coordonnees d'entreprise quand la
+                # personne ressource n'est pas renseignee.
+                "contact": _ident.get("contact_entrepreneur"),
+                "fonction": _ident.get("fonction_entrepreneur"),
+                "contact_courriel": _ident.get("email_entrepreneur"),
+                "contact_telephone": _ident.get("telephone_entrepreneur"),
                 # Logo de l'org du PROJET, déjà rogné + base64 — MÊME source que le
                 # PDF reportlab (_org_logo_base64). Alimente le moteur client à
                 # l'identique et voyage avec devisData (cache hors ligne). None si
@@ -723,12 +740,30 @@ def register_ad_devis_routes(get_conn):
                                    ("BOTTOMPADDING", (0, 0), (-1, -1), 1)]))
             return t
 
-        entr = block("ENTREPRENEUR", [
-            ("", entreprise.get("name") or "—"),
+        # MÊMES INFOS QUE LE RAPPORT DE BUDGET — brief Simon, 10 septembre 2026 :
+        # « il faut reproduire les memes info entrepreneur que dans le rapport du
+        # budget ». Le devis ne montrait que la raison sociale et les coordonnées
+        # GÉNÉRIQUES de l'organisation (info@, ligne principale) ; le rapport
+        # nomme la personne ressource depuis la veille. Deux documents partant du
+        # même projet présentaient deux interlocuteurs différents au même client.
+        #
+        # La RBQ reste : elle est propre au devis (pièce contractuelle), le
+        # rapport ne la porte pas. « Fonction » n'apparaît que si renseignée.
+        _entr_lignes = [
+            ("Entrepreneur :", entreprise.get("name") or "—"),
             ("RBQ :", entreprise.get("rbq") or "—"),
-            ("Courriel :", entreprise.get("courriel") or "—"),
-            ("Téléphone :", entreprise.get("telephone") or "—"),
-        ])
+            # « Contact : » et non « Contact entrepreneur : » — le bloc s'intitule
+            # déjà ENTREPRENEUR, et le libellé long tombait pile à la limite de
+            # repli de la colonne, où les deux moteurs ne décidaient pas pareil.
+            ("Contact :", _ident.get("contact_entrepreneur") or "—"),
+        ]
+        if (_ident.get("fonction_entrepreneur") or "").strip():
+            _entr_lignes.append(("Fonction :", _ident.get("fonction_entrepreneur")))
+        _entr_lignes.append(("Courriel :",
+                             _ident.get("email_entrepreneur") or entreprise.get("courriel") or "—"))
+        _entr_lignes.append(("Téléphone :",
+                             _ident.get("telephone_entrepreneur") or entreprise.get("telephone") or "—"))
+        entr = block("ENTREPRENEUR", _entr_lignes)
         client = block("CLIENT", [
             ("", _ident.get("nom_client") or "—"),
             ("Contact :", _ident.get("contact_client") or "—"),
