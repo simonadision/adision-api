@@ -702,7 +702,16 @@ def register_ad_devis_routes(get_conn):
         story.append(head)
         story.append(Spacer(1, 10))
 
-        # 2 + 3 : ENTREPRENEUR (gauche) et CLIENT (droite)
+        # 2 + 3 : CLIENT (gauche) et ENTREPRENEUR (droite)
+        #
+        # Brief Simon, 10 septembre 2026, capture de l'aperçu à l'appui : « dans
+        # le rapport generer un devis, il faut changer la disposition.
+        # entrepreneur a droite et client a gauche. meme configuration que dans
+        # rapport quantite. »
+        #
+        # Le devis avait l'ordre INVERSE du rapport de budget, qui met CLIENT à
+        # gauche et ENTREPRENEUR à droite. Deux documents partant du même projet
+        # et se lisant en sens contraire.
         def block(title, lines):
             rows = [[Paragraph(title, ParagraphStyle("bh", parent=h, spaceBefore=0))]]
             for label, val in lines:
@@ -726,7 +735,11 @@ def register_ad_devis_routes(get_conn):
             ("Courriel :", _ident.get("email_client") or "—"),
             ("Téléphone :", _ident.get("telephone_client") or "—"),
         ])
-        two = Table([[entr, client]], colWidths=[doc.width / 2.0, doc.width / 2.0])
+        # L'ordre des cellules change, PAS le style : le RIGHTPADDING de 12
+        # reste sur la colonne (0,0) -- c'est la gouttière de la colonne de
+        # GAUCHE, attachée à la position et non au bloc. La déplacer avec
+        # ENTREPRENEUR décalerait le bord droit du document.
+        two = Table([[client, entr]], colWidths=[doc.width / 2.0, doc.width / 2.0])
         two.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
                                  ("LEFTPADDING", (0, 0), (-1, -1), 0),
                                  ("RIGHTPADDING", (0, 0), (0, 0), 12)]))
