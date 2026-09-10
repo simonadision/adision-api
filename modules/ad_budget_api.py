@@ -3063,44 +3063,6 @@ def register_ad_budget_routes(get_conn):
             raise HTTPException(status_code=status, detail=f"Ad HUB : {e.detail}")
         return {"project": updated}
 
-    # ──────────────────────────────────────────────────────────────────
-    # GET /budget/projets/by-hub/{hub_project_id} — trouve le budget ACTIF
-    # lie a ce projet Ad HUB (10 sept. 2026, brief "Ad CON : reporter les
-    # couts du budget Ad BUD dans le chantier"). Consomme par Ad CON
-    # (bud_client.fetch_bud_project_id_for_hub) quand un chantier est
-    # ouvert DIRECTEMENT depuis le hub (POST /api/projects/from-hub) : il
-    # faut retrouver le budget du MEME projet hub pour y importer les
-    # couts, exactement comme le fait deja from-bud pour un budget connu
-    # d'avance. Meme requete que le garde-fou anti-double-budget plus haut
-    # (statut <> 'archive', un seul budget actif par hub) -- pas de filtre
-    # organization_id ici : le hub_project_id est deja valide comme
-    # appartenant a la bonne org par l'appelant (meme convention que ce
-    # garde-fou, qui ne filtre pas non plus par org).
-    # ──────────────────────────────────────────────────────────────────
-    @router.get("/projets/by-hub/{hub_project_id}")
-    def get_projet_by_hub(
-        hub_project_id: int,
-        user=Depends(jwt_user),
-    ):
-        conn = get_conn()
-        try:
-            cur = conn.cursor(row_factory=dict_row)
-            cur.execute(
-                "SELECT id FROM ad_budget.projets "
-                "WHERE ad_hub_project_id = %s AND statut <> 'archive' "
-                "ORDER BY id LIMIT 1",
-                (hub_project_id,),
-            )
-            row = cur.fetchone()
-        finally:
-            conn.close()
-        if not row:
-            raise HTTPException(
-                status_code=404,
-                detail="Aucun budget actif pour ce projet Ad HUB",
-            )
-        return {"bud_project_id": row["id"]}
-
     @router.get("/projets/{projet_id}")
     def get_projet(
         projet_id: int,
