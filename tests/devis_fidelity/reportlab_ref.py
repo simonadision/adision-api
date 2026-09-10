@@ -51,12 +51,27 @@ def _devis_row(fx):
 
 def _ident(fx):
     cli = fx.get("client") or {}
+    ent = fx.get("entreprise") or {}
     return {
         "nom": fx.get("nomProjet") or "",
         "nom_client": cli.get("nom") or "",
         "contact_client": cli.get("contact") or "",
         "email_client": cli.get("courriel") or "",
         "telephone_client": cli.get("telephone") or "",
+        # PERSONNE RESSOURCE (10 septembre 2026). Ce harnais ne lisait QUE le
+        # bloc `client` du fichier temoin : les deux moteurs ne recevaient donc
+        # pas la meme entree des que le bloc ENTREPRENEUR a cesse de se limiter
+        # a la raison sociale. Un banc de fidelite qui alimente ses deux moteurs
+        # differemment ne mesure plus rien -- il invente une divergence.
+        #
+        # MEMES CLES que _HUB_IDENTITY_MAP en production, alimentees depuis le
+        # bloc `entreprise` du temoin, exactement comme l'API les expose au
+        # moteur client (voir ad_devis_api : contact / fonction /
+        # contact_courriel / contact_telephone).
+        "contact_entrepreneur": ent.get("contact") or "",
+        "fonction_entrepreneur": ent.get("fonction") or "",
+        "email_entrepreneur": ent.get("contact_courriel") or "",
+        "telephone_entrepreneur": ent.get("contact_telephone") or "",
     }
 
 
