@@ -3498,6 +3498,50 @@ def register_ad_budget_routes(get_conn):
             )
         return {"status": "supprime_definitivement", "id": projet_id}
 
+    @router.get("/projets/by-hub/{hub_project_id}")
+    def get_projet_by_hub(hub_project_id: int, user=Depends(jwt_user)):
+        """Lookup d'un projet Ad BUD par son ad_hub_project_id.
+
+        Consommé par Ad CON (POST /api/projects/from-hub) : quand un
+        chantier s'ouvre directement depuis Ad HUB (le chemin « + Nouveau
+        projet », sans passer par le bouton « Démarrer suivi chantier »
+        côté Ad BUD), Ad CON vient chercher ici si un budget Ad BUD existe
+        déjà pour ce même projet hub, afin d'y reporter les coûts (Simon,
+        10 sept 2026 : « Tous les couts du projet doivent etre reporte
+        dans ad con »).
+
+        404 si aucun projet BUD actif (non archivé) n'est lié à ce hub id —
+        c'est un cas NORMAL côté appelant, pas une panne : le chantier Ad
+        CON reste alors vide.
+
+        Isolation multi-tenant : filtre par organization_id du JWT (les
+        projets legacy sans organization_id restent visibles — même
+        tolérance que le fallback jwt_fallback de export-for-con).
+        """
+        organization_id = user.get("organization_id")
+        conn = get_conn()
+        try:
+            cur = conn.cursor(row_factory=dict_row)
+            cur.execute(
+                """SELECT id, statut FROM ad_budget.projets
+                   WHERE ad_hub_project_id = %s
+                     AND statut <> 'archive'
+                     AND (organization_id = %s OR organization_id IS NULL)
+                   ORDER BY id DESC
+                   LIMIT 1""",
+                (hub_project_id, organization_id),
+            )
+            row = cur.fetchone()
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
+            conn.close()
+        if not row:
+            raise HTTPException(status_code=404, detail="Aucun projet Ad BUD lié à ce projet hub")
+        return {"projet_id": row["id"], "statut": row["statut"]}
+
     @router.get("/projets/{projet_id}/export-for-con")
     def export_projet_for_con(projet_id: int, user=Depends(jwt_user),
                               authorization: Optional[str] = Header(None), session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
