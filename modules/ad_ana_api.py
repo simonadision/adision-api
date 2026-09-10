@@ -67,7 +67,8 @@ def register_ad_ana_routes(get_conn):
             { "total": int, "items": [snapshot, ...] }
 
         Filtres multi-valeurs (statut, type_batiment, region) : passés en
-        liste séparée par des virgules (ex: ?statut=adjuge,complet).
+        liste séparée par des virgules (ex: ?statut=en_cours,en_execution --
+        vocabulaire des statuts d'Ad BUD depuis les renommages de sept. 2026).
         Si include_lines=true, budget_lines_jsonb est inclus dans le payload
         (utile pour Vue 7 Ratio détaillé qui aggregée au niveau ligne).
         """
@@ -167,7 +168,8 @@ def register_ad_ana_routes(get_conn):
                 raise HTTPException(
                     status_code=404,
                     detail="Aucun snapshot pour ce projet (le projet doit "
-                    "etre passe en statut adjuge/complet/perdu).",
+                    "etre passe en statut Projet en cours, Projet en "
+                    "execution ou Projet perdu).",
                 )
 
             # 2. Tous les autres snapshots is_latest

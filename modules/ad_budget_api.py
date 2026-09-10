@@ -223,6 +223,34 @@ HUB_REGION_CODE_TO_LABEL = {
 # ni sur un projet simplement archive.
 DATE_ADJ_ALLOWED_FOR_STATUTS = {"en_cours", "en_execution", "perdu"}
 
+# EXPORT VERS Ad CON -- quels statuts autorisent GET /budget/projets/{id}/export-for-con.
+#
+# L'intention n'a pas bouge depuis le premier jour : ON N'EXPORTE PAS UN BUDGET
+# PAS ENCORE GAGNE. C'est le NOM qui a bouge, deux fois, et la garde est restee
+# sur l'ancien.
+#   - 9 sept. 2026  : 'adjuge' et 'complet' fondus dans 'en_cours'.
+#   - 10 sept. 2026 : 'en_execution' separe le chantier qu'on CONSTRUIT du
+#                     projet gagne qu'on chiffre encore.
+# La garde comparait encore litteralement a 'adjuge'. Comme la migration a
+# efface cette valeur de la base, elle refusait TOUS les projets, sans exception
+# -- 21 projets en production, zero exportable. Mesure du 10 sept. 2026 :
+# en_soumission 20, archive 1, 'adjuge' zero.
+#
+# Les deux statuts ci-dessous sont les deux faces d'un projet GAGNE. 'perdu' et
+# 'archive' n'y sont pas : on ne suit pas les couts d'un chantier qu'on ne fera
+# pas, et un projet range n'est pas un chantier qui demarre.
+STATUTS_EXPORT_CON = {"en_cours", "en_execution"}
+# Libelles montres a l'utilisateur dans le refus -- miroir de STATUTS
+# (apps/ad-bud/src/constants/projetMeta.js). Un code snake_case dans un message
+# d'erreur ne dit rien a qui lit l'ecran.
+STATUT_LABELS = {
+    "en_soumission": "Projet en soumission",
+    "en_cours": "Projet en cours",
+    "en_execution": "Projet en execution",
+    "perdu": "Projet perdu",
+    "archive": "Projet archive",
+}
+
 # Brief 31 août 2026 — pastilles de tri sur la page Projets d'Ad BUD,
 # glisser-déposer. NULL = aucune catégorie (défaut à la naissance du projet).
 # Distinct du `statut` métier : purement une organisation de la vue.
@@ -240,7 +268,11 @@ ALLOWED_CATEGORIES_AFFICHAGE = {"en_soumission", "en_cours", "en_execution", "pe
 # le hook PUT /projets/{id} declenche la creation d'un snapshot consomme par
 # Ad ANA. Note : le set est identique a DATE_ADJ_ALLOWED_FOR_STATUTS, mais
 # semantiquement different (figement vs UI date picker), donc constante separee.
-DEFINITIVE_STATUSES = {"en_cours", "perdu"}
+# Statuts « le sort du projet est connu » -- leur arrivee fige le budget dans un
+# snapshot Ad ANA. 'en_execution' y a ete AJOUTE le 10 sept. 2026 : sans lui, un
+# projet passe directement de la soumission au chantier n'aurait jamais eu son
+# snapshot, et Ad ANA aurait perdu la trace de ce budget-la.
+DEFINITIVE_STATUSES = {"en_cours", "en_execution", "perdu"}
 
 # Brief 5a — IDENTITÉ PROJET = source unique Ad HUB. Ces champs sont REFUSÉS au
 # PATCH Ad BUD (403) : ils se modifient UNIQUEMENT dans Ad HUB. Ils restent lisibles
@@ -3197,7 +3229,8 @@ def register_ad_budget_routes(get_conn):
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         # Sprint A : récupère le statut actuel pour la cross-field validation
-        # (date_adjudication permise uniquement si statut ∈ adjuge/complet/perdu).
+        # (date_adjudication permise uniquement si statut ∈ DATE_ADJ_ALLOWED_FOR_STATUTS,
+        # soit en_cours / en_execution / perdu depuis les renommages de sept. 2026).
         cur.execute(
             "SELECT statut FROM ad_budget.projets WHERE id = %s",
             (projet_id,),
@@ -3311,7 +3344,8 @@ def register_ad_budget_routes(get_conn):
         updated = cur.fetchone()
 
         # Sprint B : detecter la transition vers un statut definitif
-        # (adjuge / complet / perdu) et figer le budget dans un snapshot.
+        # (cf. DEFINITIVE_STATUSES : en_cours / en_execution / perdu) et figer
+        # le budget dans un snapshot.
         # Tout dans la meme transaction : si la creation du snapshot echoue,
         # l'UPDATE projet sera rollback aussi.
         old_statut = existing["statut"]
@@ -3586,9 +3620,10 @@ def register_ad_budget_routes(get_conn):
         Sécurité :
           - JWT user requis (jwt_user dep)
           - Auth via _load_and_authorize_projet (mode='read', supervisor OK)
-          - Refuse 403 si statut != 'adjuge' (defense in depth ; UI ne montre
-            le bouton "Démarrer suivi chantier" que sur projets adjugés, mais
-            on bloque aussi côté backend)
+          - Refuse 403 si statut ∉ STATUTS_EXPORT_CON (defense in depth ; UI ne
+            montre le bouton "Démarrer suivi chantier" que sur un projet gagné,
+            mais on bloque aussi côté backend). Le refus NOMME le statut actuel
+            et dit quoi faire -- Ad CON le relaie tel quel à l'utilisateur.
           - Lignes inactives (actif=FALSE) EXCLUSES de l'export
 
         organization_id fallback (décision STOP 1.A.1, critique #2) :
@@ -3625,14 +3660,18 @@ def register_ad_budget_routes(get_conn):
             else:
                 _ident = {}
 
-            # Defense in depth — UI n'affiche pas le bouton hors 'adjuge' mais
-            # un user qui tape l'URL directement doit être bloqué aussi.
-            if projet["statut"] != "adjuge":
+            # Defense in depth — UI n'affiche pas le bouton sur un projet pas
+            # encore gagné, mais un user qui tape l'URL doit être bloqué aussi.
+            # Le message est LU PAR UN HUMAIN : Ad CON le relaie verbatim. Il
+            # nomme donc le statut actuel ET le geste qui débloque.
+            if projet["statut"] not in STATUTS_EXPORT_CON:
+                _actuel = STATUT_LABELS.get(projet["statut"], projet["statut"])
                 raise HTTPException(
                     status_code=403,
                     detail=(
-                        "Le projet doit être au statut Adjugé pour être exporté "
-                        f"vers Ad CON (statut actuel: {projet['statut']})"
+                        f"Ce budget est au statut « {_actuel} ». Pour le reporter "
+                        "dans Ad CON, passez-le d'abord à « Projet en cours » ou "
+                        "« Projet en exécution » dans Ad BUD (onglet Data du projet)."
                     ),
                 )
 
