@@ -176,7 +176,14 @@ def _frca_num(value):
 #   adjuge, complet                 -> en_cours      (regle de Simon)
 #   perdu                           -> perdu
 #   archive                         -> archive
-ALLOWED_STATUTS = {"en_soumission", "en_cours", "perdu", "archive"}
+# CINQUIEME STATUT, « en execution » (Simon, 10 sept. 2026 : « je veux
+# ajouter un statut execution »). Il ne ressuscite pas les neuf d'avant : le
+# regroupement du matin avait fondu DEUX moments distincts dans « en cours »
+# -- le projet qu'on CHIFFRE et le chantier qu'on CONSTRUIT. Ce ne sont ni les
+# memes gens, ni les memes modules, ni la meme question ; Ad CON n'ouvre un
+# chantier que pour le second. Le cinquieme separe ce que le regroupement
+# avait recolle de trop.
+ALLOWED_STATUTS = {"en_soumission", "en_cours", "en_execution", "perdu", "archive"}
 ALLOWED_TYPES_BATIMENT = {
     "residentiel", "commercial", "institutionnel", "industriel", "mixte",
 }
@@ -214,7 +221,7 @@ HUB_REGION_CODE_TO_LABEL = {
 # Une date d'adjudication n'a de sens qu'une fois le sort du projet connu :
 # gagne (en_cours) ou perdu. Pas en soumission -- rien n'est encore adjuge --
 # ni sur un projet simplement archive.
-DATE_ADJ_ALLOWED_FOR_STATUTS = {"en_cours", "perdu"}
+DATE_ADJ_ALLOWED_FOR_STATUTS = {"en_cours", "en_execution", "perdu"}
 
 # Brief 31 août 2026 — pastilles de tri sur la page Projets d'Ad BUD,
 # glisser-déposer. NULL = aucune catégorie (défaut à la naissance du projet).
@@ -226,7 +233,7 @@ DATE_ADJ_ALLOWED_FOR_STATUTS = {"en_cours", "perdu"}
 # principale ne montre plus que categorie_affichage IS NULL.
 # Quatrieme onglet « Projet perdu » (Simon, 9 septembre 2026 : « Ajouter un
 # onglet projet perdu »). Meme vocabulaire que ALLOWED_STATUTS ci-dessus.
-ALLOWED_CATEGORIES_AFFICHAGE = {"en_soumission", "en_cours", "perdu", "archive"}
+ALLOWED_CATEGORIES_AFFICHAGE = {"en_soumission", "en_cours", "en_execution", "perdu", "archive"}
 
 # === Sprint B : statuts qui figent le budget (snapshot dans app_ana) ===
 # Quand un projet bascule depuis un statut hors de ce set vers un statut dedans,
