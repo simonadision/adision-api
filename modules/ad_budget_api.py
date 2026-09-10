@@ -6541,6 +6541,124 @@ def register_ad_budget_routes(get_conn):
         }
 
     # ══════════════════════════════════════════════════════════
+    # RÉCAPITULATIF CROSS-LOT -> ESPACE RAPPORTS (document INTERNE)
+    # ══════════════════════════════════════════════════════════
+    @router.post("/projets/{projet_id}/recap/emit")
+    def emit_recap_to_hub(
+        projet_id: int,
+        # UploadFile SANS File(...) et titre en QUERY : c'est le style deja en
+        # place dans ce fichier (emit_report_to_hub), et il evite d'importer
+        # File/Form ici. Le harnais de fidelite PDF importe ce module a froid --
+        # un nom absent y explose en NameError avant meme le premier test.
+        pdf: Optional[UploadFile] = None,
+        titre: Optional[str] = Query(None),
+        user=Depends(jwt_user),
+        authorization: Optional[str] = Header(None),
+        session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
+    ):
+        """Publie le récapitulatif cross-lot dans l'Espace Rapports du projet HUB.
+
+        Simon, 10 septembre 2026 : « dans la zone exporter il me faut un lien
+        pour exporter dans l'espace rapport de ad hub du projet. même mécanique
+        que pour mes rapport clients. »
+
+        RELAIS PUR, comme l'émission « par_lot » : on téléverse LES OCTETS DÉJÀ
+        VALIDÉS À L'APERÇU, jamais un re-rendu serveur. Le récapitulatif n'a
+        d'ailleurs aucun équivalent reportlab — c'est un document 100% client
+        (jsPDF), et re-rendre ici publierait forcément autre chose que ce que
+        Simon a sous les yeux.
+
+        TROIS DIFFÉRENCES ASSUMÉES AVEC L'ÉMISSION DU RAPPORT CLIENT :
+
+        1. TYPE SÉPARÉ (recapitulatif_interne) et drapeau confidentiel. Ce
+           document montre les coûts, les heures, les taux et les marges : c'est
+           celui qu'on ne veut surtout pas envoyer au client par erreur. Publié
+           sous 'calcul_quantitatif', il aurait de surcroît REMPLACÉ la révision
+           cliente courante — la clé d'upsert côté HUB est (hub_project_id,
+           report_type, source_ref) et source_ref ne varie pas pour un projet.
+
+        2. AUCUN CONTRÔLE DE MONTANT. L'émission « par_lot » relit le total
+           imprimé et le compare à un recalcul serveur, parce que ce document
+           engage l'entreprise devant un client. Le récapitulatif, lui, est une
+           VUE : filtres de colonnes, lignes actives seulement, regroupement au
+           choix — son GRAND TOTAL est légitimement partiel. Le comparer à un
+           recalcul complet ne prouverait rien et refuserait des documents
+           parfaitement valides.
+
+        3. LE CYCLE DE RÉVISION DU BUDGET N'EST PAS TOUCHÉ. Ni
+           emitted_at_current_revision, ni budget_modifie_depuis_emission :
+           envoyer une vue interne ne fait pas d'un budget un budget « émis ».
+           La numérotation est laissée au HUB (revision_no=0 -> suivante), ce
+           qui empile les envois au lieu d'en écraser un.
+        """
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            cur.execute("SELECT * FROM ad_budget.projets WHERE id = %s", (projet_id,))
+            projet = cur.fetchone()
+        finally:
+            cur.close()
+            conn.close()
+        if not projet:
+            raise HTTPException(status_code=404, detail="Projet introuvable")
+        hub_pid = projet.get("ad_hub_project_id")
+        if not hub_pid:
+            raise HTTPException(
+                status_code=400,
+                detail="Projet non lié à un projet HUB (ad_hub_project_id manquant)",
+            )
+
+        if pdf is None:
+            raise HTTPException(
+                status_code=400,
+                detail="PDF manquant — envoyez le document de l'aperçu (champ multipart 'pdf').",
+            )
+        pdf_bytes = pdf.file.read()
+        # Mêmes bornes de bon sens que les deux autres émissions : jamais un 500
+        # sur un fichier absurde, toujours un message qui dit quoi faire.
+        if not pdf_bytes.startswith(b"%PDF"):
+            raise HTTPException(
+                status_code=400,
+                detail="Le fichier reçu n'est pas un PDF (%PDF absent). "
+                       "Régénérez l'aperçu puis réessayez.",
+            )
+        if len(pdf_bytes) < 1000 or len(pdf_bytes) > 25_000_000:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Taille de PDF implausible ({len(pdf_bytes)} o). "
+                       "Régénérez l'aperçu puis réessayez.",
+            )
+
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
+        fields = {
+            "report_type": "recapitulatif_interne",
+            "confidentiel": "true",
+            # 0 = « attribue la révision suivante » (voir reports_api côté HUB).
+            "revision_no": 0,
+            "revision_label": projet.get("revision_label") or "Originale",
+            "source_ref": projet_id,
+            "source_module": "ad-bud",
+            "generated_by": user.get("id"),
+            "generated_by_nom": user.get("nom") or user.get("email"),
+            # Le titre porte la VARIANTE (« par lot — sommaire ») : le
+            # récapitulatif existe en huit versions et l'Espace Rapports doit
+            # dire laquelle il montre, pas huit lignes identiques.
+            "titre": (titre or "").strip() or f"Récapitulatif — {projet.get('nom') or ''}".strip(" —"),
+            "snapshot_data": "{}",
+        }
+        try:
+            result = hub_service.post_report(jwt_token, int(hub_pid), pdf_bytes, fields)
+        except hub_service.HubServiceError as e:
+            raise HTTPException(status_code=502, detail=f"Échec envoi HUB : {e.detail}")
+        return {
+            "emitted": True,
+            "report_type": "recapitulatif_interne",
+            "confidentiel": True,
+            "hub": result,
+        }
+
+    # ══════════════════════════════════════════════════════════
     # SNAPSHOTS (Sprint B - app_ana.project_snapshots)
     # ══════════════════════════════════════════════════════════
     # Colonnes retournées par défaut par les endpoints snapshots ; on omet
