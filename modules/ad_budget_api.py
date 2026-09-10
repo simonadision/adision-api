@@ -1610,6 +1610,33 @@ def _maj_compute_mat_divergences(ligne, src):
 # serveur, production_valeur ignorée -> écart de 39 219 $ vs l'écran sur le projet 290).
 
 
+# NATURE DU DOCUMENT (brief Simon, 10 sept. 2026) : « ce n'est pas un budget
+# dans ce cas ci. on parle d'une soumission alors faire un bouton soumission ou
+# budget ». Le MÊME rapport, avec le même contenu et les mêmes calculs, sert
+# tantôt de budget interne, tantôt de soumission remise au client — seul le
+# titre imprimé change.
+#
+# C'est aussi le MARQUEUR que _verifier_pdf_correspond_au_mode relit sur la
+# première page avant toute publication au hub : les deux doivent donc sortir
+# de cette table, jamais d'une chaîne recopiée ailleurs. Un libellé changé ici
+# sans le marqueur ferait échouer TOUTE émission — bruyamment, ce qui est le
+# comportement voulu, mais autant ne pas s'y exposer.
+#
+# Le pendant client vit dans packages/report-pdf/src/buildReportPdf.js
+# (NATURE_LABELS) et le cliquet de fidélité compare les deux rendus.
+NATURE_LABELS = {
+    "budget": "Rapport de budget",
+    "soumission": "Soumission",
+}
+
+
+def _nature_label(nature) -> str:
+    """Libellé imprimé pour une nature de document. Valeur inconnue ou absente
+    -> « Rapport de budget », le comportement historique : un paramètre mal
+    orthographié ne doit pas produire un document sans titre."""
+    return NATURE_LABELS.get(str(nature or "").strip().lower(), NATURE_LABELS["budget"])
+
+
 def _verifier_pdf_correspond_au_mode(pdf_bytes: bytes, marqueur_attendu: str, mode_export: str) -> None:
     """Garde-fou anti-régression de emit_report_to_hub (brief Simon, 20 août
     2026, incident projet 290 — ÉMETTRE publiait TOUJOURS le rapport de
@@ -4919,6 +4946,7 @@ def register_ad_budget_routes(get_conn):
         afficher_entete_soussection: bool = True,
         csi_div_labels: str = "",
         csi_sec_labels: str = "",
+        nature: str = Query("budget", description="budget | soumission — titre imprimé seulement"),
     ):
         # PHASE 3A — auth (lecture). Délègue au builder partagé qui produit le
         # PDF ET le snapshot JSON dans la MÊME passe ; la route ne renvoie que
@@ -4940,6 +4968,7 @@ def register_ad_budget_routes(get_conn):
             afficher_entete_soussection=afficher_entete_soussection,
             csi_div_labels=csi_div_labels,
             csi_sec_labels=csi_sec_labels,
+            nature=nature,
         )
         safe_nom = "".join(c if c.isalnum() or c in "-_ " else "_" for c in (_snapshot["project"]["nom"] or "projet")).strip() or "projet"
         return StreamingResponse(
@@ -5002,6 +5031,10 @@ def register_ad_budget_routes(get_conn):
         afficher_entete_soussection=True,
         csi_div_labels="",
         csi_sec_labels="",
+        # Nature du document : « budget » (défaut, titre historique) ou
+        # « soumission ». Ne touche QUE le titre imprimé — aucun calcul,
+        # aucun filtre, aucun snapshot n'en dépend.
+        nature="budget",
     ):
         """Construit le PDF rapport ET le snapshot JSON dans la MÊME passe.
         Retourne (buf: BytesIO, snapshot: dict). Le rendu PDF est INCHANGÉ
@@ -5119,7 +5152,7 @@ def register_ad_budget_routes(get_conn):
         title_cell = []
         if _nom_projet:
             title_cell.append(Paragraph(_nom_projet.upper(), nom_titre_style))
-        title_cell.append(Paragraph("Rapport de budget — " + _rev_lbl, sous_titre_style))
+        title_cell.append(Paragraph(_nature_label(nature) + " — " + _rev_lbl, sous_titre_style))
 
         # LOGO (haut-gauche) : déjà résolu plus haut par _resolve_report_logo_base64
         # et rangé dans _ident['logo_base64'] (MÊME base64 que le moteur client, via
@@ -6182,6 +6215,10 @@ def register_ad_budget_routes(get_conn):
         # courante). None = pas encore choisi -> si une question est requise,
         # l'endpoint répond {choice_required:true} sans émettre.
         revision_choice: Optional[str] = None,
+        # Nature du document émis — MÊME valeur que celle de l'aperçu, sinon
+        # le garde-fou ci-dessous refuse la publication (le titre relu ne
+        # correspondrait pas au marqueur attendu).
+        nature: str = "budget",
     ):
         """Émet le rapport (calcul quantitatif OU ventilation par lot, cf.
         mode_export) vers l'Espace Rapports HUB.
@@ -6350,14 +6387,17 @@ def register_ad_budget_routes(get_conn):
                 afficher_entete_soussection=afficher_entete_soussection,
                 csi_div_labels=csi_div_labels,
                 csi_sec_labels=csi_sec_labels,
+                nature=nature,
             )
             pdf_bytes = buf.getvalue()
             # Montant TEL QU'AFFICHÉ dans le PDF filtré (TOTAL GÉNÉRAL de la vue
             # modale, reflète sections/taxes décochées) -> détection rapport
             # partiel côté HUB. Le snapshot plus bas reste le budget complet.
             montant_affiche_pdf = _filtered_snap["totaux"]["montant_apres_taxes"]
-            mode_label = "Rapport de budget"
-            _pdf_marker = "Rapport de budget"
+            # MÊME source que le titre imprimé : le marqueur est relu sur la
+            # première page juste avant la publication.
+            mode_label = _nature_label(nature)
+            _pdf_marker = _nature_label(nature)
 
         # PHASE 3 — garde-fou anti-régression (brief Simon, 20 août 2026,
         # incident projet 290) : le document ÉMIS doit correspondre au mode

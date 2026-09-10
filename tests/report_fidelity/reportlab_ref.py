@@ -150,5 +150,8 @@ def _render(B, projet, projet_id, lignes, o, jwt_token=None):
         afficher_entete_soussection=_opt(o, "afficher_entete_soussection", True),
         csi_div_labels=_opt(o, "csi_div_labels", ""),
         csi_sec_labels=_opt(o, "csi_sec_labels", ""),
+        # Nature du document (budget | soumission) : titre imprime seulement.
+        # Temoin sans la cle -> "budget", le titre historique.
+        nature=_opt(o, "nature", "budget"),
     )
     return buf.getvalue()
