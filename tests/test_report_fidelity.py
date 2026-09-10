@@ -49,7 +49,7 @@ BASCULE = os.path.join(HERE, "report_fidelity", "bascule.json")
 
 # Ancres stables du rapport (presentes dans quasi tous les temoins).
 REPORT_ANCHORS = [
-    ("titre_rapport", "Rapport de budget"),
+    ("titre_rapport", "Ventilation des coûts"),
     ("bloc_client", "CLIENT"),
     ("bloc_entrepreneur", "ENTREPRENEUR"),
     ("footer", "Propulsé par"),

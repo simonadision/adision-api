@@ -358,7 +358,7 @@ def test_emit_ventilation_par_lot_vers_hub():
     texte = doc[0].get_text()
     doc.close()
     assert "Ventilation par lot" in texte, "le PDF émis n'est pas la ventilation par lot"
-    assert "Rapport de budget" not in texte, "le PDF émis est encore le rapport de calcul (régression du bug)"
+    assert "Ventilation des coûts" not in texte, "le PDF émis est encore le rapport de calcul (régression du bug)"
     f = captured["fields"]
     assert f["titre"] == "Projet 290 — Ventilation par lot", f["titre"]
     assert f["montant_affiche_pdf"] == 1149.75, f["montant_affiche_pdf"]
@@ -541,7 +541,7 @@ def test_garde_fou_pdf_correspond_au_mode():
 
     # 2) marqueur absent (document de l'AUTRE mode) -> 500 explicite, JAMAIS silencieux.
     try:
-        B._verifier_pdf_correspond_au_mode(_pdf_avec_texte("Rapport de budget — Originale"),
+        B._verifier_pdf_correspond_au_mode(_pdf_avec_texte("Ventilation des coûts — Originale"),
                                            "Ventilation par lot", "par_lot")
         raise AssertionError("aurait dû lever 500")
     except HTTPException as e:
@@ -549,7 +549,7 @@ def test_garde_fou_pdf_correspond_au_mode():
 
     # 3) PDF illisible (octets arbitraires) -> 500 explicite, jamais de crash nu.
     try:
-        B._verifier_pdf_correspond_au_mode(b"pas un PDF du tout", "Rapport de budget", "global")
+        B._verifier_pdf_correspond_au_mode(b"pas un PDF du tout", "Ventilation des coûts", "global")
         raise AssertionError("aurait dû lever 500")
     except HTTPException as e:
         assert e.status_code == 500

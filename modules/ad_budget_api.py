@@ -1625,14 +1625,29 @@ def _maj_compute_mat_divergences(ligne, src):
 # Le pendant client vit dans packages/report-pdf/src/buildReportPdf.js
 # (NATURE_LABELS) et le cliquet de fidélité compare les deux rendus.
 NATURE_LABELS = {
-    "budget": "Rapport de budget",
+    "budget": "Budget",
     "soumission": "Soumission",
 }
+
+# LE NOM DU DOCUMENT, distinct de sa NATURE (Simon, 10 sept. 2026, capture de
+# l'aperçu à l'appui) : « Ce rapport ce nomme: ventilation des coûts », puis
+# « pour un budget on doit voir : Budget et dessous: Ventilation des coûts.
+# Même concept pour Soumission ».
+#
+# Deux notions, deux lignes sous le nom du projet :
+#   1. À QUOI il sert    -> Budget (interne) ou Soumission (remise au client) ;
+#   2. CE QU'IL EST      -> une ventilation des coûts, dans les deux cas.
+#
+# C'est la ligne 2 qui sert de MARQUEUR à _verifier_pdf_correspond_au_mode :
+# elle est présente quelle que soit la nature, et ne peut pas être confondue
+# avec « Ventilation par lot », l'autre document (aucune n'est sous-chaîne de
+# l'autre). Le marqueur distingue le MODE D'EXPORT, pas la nature.
+NOM_DOCUMENT_CALCUL = "Ventilation des coûts"
 
 
 def _nature_label(nature) -> str:
     """Libellé imprimé pour une nature de document. Valeur inconnue ou absente
-    -> « Rapport de budget », le comportement historique : un paramètre mal
+    -> « Budget », le comportement historique : un paramètre mal
     orthographié ne doit pas produire un document sans titre."""
     return NATURE_LABELS.get(str(nature or "").strip().lower(), NATURE_LABELS["budget"])
 
@@ -1643,7 +1658,7 @@ def _verifier_pdf_correspond_au_mode(pdf_bytes: bytes, marqueur_attendu: str, mo
     calcul, quel que soit le mode choisi dans la modale). Le document PDF
     CONSTRUIT pour l'émission doit correspondre au mode DEMANDÉ, jamais un
     repli silencieux vers l'autre : chaque moteur (reportlab) imprime un
-    TITRE de page distinct selon le mode (« Rapport de budget — … » /
+    TITRE de page distinct selon le mode (« Ventilation des coûts — … » /
     « Ventilation par lot — … », cf. _build_projet_report et
     _build_lot_ventilation_report) — relu ICI, AVANT toute publication au hub.
 
@@ -5130,14 +5145,15 @@ def register_ad_budget_routes(get_conn):
             buf, pagesize=pagesize,
             rightMargin=margin, leftMargin=margin,
             topMargin=margin, bottomMargin=margin,
-            title=f"Rapport budget — {_ident.get('nom') or ''}",
+            title=f"Ventilation des coûts — {_ident.get('nom') or ''}",
             subject=_pdf_subject,
         )
         ss = getSampleStyleSheet()
         story = []
 
         # Titre PRINCIPAL = NOM DU PROJET (gros, centré) ; SOUS-TITRE dessous =
-        # « Rapport de budget — [révision] ». Même source que le bloc CLIENT
+        # « Budget » puis « Ventilation des coûts — [révision] ». Même source
+        # que le bloc CLIENT
         # (projet["nom"]). Nom vide -> sous-titre seul (jamais de titre vide).
         nom_titre_style = ParagraphStyle(
             "PdfNomProjet", parent=ss["Title"], fontSize=15, leading=17, alignment=1,
@@ -5152,7 +5168,14 @@ def register_ad_budget_routes(get_conn):
         title_cell = []
         if _nom_projet:
             title_cell.append(Paragraph(_nom_projet.upper(), nom_titre_style))
-        title_cell.append(Paragraph(_nature_label(nature) + " — " + _rev_lbl, sous_titre_style))
+        # Deux lignes de même style : sous_titre_style hérite de Normal, dont
+        # spaceBefore et spaceAfter valent 0 -- les deux Paragraph se posent
+        # donc à un simple interligne l'une de l'autre, ce que le moteur
+        # client reproduit en empilant deux lignes au leading 11. Y mettre un
+        # espacement ici obligerait à le porter là-bas, et le cliquet de
+        # fidélité le rappellerait de toute façon.
+        title_cell.append(Paragraph(_nature_label(nature), sous_titre_style))
+        title_cell.append(Paragraph(NOM_DOCUMENT_CALCUL + " — " + _rev_lbl, sous_titre_style))
 
         # LOGO (haut-gauche) : déjà résolu plus haut par _resolve_report_logo_base64
         # et rangé dans _ident['logo_base64'] (MÊME base64 que le moteur client, via
@@ -6397,7 +6420,7 @@ def register_ad_budget_routes(get_conn):
             # MÊME source que le titre imprimé : le marqueur est relu sur la
             # première page juste avant la publication.
             mode_label = _nature_label(nature)
-            _pdf_marker = _nature_label(nature)
+            _pdf_marker = NOM_DOCUMENT_CALCUL
 
         # PHASE 3 — garde-fou anti-régression (brief Simon, 20 août 2026,
         # incident projet 290) : le document ÉMIS doit correspondre au mode
