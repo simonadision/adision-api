@@ -896,6 +896,13 @@ def compute_budget_totals(projet, raw_lines):
             non_grouped_total += R(tot_real)
     real_sub = non_grouped_total
     group_ap = {}
+    # Brief Simon, 10 septembre 2026 : le rapport doit montrer TROIS niveaux
+    # avant taxes -- le coûtant nu, ce que l'administration et profit ajoute,
+    # puis le sous-total qui les inclut. Les deux premiers étaient calculés ici
+    # depuis toujours mais jamais exposés : seule leur SOMME sortait, et le
+    # client ne pouvait pas voir combien d'admin et profit il payait.
+    coutant_sans_ap = non_grouped_total
+    ap_total = 0.0
     for k in keys:
         sub = gsub[k]
         if sub <= 0:
@@ -903,6 +910,8 @@ def compute_budget_totals(projet, raw_lines):
         ap = R(_group_admin_profit(projet, pct_field_by_key[k], sub, gmat[k], gmo[k], gst[k]))
         group_ap[k] = ap
         real_sub += sub + ap
+        coutant_sans_ap += sub
+        ap_total += ap
     tps = R(real_sub * TPS_RATE)
     tvq = R(real_sub * TVQ_RATE)
     return {
@@ -918,6 +927,11 @@ def compute_budget_totals(projet, raw_lines):
         "group_subtotals": gsub,
         "group_admin_profit": group_ap,
         "non_grouped_total": non_grouped_total,
+        # Les deux niveaux qui composent sous_total_avant_taxes. Invariant tenu
+        # par construction : cout_avant_admin_profit + admin_profit_total ==
+        # sous_total_avant_taxes (mêmes termes, même arrondi R()).
+        "cout_avant_admin_profit": coutant_sans_ap,
+        "admin_profit_total": ap_total,
         # Heures — production (MO hors contremaître) vs contremaître, MÊME
         # source que le bloc heures de _build_projet_report et hoursBreakdown
         # (App.jsx). Ajouté pour le récap financier de « Ventilation par lot »
@@ -5864,6 +5878,31 @@ def register_ad_budget_routes(get_conn):
 
             # 3. Sous-total avant taxes (visuel uniquement)
             if avec_sous_total_avant_taxes:
+                # TROIS NIVEAUX AVANT TAXES — brief Simon, 10 septembre 2026,
+                # capture du pied de rapport à l'appui : « il faut ajouter le
+                # sous total coutant avant admin profit (1 niveau affichage) +
+                # montant admin et profit (2e niveau affichage) + sous total
+                # avant taxe : avec admin et profit (3e niveau affichage) ».
+                #
+                # Le rapport sautait directement au sous-total avant taxes : le
+                # montant d'administration et profit y était NOYÉ, invisible. Un
+                # client qui lit la soumission ne pouvait pas voir ce qu'il paie
+                # à ce titre.
+                #
+                # Les deux lignes n'apparaissent QUE si l'admin et profit est non
+                # nul : sur un projet qui n'en porte pas, elles répéteraient le
+                # même montant deux fois et ajouteraient une ligne « 0,00 $ ».
+                #
+                # MÊMES libellés, MÊME ordre et MÊMES `kind` que le moteur jsPDF
+                # (buildReportRows.js) — c'est cette égalité que le cliquet de
+                # fidélité vérifie à chaque push.
+                ap_global = _totals.get("admin_profit_total") or 0.0
+                if abs(ap_global) > 0.005:
+                    totals_rows.append(["Sous-total coûtant",
+                                        f"{_frca_num(_totals['cout_avant_admin_profit'])} $"])
+                    totals_kinds.append("subtotal")
+                    totals_rows.append(["Administration et profit", f"{_frca_num(ap_global)} $"])
+                    totals_kinds.append("admin")
                 totals_rows.append(["Sous-total avant taxes", f"{_frca_num(real_sub_avant_taxes)} $"])
                 totals_kinds.append("subtotal_taxes")
 
