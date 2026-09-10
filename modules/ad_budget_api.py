@@ -6552,6 +6552,12 @@ def register_ad_budget_routes(get_conn):
         # un nom absent y explose en NameError avant meme le premier test.
         pdf: Optional[UploadFile] = None,
         titre: Optional[str] = Query(None),
+        # DOSSIER DE DESTINATION (Simon 2026-09-10) : « dans espace rapport
+        # creer deux dossier : Rapports Sommaires et Rapports detailles ». Le
+        # dossier EST le report_type cote HUB, et il se deduit du mode du
+        # document -- l'appelant n'a donc rien a savoir de la taxonomie du HUB,
+        # il dit seulement ce qu'il publie.
+        mode: Optional[str] = Query(None),
         user=Depends(jwt_user),
         authorization: Optional[str] = Header(None),
         session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
@@ -6631,8 +6637,15 @@ def register_ad_budget_routes(get_conn):
             )
 
         jwt_token = _extract_bearer(authorization, None, session_cookie)
+        # Mode inconnu -> le type historique (modes melanges) plutot qu'un
+        # classement invente : mieux vaut un document dans la section
+        # « serie precedente » qu'un document dans le mauvais dossier.
+        type_rapport = {
+            "sommaire": "recapitulatif_interne_sommaire",
+            "detaille": "recapitulatif_interne_detaille",
+        }.get((mode or "").strip().lower(), "recapitulatif_interne")
         fields = {
-            "report_type": "recapitulatif_interne",
+            "report_type": type_rapport,
             "confidentiel": "true",
             # 0 = « attribue la révision suivante » (voir reports_api côté HUB).
             "revision_no": 0,
@@ -6653,7 +6666,7 @@ def register_ad_budget_routes(get_conn):
             raise HTTPException(status_code=502, detail=f"Échec envoi HUB : {e.detail}")
         return {
             "emitted": True,
-            "report_type": "recapitulatif_interne",
+            "report_type": type_rapport,
             "confidentiel": True,
             "hub": result,
         }
