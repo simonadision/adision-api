@@ -26,8 +26,14 @@
 #   - test_devis_emit_relay.py          émission relais devis (Option B)
 #   - test_verrou_production_heures.py  heures_effectives, tous les cas de
 #                                        l'incident 2026-08-20 (source Python)
-#   - test_invariant_a_coutant_total.py Invariant A — coûtant total (lot = CSI
-#                                        = mat+mo+st), chantier 20 août 2026
+#   - test_invariant_a_coutant_total.py Invariant A — CONVERGENCE DES
+#                                        GROUPEMENTS (lot = CSI = mat+mo+st),
+#                                        chantier 20 août 2026. Il ne garde PAS
+#                                        la VALEUR des heures : les trois
+#                                        sommes viennent de la meme regle, donc
+#                                        la changer les deplace ensemble. C'est
+#                                        test_verrou_production_heures.py qui
+#                                        garde la valeur, seul.
 #   - verifier_source_unique.py + test_verifier_source_unique.py
 #                                        couche 3 (issue #9 monorepo) : detecte
 #                                        une copie locale de la regle des
@@ -107,8 +113,18 @@ jobs:
       - name: Verrou production_valeur (heures_effectives, incident 2026-08-20)
         run: pytest tests/test_verrou_production_heures.py -v
 
-      - name: Invariant A — coûtant total (lot = CSI = mat+mo+st)
+      - name: Invariant A — convergence des groupements (lot = CSI = mat+mo+st)
         run: pytest tests/test_invariant_a_coutant_total.py -v
+
+      # 10 sept 2026 — LE CHEMIN DU RAPPORT. Mesure : en faisant compter au
+      # rapport les lignes que Simon a DESACTIVEES
+      # (`raw_lignes_actives = list(lignes_calc)` dans ad_budget_api),
+      # test_invariant_a ET test_pdf_critical restaient VERTS. Le chemin des
+      # LOTS etait garde, celui du RAPPORT ne l'etait pas — et c'est le
+      # rapport que Simon regarde. Ce fichier ferme le trou et a ete eprouve
+      # a l'envers contre cette mutation exacte.
+      - name: Le rapport exclut-il les lignes desactivees ?
+        run: pytest tests/test_rapport_ligne_inactive.py -v
 
       # Couche 3 (issue #9 monorepo) : une copie locale de la regle des
       # heures (production_valeur prioritaire) au lieu d'une delegation a

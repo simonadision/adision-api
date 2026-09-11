@@ -20,6 +20,17 @@ l'arrondi par ligne) tolère, elle, un écart borné par le nombre de lignes
 contributives — c'est la règle explicite que ce test encode, pas une
 simplification.
 
+CE QU'IL NE PROUVE PAS — a lire avant de se rassurer sur un vert. Les trois
+sommes comparees ici viennent de la MEME regle de calcul : changer la regle
+les deplace ENSEMBLE et l'egalite tient toujours. Mesure du 10 septembre
+2026 : sous la mutation qui retire a `production_valeur` sa priorite
+(l'incident du 20 aout 2026, 39 219 $ d'ecart sur le projet 290), ce fichier
+restait VERT 3/3 pendant que test_verrou_production_heures.py rougissait
+7 fois. La VALEUR des heures est gardee par ce dernier, SEUL.
+
+Le nom « Invariant A — coutant total » laissait croire l'inverse ; il dit
+desormais « convergence des groupements », dans le pre-push comme en CI.
+
 Lancer : pytest tests/test_invariant_a_coutant_total.py
 """
 import os
@@ -103,9 +114,15 @@ def test_ligne_inactive_exclue_de_toutes_les_sommes():
 
     budget = compute_budget_totals(projet, lignes_actives)
     total_csi = budget["non_grouped_total"] + sum(budget["group_subtotals"].values())
-    # 999 × 999 (la ligne inactive) dépasserait de très loin ce total si elle
-    # avait fuité dans compute_budget_totals.
-    assert total_csi < 999 * 999
+    # Valeur EXACTE, pas une borne. L'assertion precedente etait
+    # `total_csi < 999 * 999` -- 998 001 $ de marge sur un jeu de test qui en
+    # vaut 115 776,50 : elle ne pouvait pratiquement pas rougir. Une assertion
+    # qui n'a jamais pu echouer ne prouve rien (mesure du 10 septembre 2026).
+    # Si ce chiffre change, c'est que le jeu de test ou la regle de calcul a
+    # bouge : le mettre a jour est un geste DELIBERE, pas un ajustement.
+    assert total_csi == pytest.approx(115776.50, abs=1e-6), (
+        f"total CSI attendu 115776.50, obtenu {total_csi} — "
+        "la ligne inactive a-t-elle fui dans compute_budget_totals ?")
 
 
 def test_lot_vs_csi_convergent_avec_arrondi_dollar_tolerance_sur_familles():

@@ -10,13 +10,33 @@ if ! python tests/test_pdf_critical.py; then
   echo "[pre-push] ÉCHEC des tests PDF — push BLOQUÉ." >&2
   exit 1
 fi
-# Invariant A (chantier tests d'invariant, 20 août 2026) : le coûtant total
-# converge, quel que soit le groupement (par lot / par division CSI / par
-# famille de coût). Pur Python, aucune dépendance au dépôt frère -> toujours
-# bloquant.
-echo "[pre-push] Invariant A — coûtant total (lot = CSI = mat+mo+st)…"
+# Invariant A (chantier tests d'invariant, 20 août 2026) — CONVERGENCE DES
+# GROUPEMENTS : le coûtant total est le même quel que soit le groupement (par
+# lot / par division CSI / par famille de coût).
+#
+# ⚠ CE QU'IL NE GARDE PAS, et le nom mentait là-dessus. Il compare trois
+# sommes calculées à partir de la MÊME règle : changer la règle déplace les
+# trois ensemble et l'égalité tient toujours. Mesuré le 10 septembre 2026 —
+# sous la mutation qui retire à `production_valeur` sa priorité (l'incident du
+# 20 août, 39 219 $ sur le projet 290), il restait VERT 3/3 tandis que
+# test_verrou_production_heures.py rougissait 7 fois.
+# La VALEUR des heures est gardée par test_verrou_production_heures.py, seul.
+# (Depuis la même mesure, son assertion inerte `total < 999*999` a été
+# remplacée par la valeur exacte attendue : il attrape désormais aussi cette
+# mutation-là. Il reste que son objet est la convergence, pas la valeur.)
+# Pur Python, aucune dépendance au dépôt frère -> toujours bloquant.
+echo "[pre-push] Invariant A — convergence des groupements (lot = CSI = mat+mo+st)…"
 if ! python tests/test_invariant_a_coutant_total.py; then
-  echo "[pre-push] ÉCHEC Invariant A — push BLOQUÉ." >&2
+  echo "[pre-push] ÉCHEC Invariant A (convergence des groupements) — push BLOQUÉ." >&2
+  exit 1
+fi
+# Le chemin du RAPPORT exclut-il les lignes désactivées ? (10 sept. 2026)
+# Mesuré : en faisant compter au rapport les lignes que Simon a désactivées,
+# NI test_pdf_critical NI Invariant A ne rougissaient. Le chemin des lots était
+# gardé, celui du rapport ne l'était pas. Pur Python, aucune base -> bloquant.
+echo "[pre-push] Le rapport exclut-il les lignes désactivées ?…"
+if ! python tests/test_rapport_ligne_inactive.py; then
+  echo "[pre-push] ÉCHEC — une ligne désactivée compte dans le rapport. Push BLOQUÉ." >&2
   exit 1
 fi
 # Couche 3 (issue #9 monorepo) : pas de copie locale de la règle des heures
