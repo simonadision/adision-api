@@ -184,6 +184,30 @@ def _frca_num(value):
 # chantier que pour le second. Le cinquieme separe ce que le regroupement
 # avait recolle de trop.
 ALLOWED_STATUTS = {"en_soumission", "en_cours", "en_execution", "perdu", "archive"}
+
+# STATUTS QUI OUVRENT L'EXPORT VERS AD CON.
+#
+# LA PORTE ETAIT MUREE (trouve le 11 septembre 2026, capture de Simon : le
+# tableau Pre-chantier d'Ad CON n'affichait QUE son en-tete). export-for-con
+# exigeait `statut == "adjuge"`. Or « adjuge » a ete RENOMME le 9 septembre
+# par le regroupement des statuts -- la table de correspondance juste au-
+# dessus le dit noir sur blanc : adjuge, complet -> en_cours. Le nom ne
+# figure plus dans ALLOWED_STATUTS : plus aucun projet ne peut le porter.
+# La condition etait donc TOUJOURS vraie, et la porte toujours fermee -- sur
+# les 21 projets de la base, zero pouvait passer.
+#
+# Le piege : un renommage de statut ne casse rien bruyamment. Il laisse
+# derriere lui des comparaisons a une chaine qui n'existe plus, qui ne
+# levent pas, ne se plaignent pas, et se contentent de ne plus jamais dire
+# oui. C'est pour ca qu'on lit desormais un ENSEMBLE NOMME, ancre juste
+# sous ALLOWED_STATUTS : le prochain renommage se fera sous les yeux.
+#
+# LES DEUX STATUTS. `en_cours` est l'heritier direct d'« adjuge » (projet
+# gagne). `en_execution` est le chantier qui construit -- refuser son budget
+# a un chantier EN TRAIN de se batir serait absurde. En amont (en_soumission)
+# rien n'est gagne, il n'y a pas de pre-chantier a preparer ; perdu et
+# archive ne se batissent pas.
+EXPORT_CON_STATUTS = {"en_cours", "en_execution"}
 ALLOWED_TYPES_BATIMENT = {
     "residentiel", "commercial", "institutionnel", "industriel", "mixte",
 }
@@ -3635,9 +3659,9 @@ def register_ad_budget_routes(get_conn):
         Sécurité :
           - JWT user requis (jwt_user dep)
           - Auth via _load_and_authorize_projet (mode='read', supervisor OK)
-          - Refuse 403 si statut != 'adjuge' (defense in depth ; UI ne montre
-            le bouton "Démarrer suivi chantier" que sur projets adjugés, mais
-            on bloque aussi côté backend)
+          - Refuse 403 si statut hors EXPORT_CON_STATUTS (defense in depth ;
+            l'UI ne montre "Démarrer suivi chantier" que sur un projet gagné,
+            mais on bloque aussi côté backend)
           - Lignes inactives (actif=FALSE) EXCLUSES de l'export
 
         organization_id fallback (décision STOP 1.A.1, critique #2) :
@@ -3674,14 +3698,18 @@ def register_ad_budget_routes(get_conn):
             else:
                 _ident = {}
 
-            # Defense in depth — UI n'affiche pas le bouton hors 'adjuge' mais
-            # un user qui tape l'URL directement doit être bloqué aussi.
-            if projet["statut"] != "adjuge":
+            # Defense in depth — l'UI n'affiche pas le bouton sur un projet
+            # non gagné, mais un user qui tape l'URL doit être bloqué aussi.
+            if projet["statut"] not in EXPORT_CON_STATUTS:
+                # Le message NOMME les deux statuts acceptes. Un refus qui dit
+                # seulement « mauvais statut » oblige a fouiller le code pour
+                # savoir quoi changer ; celui-ci se lit et s'applique.
                 raise HTTPException(
                     status_code=403,
                     detail=(
-                        "Le projet doit être au statut Adjugé pour être exporté "
-                        f"vers Ad CON (statut actuel: {projet['statut']})"
+                        "Ad CON tire le budget d'un projet gagné : statut "
+                        "« En cours » ou « En exécution ». Ce projet est au "
+                        f"statut « {projet['statut']} »."
                     ),
                 )
 
