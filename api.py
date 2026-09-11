@@ -143,24 +143,30 @@ def _ensure_schema():
         )
         # === Sprint A : enrichir modèle projet (statut whitelist, type_batiment,
         # region, date_adjudication, superficie_m2, dernier_snapshot_id) ===
-        # 1. Migrer les statut existants vers la nouvelle whitelist AVANT le CHECK :
-        # tous les projets actuels ont 'en cours' (legacy), on bascule sur 'brouillon'
-        # pour rester dans la whitelist Sprint A.
-        cur.execute(
-            "UPDATE ad_budget.projets SET statut = 'brouillon' "
-            "WHERE statut NOT IN ('brouillon', 'adjuge', 'complet', 'perdu', 'archive')"
-        )
-        # 2. Default + CHECK statut.
-        cur.execute(
-            "ALTER TABLE ad_budget.projets ALTER COLUMN statut SET DEFAULT 'brouillon'"
-        )
-        cur.execute(
-            "ALTER TABLE ad_budget.projets DROP CONSTRAINT IF EXISTS projet_statut_check"
-        )
-        cur.execute(
-            "ALTER TABLE ad_budget.projets ADD CONSTRAINT projet_statut_check "
-            "CHECK (statut IN ('brouillon', 'adjuge', 'complet', 'perdu', 'archive'))"
-        )
+        # 1-2. LE STATUT NE SE BOOTSTRAPE PLUS ICI. Retiré le 11 septembre 2026,
+        # même esprit que les colonnes d'identité en 3-6 ci-dessous : la
+        # migration `projets_statut_chk` possède désormais ce vocabulaire, et
+        # deux autorités sur une même colonne finissent toujours par se battre.
+        #
+        # CE QUE CES QUATRE INSTRUCTIONS FAISAIENT VRAIMENT. Le renommage du
+        # 9 septembre (brouillon -> en_soumission, adjuge/complet -> en_cours,
+        # + en_execution) a rendu l'UPDATE destructeur ET impossible : il
+        # remettait à 'brouillon' TOUT projet portant un statut moderne — les
+        # 21 de la base — et 'brouillon' viole justement `projets_statut_chk`.
+        # L'UPDATE levait donc à chaque démarrage. Or _ensure_schema est UN
+        # SEUL try : la levée emportait tout ce qui suit. Dix-sept `cur.execute`
+        # d'ADD COLUMN ne tournaient plus depuis le 9 septembre, sans un mot
+        # dans les logs.
+        #
+        # LA BASE N'A ÉTÉ SAUVÉE QUE PAR L'ÉCHEC. Si le CHECK moderne n'avait
+        # pas rejeté 'brouillon', chaque redémarrage de l'API aurait remis à
+        # zéro le statut de tous les projets. Le garde-fou qui bloquait la
+        # migration est le même qui a empêché la casse.
+        #
+        # Leçon gardée ici parce qu'elle se rejouera : un renommage de valeur
+        # ne casse pas bruyamment. Il laisse derrière lui des littéraux qui
+        # ne lèvent pas, ne se plaignent pas, et cessent simplement d'être
+        # vrais — ou, comme ici, deviennent vrais pour TOUT.
         # 3-6. Phase 7A — colonnes d'IDENTITÉ (type_batiment / region /
         # date_adjudication / superficie_m2) NE SONT PLUS recréées au boot :
         # l'identité projet vit dans Ad HUB (source unique). Les ADD COLUMN IF NOT
