@@ -143,3 +143,10 @@ jobs:
       # aucune dépendance réseau.
       - name: Duplication de budget - les lots sont copiés et réassignés
         run: pytest tests/test_dupliquer_lots_et_lignes.py -v
+
+      # 11 sept 2026 - cinq budgets vivants (318, 192, 193, 273, 295) etaient
+      # invisibles parce que le hub ne rendait qu'un booleen confondant
+      # "revision perimee" et "projet supprime". Verrouille : la cause remonte,
+      # le hub muet n'invente rien, et la liste ne cascade AUCUNE suppression.
+      - name: Projet hub supprime - visible avec mention, jamais masque
+        run: pytest tests/test_hub_supprime_visible.py -v
