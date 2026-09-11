@@ -208,6 +208,20 @@ ALLOWED_STATUTS = {"en_soumission", "en_cours", "en_execution", "perdu", "archiv
 # rien n'est gagne, il n'y a pas de pre-chantier a preparer ; perdu et
 # archive ne se batissent pas.
 EXPORT_CON_STATUTS = {"en_cours", "en_execution"}
+
+# LES LIBELLES QUE SIMON VOIT A L'ECRAN. Miroir de STATUS_LABELS
+# (@adision/ui projectEnums.js) : un refus qui dit « statut en_cours »
+# oblige a traduire un code interne en bouton d'interface. Celui-ci nomme
+# ce qu'on clique. Le .get(x, x) garde le code brut si un statut apparait
+# sans passer par ici -- montrer un code est moche, mentir sur le libelle
+# serait pire.
+LIBELLE_STATUT = {
+    "en_soumission": "Projet en soumission",
+    "en_cours": "Projet en cours",
+    "en_execution": "Projet en exécution",
+    "perdu": "Projet perdu",
+    "archive": "Projet archivé",
+}
 ALLOWED_TYPES_BATIMENT = {
     "residentiel", "commercial", "institutionnel", "industriel", "mixte",
 }
@@ -3704,12 +3718,15 @@ def register_ad_budget_routes(get_conn):
                 # Le message NOMME les deux statuts acceptes. Un refus qui dit
                 # seulement « mauvais statut » oblige a fouiller le code pour
                 # savoir quoi changer ; celui-ci se lit et s'applique.
+                _actuel = projet["statut"]
                 raise HTTPException(
                     status_code=403,
                     detail=(
-                        "Ad CON tire le budget d'un projet gagné : statut "
-                        "« En cours » ou « En exécution ». Ce projet est au "
-                        f"statut « {projet['statut']} »."
+                        "Ad CON tire les lignes du budget Ad BUD, et seulement "
+                        "pour un projet gagné. Ce budget est au statut "
+                        f"« {LIBELLE_STATUT.get(_actuel, _actuel)} » : "
+                        "passez-le à « Projet en cours » ou « Projet en "
+                        "exécution » dans Ad BUD, puis rouvrez cet écran."
                     ),
                 )
 
