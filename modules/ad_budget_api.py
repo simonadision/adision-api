@@ -2198,6 +2198,32 @@ def register_ad_budget_routes(get_conn):
         # si le hub est down, on marque tout actif (la liste ne plante jamais).
         jwt_token = _extract_bearer(authorization, None, session_cookie)
         hub_ids = [r.get("ad_hub_project_id") for r in rows if r.get("ad_hub_project_id") is not None]
+
+        # PROVENANCE D'UNE COPIE (sept 2026) — `duplique_de_projet_id` porte l'id
+        # du budget SOURCE. Six cartes au titre identique dans une liste, c'est
+        # ce qui a fait parler Simon de « faux jumeaux ». On resout donc le nom
+        # de la source ICI : son identite vit au hub (le `nom` local a ete
+        # DROPpe en 7B), d'ou l'ajout de son id hub au MEME batch revision-meta
+        # — aucun appel reseau supplementaire.
+        src_ids = sorted({r["duplique_de_projet_id"] for r in rows
+                          if r.get("duplique_de_projet_id") is not None})
+        sources = {}
+        if src_ids:
+            cur2 = conn2 = None
+            try:
+                conn2 = get_conn()
+                cur2 = conn2.cursor(row_factory=dict_row)
+                cur2.execute(
+                    "SELECT id, ad_hub_project_id FROM ad_budget.projets "
+                    "WHERE id = ANY(%s)", (src_ids,))
+                sources = {row["id"]: row["ad_hub_project_id"] for row in cur2.fetchall()}
+            finally:
+                if cur2 is not None:
+                    cur2.close()
+                if conn2 is not None:
+                    conn2.close()
+            hub_ids += [h for h in sources.values() if h is not None]
+
         meta = hub_service.fetch_revision_meta(jwt_token, hub_ids) if jwt_token else {}
         for r in rows:
             # est_proprietaire : calculé ICI, dans l'espace ad_budget, le SEUL où
@@ -2209,6 +2235,16 @@ def register_ad_budget_routes(get_conn):
             r["est_proprietaire"] = (
                 r.get("user_id") is not None and r.get("user_id") == user.get("id")
             )
+            # « copie de <nom>, <date> » — best-effort : si le hub est muet, on
+            # dit quand meme que c'est une copie, sans pouvoir nommer la source.
+            src_id = r.get("duplique_de_projet_id")
+            r["duplique_de_nom"] = None
+            r["duplique_le"] = r["created_at"].isoformat() if r.get("created_at") else None
+            if src_id is not None:
+                src_hub = sources.get(src_id)
+                msrc = meta.get(str(src_hub)) if src_hub is not None else None
+                r["duplique_de_nom"] = (msrc or {}).get("name")
+
             hid = r.get("ad_hub_project_id")
             m = meta.get(str(hid)) if hid is not None else None
             if m:
@@ -2219,12 +2255,25 @@ def register_ad_budget_routes(get_conn):
                 r["revision_numero"] = m.get("numero_revision") or 0
                 r["revision_active"] = m.get("est_revision_active")
                 r["nb_revisions"] = m.get("nb_revisions") or 1
+                # PROJET HUB SUPPRIMÉ (11 sept 2026) — jusqu'ici Ad BUD ne
+                # recevait que `est_revision_active`, que le hub met à false
+                # AUSSI quand deleted_at est posé. Le front masquait donc le
+                # budget en silence, au même titre qu'une révision périmée :
+                # cinq budgets vivants (318, 192, 193, 273, 295) avaient
+                # disparu de la liste sans un mot. On rend la CAUSE ; le front
+                # affiche ceux-là AVEC une mention au lieu de les cacher.
+                # AUCUNE cascade : le budget reste vivant, ouvrable, exportable.
+                r["hub_supprime"] = bool(m.get("supprime"))
+                r["hub_supprime_le"] = m.get("supprime_le")
             else:
                 # Pas de lien hub OU hub indisponible -> traité comme standalone actif.
                 r["nom"] = None
                 r["revision_numero"] = 0
                 r["revision_active"] = True
                 r["nb_revisions"] = 1
+                # Hub muet : on n'invente PAS une suppression. Best-effort.
+                r["hub_supprime"] = False
+                r["hub_supprime_le"] = None
         return rows
 
     # ══════════════════════════════════════════════════════════
