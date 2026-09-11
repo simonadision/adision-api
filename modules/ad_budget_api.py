@@ -4075,6 +4075,10 @@ def register_ad_budget_routes(get_conn):
         "type_mandat", "modules_actifs", "folder_id", "zone_id",
     )
 
+    # Duree pendant laquelle une nouvelle duplication de la MEME source par le
+    # MEME utilisateur est refusee (409). Voir la garde dans dupliquer_projet.
+    DUPLIQUER_FENETRE_SECONDES = 60
+
     @router.post("/projets/{projet_id}/dupliquer")
     def dupliquer_projet(
         projet_id: int, data: Optional[dict] = Body(default=None), user=Depends(jwt_user),
@@ -4084,6 +4088,41 @@ def register_ad_budget_routes(get_conn):
         # Source : on la LIT, on en crée un autre. check_lock=False — un projet
         # verrouillé se copie (on ne le modifie pas), même raison que la révision.
         _load_and_authorize_projet(get_conn, projet_id, user, "write", check_lock=False)
+
+        # GARDE D'IDEMPOTENCE (11 sept 2026) — un MEME geste repete ne doit pas
+        # produire un deuxieme projet. Le front a deja sa garde (dupProjetId),
+        # mais elle vit dans un etat React : deux clics dans le meme lot
+        # d'evenements lisent tous deux la valeur d'avant. Cette garde-ci est
+        # cote serveur, donc elle tient aussi contre un rejeu de POST au
+        # rechargement, un re-essai apres timeout, ou un second onglet.
+        #
+        # Fenetre volontairement courte : DUPLIQUER_FENETRE_SECONDES. Au-dela,
+        # c'est un geste delibere (Simon a duplique 4 fois la meme soumission
+        # les 2 et 3 sept, a 17 min, 9 min et 1 jour d'intervalle — chacune
+        # voulue). On ne bloque pas un travail reel, on bloque un accident.
+        _c0 = get_conn(); _cur0 = _c0.cursor(row_factory=dict_row)
+        try:
+            _cur0.execute(
+                """
+                SELECT id, created_at FROM ad_budget.projets
+                 WHERE duplique_de_projet_id = %s
+                   AND user_id = %s
+                   AND supprime_le IS NULL
+                   AND created_at > now() - (%s || ' seconds')::interval
+                 ORDER BY created_at DESC LIMIT 1
+                """,
+                (projet_id, user["id"], str(DUPLIQUER_FENETRE_SECONDES)),
+            )
+            _recente = _cur0.fetchone()
+        finally:
+            _cur0.close(); _c0.close()
+        if _recente:
+            raise HTTPException(
+                status_code=409,
+                detail=("Une copie de ce projet vient d'etre creee "
+                        f"(budget #{_recente['id']}). Rafraichissez la liste : "
+                        "elle y est deja."),
+            )
 
         _c = get_conn(); _cur = _c.cursor(row_factory=dict_row)
         try:
@@ -4154,16 +4193,19 @@ def register_ad_budget_routes(get_conn):
                    pct_admin_conditions, pct_admin_architecture,
                    pct_admin_mecanique, pct_admin_excavation,
                    ad_hub_project_id, client_id,
-                   arrondi_dollar, pct_admin_mode, regroupements)
+                   arrondi_dollar, pct_admin_mode, regroupements,
+                   duplique_de_projet_id)
                 SELECT %s, %s, statut, notes,
                        pct_admin_conditions, pct_admin_architecture,
                        pct_admin_mecanique, pct_admin_excavation,
                        %s, client_id,
-                       arrondi_dollar, pct_admin_mode, regroupements
+                       arrondi_dollar, pct_admin_mode, regroupements,
+                       %s
                 FROM ad_budget.projets WHERE id = %s
                 RETURNING *
                 """,
-                (user["id"], user["organization_id"], int(new_hub_id), projet_id))
+                (user["id"], user["organization_id"], int(new_hub_id),
+                 projet_id, projet_id))
             new_projet = cur.fetchone()
             new_id = new_projet["id"]
             # Simon, en direct, 2 sept 2026, capture à l'appui (projet
