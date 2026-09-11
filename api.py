@@ -141,26 +141,27 @@ def _ensure_schema():
             "WHERE COALESCE(sous_traitant_montant, 0) = 0 "
             "  AND COALESCE(cout_sous_traitant, 0) <> 0"
         )
-        # === Sprint A : enrichir modèle projet (statut whitelist, type_batiment,
-        # region, date_adjudication, superficie_m2, dernier_snapshot_id) ===
-        # 1. Migrer les statut existants vers la nouvelle whitelist AVANT le CHECK :
-        # tous les projets actuels ont 'en cours' (legacy), on bascule sur 'brouillon'
-        # pour rester dans la whitelist Sprint A.
-        cur.execute(
-            "UPDATE ad_budget.projets SET statut = 'brouillon' "
-            "WHERE statut NOT IN ('brouillon', 'adjuge', 'complet', 'perdu', 'archive')"
-        )
-        # 2. Default + CHECK statut.
-        cur.execute(
-            "ALTER TABLE ad_budget.projets ALTER COLUMN statut SET DEFAULT 'brouillon'"
-        )
-        cur.execute(
-            "ALTER TABLE ad_budget.projets DROP CONSTRAINT IF EXISTS projet_statut_check"
-        )
-        cur.execute(
-            "ALTER TABLE ad_budget.projets ADD CONSTRAINT projet_statut_check "
-            "CHECK (statut IN ('brouillon', 'adjuge', 'complet', 'perdu', 'archive'))"
-        )
+        # === Sprint A : enrichir modèle projet ===
+        # 1-2. WHITELIST DE STATUT RETIRÉE D'ICI le 10 sept. 2026, et ce n'est
+        # pas un nettoyage cosmétique : ce bloc TUAIT _ensure_schema à CHAQUE
+        # démarrage. Il rejouait la whitelist Sprint A
+        # ('brouillon'/'adjuge'/'complet'/'perdu'/'archive'), abandonnée par la
+        # migration sprint_quatre_statuts_projet.sql du 9 septembre. Son premier
+        # statement passait tous les projets à 'brouillon' -- valeur que la
+        # contrainte actuelle projets_statut_chk refuse. Journal de production,
+        # à chaque boot : « [startup] schema migration failed: new row for
+        # relation "projets" violates check constraint "projets_statut_chk" ».
+        # Le except géant plus bas avalait l'erreur, la transaction était
+        # perdue, et TOUT le reste de _ensure_schema avec elle -- silencieux.
+        #
+        # Sans la contrainte posée par la migration, ce même UPDATE aurait
+        # écrasé les 21 statuts de production en 'brouillon'. C'est le hasard
+        # qui a tenu, pas le code.
+        #
+        # Le CHECK et le DEFAULT de `statut` vivent désormais dans les
+        # migrations versionnées (migrations/sprint_quatre_statuts_projet.sql
+        # et sa suite pour 'en_execution'), source unique. La whitelist lue par
+        # l'API est ALLOWED_STATUTS, dans modules/ad_budget_api.py.
         # 3-6. Phase 7A — colonnes d'IDENTITÉ (type_batiment / region /
         # date_adjudication / superficie_m2) NE SONT PLUS recréées au boot :
         # l'identité projet vit dans Ad HUB (source unique). Les ADD COLUMN IF NOT
