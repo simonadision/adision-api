@@ -79,18 +79,32 @@ def register_ad_gabarits_routes(get_conn):
         """Valide/nettoie la liste de regroupements reçue du client — une
         liste vide est valide (aucun regroupement, comportement d'avant).
         Chaque entrée : {nom, divisions: [code, …], sections: [code, …],
-        apres}. Une entrée sans nom, ou sans AUCUN membre (ni division ni
-        section), est écartée plutôt que rejetée : un regroupement à moitié
-        rempli ne doit pas bloquer l'enregistrement du reste du gabarit.
+        lignes: [id, …], apres}. Une entrée sans nom, ou sans AUCUN membre
+        (ni division, ni section, ni ligne), est écartée plutôt que
+        rejetée : un regroupement à moitié rempli ne doit pas bloquer
+        l'enregistrement du reste du gabarit.
 
         `sections` (9 septembre 2026, Simon : « Sous total que je viens de
         sélectionner doit pouvoir devenir une ligne et je dois pouvoir éditer
         le titre ») : membres à la granularité SECTION, choisis par sélection
         dans le Récapitulatif. `divisions` ne savait grouper que des divisions
         entières ("09", "22") — impossible d'y exprimer « 09.1 + 09.2 » sans
-        avaler tout le 09, ni « 02 56 » seul. Les deux listes COEXISTENT dans
-        une même entrée et s'additionnent : un sous-total existant, qui n'a
-        que `divisions`, continue de fonctionner à l'identique et ressort tel
+        avaler tout le 09, ni « 02 56 » seul.
+
+        `lignes` (14 septembre 2026, Simon : « ajouter l'outils selection des
+        ligne avec lasso... je peux creer un sous total pour les ligne
+        selectionner ») : va un cran plus loin que `sections` — des membres à
+        la granularité LIGNE, choisis par lasso dans le tableau du budget.
+        `sections` ne peut exprimer qu'un groupe de lignes qui coïncide avec
+        une section ENTIÈRE ; un lasso qui n'attrape que 3 lignes sur les 10
+        d'une section a besoin d'exprimer EXACTEMENT ces 3-là, jamais la
+        section au complet. `lignes` porte les id numériques de
+        ad_budget.budget_lignes — jamais un code CSI, donc jamais confondu
+        avec `divisions`/`sections` à la lecture.
+
+        Les TROIS listes COEXISTENT dans une même entrée et s'additionnent :
+        un sous-total existant, qui n'a que `divisions` (ou `divisions` +
+        `sections`), continue de fonctionner à l'identique et ressort tel
         quel — aucune migration, aucun recalcul.
 
         `apres` : le NUMÉRO (code CSI) de la division après laquelle ce
@@ -121,10 +135,22 @@ def register_ad_gabarits_routes(get_conn):
             sections = [
                 (c or "").strip() for c in (r.get("sections") or []) if (c or "").strip()
             ]
+            # Membres à la granularité LIGNE (lasso, 14 sept. 2026) — id
+            # numériques de ad_budget.budget_lignes, PROPRES à un projet
+            # (un gabarit n'en envoie jamais : ses lignes vivent dans
+            # gabarit_lignes, une table différente, sans id partageable
+            # avec un budget). Dédupliqués, positifs, plafonnés à 500 —
+            # même esprit que le plafond de `nom` juste en dessous : une
+            # limite large, jamais atteinte en usage réel, qui borne
+            # seulement un payload pathologique.
+            lignes = sorted({
+                int(l) for l in (r.get("lignes") or [])
+                if isinstance(l, (int, float)) and not isinstance(l, bool) and int(l) > 0
+            })[:500]
             # Un membre SUFFIT, quelle que soit sa granularité. Exiger
             # `divisions` comme avant rejetterait en silence tout sous-total
-            # créé depuis une sélection de sections.
-            if not nom or (not divisions and not sections):
+            # créé depuis une sélection de sections — ou, désormais, de lignes.
+            if not nom or (not divisions and not sections and not lignes):
                 continue
             apres = r.get("apres")
             apres = apres.strip()[:20] if isinstance(apres, str) and apres.strip() else None
@@ -136,7 +162,7 @@ def register_ad_gabarits_routes(get_conn):
             )
             out.append({
                 "nom": nom[:200], "divisions": divisions, "sections": sections,
-                "apres": apres, "division_liee": division_liee,
+                "lignes": lignes, "apres": apres, "division_liee": division_liee,
             })
         return out
 
