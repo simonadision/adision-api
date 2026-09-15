@@ -94,3 +94,43 @@ def test_non_regression_divisions_seules_inchangees():
     assert r["divisions"] == ["03", "05"]
     assert r["lignes"] == []
     assert r["apres"] == "02"
+
+
+def test_apres_ligne_id_ancre_precise():
+    # Simon : « ce que j'aimerais c'est de pouvoir placer mon sous total
+    # n'importe ou » -- ancre plus fine que `apres` (division), pointant
+    # une ligne précise du projet.
+    out = _appel([{"nom": "Caution et assurance", "lignes": [55], "apres_ligne_id": 12345}])
+    r = out["regroupements"][0]
+    assert r["apres_ligne_id"] == 12345
+    assert r["lignes"] == [55]
+
+
+def test_apres_ligne_id_coexiste_avec_apres_division():
+    # `apres` reste la position de repli si la ligne ancrée disparaît un
+    # jour -- les deux champs coexistent, jamais l'un n'efface l'autre.
+    out = _appel([{
+        "nom": "Repli", "divisions": ["09"], "apres": "05", "apres_ligne_id": 777,
+    }])
+    r = out["regroupements"][0]
+    assert r["apres"] == "05"
+    assert r["apres_ligne_id"] == 777
+
+
+def test_apres_ligne_id_rejette_non_entier_ou_negatif():
+    out = _appel([{
+        "nom": "Bruit", "lignes": [1], "apres_ligne_id": "abc",
+    }, {
+        "nom": "Bruit negatif", "lignes": [2], "apres_ligne_id": -5,
+    }, {
+        "nom": "Bruit zero", "lignes": [3], "apres_ligne_id": 0,
+    }])
+    for r in out["regroupements"]:
+        assert r["apres_ligne_id"] is None, r
+
+
+def test_apres_ligne_id_absent_reste_none():
+    # Cas courant : un sous-total créé via la modale (division seule) n'a
+    # jamais d'ancre de ligne -- ne doit jamais planter ni inventer 0.
+    out = _appel([{"nom": "Classique", "divisions": ["09"]}])
+    assert out["regroupements"][0]["apres_ligne_id"] is None
