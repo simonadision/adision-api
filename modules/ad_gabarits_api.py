@@ -116,6 +116,25 @@ def register_ad_gabarits_routes(get_conn):
         en base telle quelle, le client la traite comme "en fin de liste"
         au rendu plutôt que de planter.
 
+        `apres_ligne_id` (15 sept. 2026, Simon : « ce que j'aimerais c'est
+        de pouvoir placer mon sous total n'importe ou ») : ancre de
+        position PLUS FINE que `apres` — l'id d'une ligne PRÉCISE de
+        ad_budget.budget_lignes, propre au PROJET (jamais envoyé par un
+        gabarit, même raison que `lignes` ci-dessus). Quand posée, le
+        client insère ce regroupement JUSTE APRÈS CETTE LIGNE, où qu'elle
+        vive dans le tableau — au milieu d'une section, pas seulement
+        après une division entière comme `apres` le permettait. Les deux
+        champs COEXISTENT : `apres_ligne_id`, quand présent, prime pour le
+        placement ; `apres` (division) reste la position de repli si la
+        ligne ancrée disparaît un jour (ligne supprimée) — jamais un
+        regroupement qui redevient invisible faute d'ancre valide.
+        IMPORTANT côté comptes : ce champ ne change RIEN au calcul des
+        totaux — un regroupement reste une ligne PUREMENT VISUELLE,
+        jamais membre de la division/section qui l'entoure visuellement
+        (elle ne devient membre QUE via `divisions`/`sections`/`lignes`,
+        des champs entièrement séparés) — cf. Simon, en direct : « Le
+        sous total insere est visuel pas comptable ».
+
         `division_liee` : le NUMÉRO de la division-mère que ce regroupement
         totalise, quand ce regroupement a été créé EN DUO avec une division
         (ex. "09", auto-détecté à l'import PDF, PR #82 — reste une division
@@ -154,6 +173,14 @@ def register_ad_gabarits_routes(get_conn):
                 continue
             apres = r.get("apres")
             apres = apres.strip()[:20] if isinstance(apres, str) and apres.strip() else None
+            apres_ligne_id = r.get("apres_ligne_id")
+            apres_ligne_id = (
+                int(apres_ligne_id)
+                if isinstance(apres_ligne_id, (int, float))
+                and not isinstance(apres_ligne_id, bool)
+                and int(apres_ligne_id) > 0
+                else None
+            )
             division_liee = r.get("division_liee")
             division_liee = (
                 division_liee.strip()[:20]
@@ -162,7 +189,8 @@ def register_ad_gabarits_routes(get_conn):
             )
             out.append({
                 "nom": nom[:200], "divisions": divisions, "sections": sections,
-                "lignes": lignes, "apres": apres, "division_liee": division_liee,
+                "lignes": lignes, "apres": apres, "apres_ligne_id": apres_ligne_id,
+                "division_liee": division_liee,
             })
         return out
 
