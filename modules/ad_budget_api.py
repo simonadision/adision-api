@@ -6638,18 +6638,22 @@ def register_ad_budget_routes(get_conn):
             "generated_by": user.get("id"),
             "generated_by_nom": user.get("nom") or user.get("email"),
             "snapshot_data": json.dumps(snapshot, default=str),
-            # Titre affiché dans Espace Rapports (Simon 2026-08-12) : Ad BUD n'a
-            # pas de champ "titre du document" libre comme Ad FAC -> repli sur
-            # le NOM DU PROJET (identifiant naturel côté HUB), pour que chaque
-            # ligne « Rapports de calcul » affiche un libellé lisible au lieu
-            # d'une ligne nue avec juste le badge de révision. Brief Simon,
-            # 20 août 2026 : en mode "par_lot", le libellé du mode est ANNEXÉ —
-            # sans ça, un projet qui a émis les DEUX types de rapport (calcul ET
-            # ventilation) afficherait deux lignes identiques dans Espace
-            # Rapports, impossible à distinguer. Mode "global" INCHANGÉ (pas de
-            # suffixe) — comportement historique, aucune régression.
-            "titre": (f"{snapshot['project']['nom']} — {mode_label}"
-                      if mode_export == "par_lot" else snapshot["project"]["nom"]),
+            # Titre affiché dans Espace Rapports. Fixé à « Ventilation des
+            # coûts » (15 sept 2026, Simon : « le titre de mes rapport doit
+            # être pour les rapports de calcul : ventilation des coûts » —
+            # remplace le NOM DU PROJET utilisé depuis le 2026-08-12, qui
+            # rendait chaque ligne indistincte de son propre nom de projet.
+            # MÊME libellé que le repli de build_report_filename (adision-
+            # app-api, modules/report_filename.py, REPORT_TYPE_LABELS
+            # ["calcul_quantitatif"]) — garde le titre Espace Rapports et le
+            # nom de fichier téléchargé cohérents entre eux.
+            # Brief Simon, 20 août 2026 : en mode "par_lot", le libellé du
+            # mode reste ANNEXÉ — sans ça, un projet qui a émis les DEUX
+            # types de rapport (calcul ET ventilation) afficherait deux
+            # lignes identiques dans Espace Rapports, impossible à
+            # distinguer. Mode "global" INCHANGÉ (pas de suffixe).
+            "titre": (f"Ventilation des coûts — {mode_label}"
+                      if mode_export == "par_lot" else "Ventilation des coûts"),
         }
         try:
             result = hub_service.post_report(jwt_token, int(hub_pid), pdf_bytes, fields)
