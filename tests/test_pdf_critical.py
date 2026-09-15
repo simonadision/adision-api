@@ -360,7 +360,10 @@ def test_emit_ventilation_par_lot_vers_hub():
     assert "Ventilation par lot" in texte, "le PDF émis n'est pas la ventilation par lot"
     assert "Ventilation des coûts" not in texte, "le PDF émis est encore le rapport de calcul (régression du bug)"
     f = captured["fields"]
-    assert f["titre"] == "Projet 290 — Ventilation par lot", f["titre"]
+    # 15 sept 2026 — "titre" ne porte plus le nom du projet (Simon : "le
+    # titre de mes rapport doit être ... ventilation des coûts"), fixé sur
+    # le libellé du type de document ; le suffixe de mode reste annexé.
+    assert f["titre"] == "Ventilation des coûts — Ventilation par lot", f["titre"]
     assert f["montant_affiche_pdf"] == 1149.75, f["montant_affiche_pdf"]
     # Snapshot poussé au hub reste le budget COMPLET (dissociation VOULUE,
     # inchangée par mode_export) -- pas touché par ce correctif.
@@ -461,7 +464,11 @@ def test_emit_par_lot_montant_divergent_409():
 
 def test_emit_global_titre_inchange_non_regression():
     """Non-régression (critère d'acceptation #2) : mode "global" (défaut) ->
-    même comportement qu'avant ce correctif, AUCUN suffixe sur le titre."""
+    AUCUN suffixe de mode sur le titre (contrairement à "par_lot" ci-dessus).
+    Valeur de base mise à jour le 15 sept 2026 (Simon : "le titre de mes
+    rapport doit être ... ventilation des coûts") : le titre ne reprend plus
+    le nom du projet, mais l'ABSENCE de suffixe en mode global reste le vrai
+    invariant que ce test garde."""
     import modules.ad_budget_api as B
     _patch_no_network()
     captured = {}
@@ -485,7 +492,7 @@ def test_emit_global_titre_inchange_non_regression():
 
     assert out.get("emitted") is True
     assert out.get("mode_export") == "global"
-    assert captured["fields"]["titre"] == "Projet 290", captured["fields"]["titre"]
+    assert captured["fields"]["titre"] == "Ventilation des coûts", captured["fields"]["titre"]
     print("  [OK] mode global : titre = nom du projet seul, aucun suffixe (non-régression)")
 
 

@@ -528,6 +528,19 @@ def register_ad_devis_routes(get_conn):
         empreinte_courante = budget_fingerprint.fingerprint_from_current_state(projet, lignes_actives)
         divergent = bool(empreinte and empreinte != empreinte_courante)
         if divergent and not force:
+            # DIAGNOSTIC TEMPORAIRE (15 sept 2026) — Simon rapporte que cette
+            # modale apparaît désormais SYSTÉMATIQUEMENT, sur TOUS les projets,
+            # même juste après « Régénérer l'aperçu ». Cause non identifiée
+            # avec certitude par lecture de code seule (algorithme JS/Python
+            # déjà testé cross-langage, 5/5 fixtures vertes). On imprime la
+            # chaîne canonique SERVEUR complète pour pouvoir la diffé, au
+            # prochain accroc, contre celle que le client aurait dû produire
+            # — à retirer une fois la cause trouvée.
+            montant_courant = round(compute_budget_totals(projet, lignes_actives)["sous_total_avant_taxes"], 2)
+            _canon_courante = budget_fingerprint.canonical_string(projet, lignes_actives, montant_courant)
+            print(f"[devis-emit-divergence] projet={projet_id} empreinte_recue={empreinte} "
+                  f"empreinte_courante={empreinte_courante}\n--- canonique SERVEUR ---\n{_canon_courante}\n"
+                  f"--- fin canonique ---", flush=True)
             # ON INFORME, ON NE BLOQUE PAS : le client propose « régénérer » ou
             # « émettre quand même » (force=true). Aucun état modifié ici.
             return {
@@ -536,6 +549,10 @@ def register_ad_devis_routes(get_conn):
                             "depuis. Le régénérer avant d'émettre, ou l'émettre tel quel ?"),
                 "empreinte_recue": empreinte,
                 "empreinte_courante": empreinte_courante,
+                # Exposée aussi côté réponse (diagnostic temporaire, cf. print
+                # ci-dessus) : le canonique SERVEUR, pour diff direct contre
+                # le canonique CLIENT (console du navigateur, cf. App.jsx).
+                "canonique_courante_serveur": _canon_courante,
             }
 
         # ── Mécanique de révision (option A) — choix user si budget changé ─────
@@ -585,11 +602,17 @@ def register_ad_devis_routes(get_conn):
             "budget_fingerprint": empreinte or empreinte_courante,
             "budget_fingerprint_current": empreinte_courante,
             "budget_divergent": divergent,
-            # Titre affiché dans Espace Rapports (Simon 2026-08-12) — même repli
-            # que calcul_quantitatif : pas de champ "titre" libre côté devis,
-            # NOM DU PROJET utilisé pour que « Propositions & Devis » affiche un
-            # libellé lisible plutôt qu'une ligne nue.
-            "titre": snapshot["project"]["nom"],
+            # Titre affiché dans Espace Rapports. Fixé à « Devis » (15 sept
+            # 2026, Simon : « pour propostion et devis : Devis » — remplace
+            # le NOM DU PROJET utilisé depuis le 2026-08-12, qui rendait
+            # chaque ligne indistincte de son propre nom de projet.
+            # ⚠ Le sous-titre IMPRIMÉ dans le PDF lui-même (buildDevisPdf.js,
+            # adision-monorepo/packages/devis-pdf) reste « Proposition /
+            # Devis — {révision} », inchangé par ce correctif — seul le
+            # libellé Espace Rapports/nom de fichier (REPORT_TYPE_LABELS
+            # ["proposition_devis"], adision-app-api/modules/
+            # report_filename.py, à aligner séparément si besoin) change ici.
+            "titre": "Devis",
         }
         try:
             result = hub_service.post_report(jwt_token, int(hub_pid), pdf_bytes, fields)
