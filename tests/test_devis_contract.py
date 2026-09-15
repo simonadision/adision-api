@@ -65,6 +65,14 @@ def _setup(has_logo=True):
         return org
     H.fetch_organization = _fetch_org
     H.fetch_project_documents = lambda *a, **k: None
+    # Profil utilisateur courant (15 sept 2026, titre + téléphone du
+    # responsable signature) — monkeypatché pour rester SANS réseau, sinon
+    # la vraie fetch_current_user tenterait un _hub_request() réel.
+    H.fetch_current_user = lambda jwt: {
+        "nom": "Simon Hachey", "email": "simon@contracta.ca",
+        "function": "estimateur_senior", "fonction_nom": "Directeur préconstruction",
+        "organization_name": "Contracta", "organization_telephone": "418-931-0686",
+    }
 
     png = _png_bytes()
 
@@ -123,6 +131,58 @@ def test_contrat_org_sans_logo_pas_d_erreur():
     resp = _call_get_devis(D)
     assert resp["entreprise"].get("logo_base64") is None, "logo_base64 devrait être None quand l'org n'a pas de logo_url"
     print("  [OK] org sans logo_url -> logo_base64=None (pas d'erreur, placeholder neutre)")
+
+
+def test_contrat_user_fonction_et_telephone_pour_responsable_signature():
+    # 15 sept 2026, Simon : « ces infos sont toutes dans ad hub. Mon titre
+    # et mon # de télléphone... remplir automatique a partir des infos de
+    # ad hub » — user.fonction/user.telephone alimentent le bloc
+    # "Responsable (signature)" du devis côté front (App.jsx).
+    D, org, called = _setup(has_logo=True)
+    resp = _call_get_devis(D)
+    usr = resp["user"]
+    assert usr.get("fonction") == "Directeur préconstruction", (
+        f"user.fonction={usr.get('fonction')!r} — attendu fonction_nom (titre HUB "
+        f"org-personnalisable), priorité sur l'enum legacy `function`")
+    assert usr.get("telephone") == "418-931-0686", (
+        f"user.telephone={usr.get('telephone')!r} — attendu le téléphone de "
+        f"l'organisation (organization_telephone), seul dispo côté app_central.users")
+    print("  [OK] user.fonction/user.telephone exposés (Responsable signature, remplissage auto)")
+
+
+def test_contrat_user_fonction_replie_sur_function_legacy_si_fonction_nom_absent():
+    # fonction_id NULL / non mappé (compte sans titre org-personnalisé) ->
+    # repli sur l'enum legacy `function`, jamais un champ vide si une
+    # valeur connue existe (même principe que partout ailleurs ce chantier).
+    D, org, called = _setup(has_logo=True)
+    import modules.hub_service as H
+    H.fetch_current_user = lambda jwt: {
+        "nom": "Simon Hachey", "email": "simon@contracta.ca",
+        "function": "estimateur_senior", "fonction_nom": None,
+        "organization_telephone": "418-931-0686",
+    }
+    resp = _call_get_devis(D)
+    assert resp["user"].get("fonction") == "estimateur_senior", (
+        f"user.fonction={resp['user'].get('fonction')!r} — attendu le repli sur "
+        f"`function` (legacy) quand fonction_nom est absent")
+    print("  [OK] fonction_nom absent -> repli sur l'enum legacy `function`")
+
+
+def test_contrat_user_fonction_telephone_absents_si_hub_injoignable():
+    # fetch_current_user lève (401/5xx/réseau) -> get_devis reste 200, avec
+    # user.fonction/user.telephone à None plutôt qu'un 500 (non bloquant,
+    # même esprit que fetch_organization juste au-dessus dans le code).
+    D, org, called = _setup(has_logo=True)
+    import modules.hub_service as H
+
+    def _boom(jwt):
+        raise H.HubServiceError(503, "hub injoignable")
+    H.fetch_current_user = _boom
+    resp = _call_get_devis(D)
+    assert resp["user"].get("fonction") is None
+    assert resp["user"].get("telephone") is None
+    assert resp["user"].get("nom") == "Simon", "nom/email (JWT) doivent rester intacts malgré l'échec du hub"
+    print("  [OK] hub injoignable pour fetch_current_user -> devis reste 200, fonction/telephone=None")
 
 
 # ── Runner autonome ───────────────────────────────────────────────────────

@@ -290,6 +290,17 @@ def register_ad_devis_routes(get_conn):
             entreprise = hub_service.fetch_organization(jwt_token, projet.get("organization_id")) or {}
         except Exception as e:  # noqa: BLE001
             print(f"[devis] fetch_organization échec: {e}", flush=True)
+        # Profil de l'utilisateur COURANT (HUB) — non bloquant. Brief Simon,
+        # 15 sept 2026 : « mon titre et mon # de téléphone... remplir
+        # automatique a partir des infos de ad hub » — le bloc « Responsable
+        # (signature) » du devis n'avait que nom/email (JWT), jamais le
+        # titre (fonction_nom) ni un téléphone (celui de l'organisation,
+        # app_central.users n'a pas de colonne téléphone individuelle).
+        moi = {}
+        try:
+            moi = hub_service.fetch_current_user(jwt_token) or {}
+        except Exception as e:  # noqa: BLE001
+            print(f"[devis] fetch_current_user échec: {e}", flush=True)
         # Documents GED du projet HUB lié — non bloquant.
         documents = []
         _documents_fetch_ok = False
@@ -353,7 +364,16 @@ def register_ad_devis_routes(get_conn):
                 "courriel": _ident.get("email_client"),
                 "telephone": _ident.get("telephone_client"),
             },
-            "user": {"nom": user.get("nom"), "email": user.get("email")},
+            "user": {
+                "nom": user.get("nom"), "email": user.get("email"),
+                # Titre lisible (fonctions.nom, org-personnalisable) en
+                # priorité ; repli sur l'enum legacy `function` (mieux que
+                # rien) si le hub n'a pas résolu/n'est pas joignable.
+                "fonction": moi.get("fonction_nom") or moi.get("function"),
+                # Pas de téléphone individuel côté app_central.users —
+                # celui de l'ORGANISATION est le seul disponible.
+                "telephone": moi.get("organization_telephone"),
+            },
             "documents": documents,
             # Traçabilité : 'hub' (frais) | 'snapshot' (copie locale, hub down) |
             # 'none' (aucune identité). Le front affiche un bandeau selon la valeur.

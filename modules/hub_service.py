@@ -507,6 +507,32 @@ def fetch_organization(jwt_token: str, organization_id=None) -> Optional[dict]:
         raise
 
 
+def fetch_current_user(jwt_token: str) -> Optional[dict]:
+    """Profil de l'utilisateur COURANT (HUB) via GET /auth/me — nom, email,
+    fonction_nom (titre lisible, table org-personnalisable app_central.
+    fonctions), organization_name, organization_telephone…
+
+    Brief Simon, 15 sept 2026 : « mon titre et mon # de téléphone... remplir
+    automatique a partir des infos de ad hub » — le devis n'affichait que
+    nom/email du responsable (signature), jamais son titre ni un téléphone,
+    faute de les demander au hub. /auth/me est la SEULE source documentée de
+    ces claims (cf. adision-app-api modules/auth_api.py, note sur
+    _fetch_user) — additif, jamais de retrait.
+
+    None si 404 (même convention que fetch_organization/fetch_project) ;
+    toute autre erreur (401/403/5xx/réseau) PROPAGE HubServiceError — c'est
+    au CALLER de décider si l'appel est bloquant ou non (get_devis l'entoure
+    d'un try/except large, même pattern que son propre appel à
+    fetch_organization juste au-dessus : cet appel enrichit un
+    pré-remplissage, il ne doit jamais faire échouer tout le devis)."""
+    try:
+        return _hub_request("GET", "/auth/me", jwt_token)
+    except HubServiceError as e:
+        if e.status_code == 404:
+            return None
+        raise
+
+
 def fetch_project_documents(jwt_token: str, project_id: int) -> Optional[dict]:
     """Arbre des documents GED d'un projet HUB (categories > disciplines >
     documents) via GET /api/projects/{id}/documents. None si 404."""
