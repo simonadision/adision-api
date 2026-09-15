@@ -6897,6 +6897,37 @@ def register_ad_budget_routes(get_conn):
             ORDER BY section, ordre, id;
         """, (projet_id,))
         rows = cur.fetchall()
+
+        # D5 bis — backfill du taux horaire par défaut À L'OUVERTURE d'un
+        # projet EXISTANT (15 sept 2026, Simon, 2e demande explicite : « a
+        # l'ouverture d un projet dans ad bud. Toute les items qui n ont pas
+        # de taux horaire doivent être par defaut le taux horaire charpentier
+        # menuisier compagnon. ca fait 2 fois que je demande.... toujour pas
+        # fait »). Le D5 existant (création de ligne + PATCH explicite du
+        # champ taux_horaire, cf. create_budget_ligne et update_budget_ligne
+        # plus bas) ne couvre QUE ces deux écritures — une ligne déjà à 0/NULL
+        # en base, simplement RELUE ici sans que personne y touche, n'était
+        # JAMAIS corrigée. Cette route est justement le seul chemin appelé au
+        # chargement de la grille budget d'un projet.
+        #
+        # On PERSISTE (UPDATE), pas un simple repli d'affichage à la volée :
+        # une valeur $0 fausse restée en base pourrait fuiter par un autre
+        # chemin (export, autre écran) — cf. le principe déjà appliqué au D5
+        # de création. Persister garde aussi une seule source de vérité entre
+        # l'écran, le moteur PDF jsPDF et le moteur PDF reportlab (double
+        # moteur PDF, déjà source d'incidents cette session).
+        a_corriger = [r for r in rows if r["taux_horaire"] is None or _est_zero(r["taux_horaire"])]
+        if a_corriger:
+            for r in a_corriger:
+                resolved = _resolve_taux_default(r["section"], conn)
+                if resolved is not None and not _est_zero(resolved):
+                    cur.execute(
+                        "UPDATE ad_budget.budget_lignes SET taux_horaire = %s WHERE id = %s",
+                        (resolved, r["id"]),
+                    )
+                    r["taux_horaire"] = resolved
+            conn.commit()
+
         cur.close()
         conn.close()
         return rows

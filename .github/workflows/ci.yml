@@ -150,3 +150,14 @@ jobs:
       # le hub muet n'invente rien, et la liste ne cascade AUCUNE suppression.
       - name: Projet hub supprime - visible avec mention, jamais masque
         run: pytest tests/test_hub_supprime_visible.py -v
+
+      # 15 sept 2026 - Simon, 2e demande explicite : a l'ouverture d'un
+      # projet EXISTANT, toute ligne sans taux horaire (0/NULL) doit prendre
+      # le taux CHARPENTIER_C par defaut. Le D5 du 9 sept ne couvrait que la
+      # creation de ligne et le PATCH explicite du champ taux_horaire ; GET
+      # /projets/{id}/lignes (le seul chemin appele a l'ouverture) ne
+      # corrigeait rien. Verrouille : script (memes contraintes que
+      # test_divergences_ecran_rapport.py - fake cursor pilote par une file
+      # de reponses, pas un vrai pytest).
+      - name: Backfill taux horaire par defaut - ouverture de projet
+        run: python tests/test_taux_horaire_backfill_ouverture.py
