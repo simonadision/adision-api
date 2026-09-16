@@ -168,6 +168,9 @@ jobs:
       - name: Ligne Ad TYP - code CSI, jamais Uniformat
         run: python tests/test_section_csi_typ.py
 
+      - name: Ligne Ad TYP - taux par defaut, jamais de pseudo-taux
+        run: python tests/test_typ_taux_defaut.py
+
       # 16 sept 2026 - « + Ligne » enregistrait la ligne a ordre 0 : au
       # rechargement elle remontait en tete de section.
       - name: Creation de ligne - rang persiste (+ Ligne)

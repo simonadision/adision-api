@@ -1385,7 +1385,7 @@ def register_ad_gabarits_routes(get_conn):
                             # une ligne neuve naît sans quantité). prix_unitaire (par
                             # unité) est préservé → quand l'user saisit une qté, MAT
                             # scale live et MO/ST sont re-snapshotés via apply-typ.
-                            m = _map_typ_to_budget_cols(typ, 0)
+                            m = _map_typ_to_budget_cols(typ, 0, cur.connection)
                             # ═══════════════════════════════════════════════
                             # LA SOUS-SECTION DU GABARIT GAGNE (9 sept 2026)
                             # ═══════════════════════════════════════════════
