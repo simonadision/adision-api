@@ -132,7 +132,7 @@ def main():
         owner_id = cur.fetchone()["id"]
         cur.execute(
             "INSERT INTO ad_budget.projets (user_id, organization_id, statut) "
-            "VALUES (%s, %s, 'brouillon') RETURNING id",
+            "VALUES (%s, %s, 'en_soumission') RETURNING id",
             (owner_id, org_a),
         )
         projet_id = cur.fetchone()["id"]

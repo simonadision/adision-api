@@ -48,7 +48,7 @@
                 cur.execute(
                     """
                     INSERT INTO ad_budget.projets (user_id, nom, statut)
-                    VALUES (%s, %s, 'brouillon')
+                    VALUES (%s, %s, 'en_soumission')
                     RETURNING id, nom
                     """,
                     (user["id"], project_name),

@@ -89,7 +89,7 @@ def main():
         # Fixture : projet + 2 lignes, sans lien hub.
         cur.execute(
             "INSERT INTO ad_budget.projets (organization_id, nom, statut) "
-            "VALUES (%s, %s, 'brouillon') RETURNING id",
+            "VALUES (%s, %s, 'en_soumission') RETURNING id",
             (org, f"TEST-QA-corbeille-{SUF}"),
         )
         projet_id = cur.fetchone()["id"]
@@ -151,7 +151,7 @@ def main():
         # ne peut pas être effacé définitivement en contournant la corbeille.
         cur.execute(
             "INSERT INTO ad_budget.projets (organization_id, nom, statut) "
-            "VALUES (%s, %s, 'brouillon') RETURNING id",
+            "VALUES (%s, %s, 'en_soumission') RETURNING id",
             (org, f"TEST-QA-corbeille-vivant-{SUF}"),
         )
         projet_vivant_id = cur.fetchone()["id"]
