@@ -1545,6 +1545,37 @@ def _load_and_authorize_projet(get_conn, projet_id, user, mode, check_lock=True)
     return projet
 
 
+_CSI_TYP_CODE_RE = re.compile(r"^\d{2} \d{2} \d{2}(\.\d+)?$")
+_CSI_TYP_SECTION_RE = re.compile(r"^\d{2} \d{2} \d{2}$")
+_CSI_TYP_DIVISION_RE = re.compile(r"^\d{2}$")
+
+
+def _section_csi_typ(typ: dict):
+    """Code CSI à poser dans la cellule code d'une ligne budget piochée dans Ad TYP.
+
+    16 sept 2026, Simon : « aucun rapport ce code CSI bug » — « Contreplaqué CB
+    Fir-5/8-4x8 » arrivait sous le code « B30110305 » (rangé en « 30 11 »). Les
+    472 assemblages importés d'Uniformat gardent leur code Uniformat dans `code` ;
+    leur rattachement CSI vit dans csi_section_code / csi_division_code.
+      1. `code` au format CSI (« 06 40 00.01 ») → tel quel ;
+      2. sinon la section CSI (« 06 14 00 ») → « 06 14 00.01 » (le suffixe laisse
+         _next_free_csi_suffix numéroter les suivantes) ;
+      3. sinon la division (« 06 ») → « 06 00 00.01 » ;
+      4. aucun rattachement CSI → None : l'appelant GARDE la section de la ligne
+         (jamais un code Uniformat dans la colonne CSI).
+    """
+    code = (typ.get("code") or "").strip()
+    if _CSI_TYP_CODE_RE.match(code):
+        return code
+    sec = (typ.get("csi_section_code") or "").strip()
+    if _CSI_TYP_SECTION_RE.match(sec):
+        return sec + ".01"
+    div = (typ.get("csi_division_code") or "").strip()
+    if _CSI_TYP_DIVISION_RE.match(div):
+        return div + " 00 00.01"
+    return None
+
+
 def _map_typ_to_budget_cols(typ: dict, qte) -> dict:
     """Aplatissement d'une ligne Ad TYP (catalogue cross-service) → colonnes
     budget_lignes (3 sections). PRÉSERVE les montants Ad TYP exacts :
@@ -1592,8 +1623,9 @@ def _map_typ_to_budget_cols(typ: dict, qte) -> dict:
     # « 06 40 00.01 »), pas la section (06 40 00) ni la division (06 00 00).
     # Le regroupement budget (getPrefix) dérive division/sous-section des 4
     # premiers chiffres → le suffixe « .01 » ne casse pas le rangement.
-    section = (typ.get("code") or typ.get("csi_section_code")
-               or typ.get("csi_division_code") or "")
+    # Code Uniformat (« B30110305 ») → rattachement CSI de l'assemblage, cf.
+    # _section_csi_typ ; None = aucun CSI connu, les UPDATE gardent la section.
+    section = _section_csi_typ(typ)
     return {
         "section": section,
         "description": typ.get("description") or "",
@@ -7257,7 +7289,7 @@ def register_ad_budget_routes(get_conn):
             # = typ.prix_st par unité), override remis à FALSE (règle 1).
             cur.execute("""
                 UPDATE ad_budget.budget_lignes SET
-                  section=%s, description=%s, unite=%s, prix_unitaire=%s,
+                  section=COALESCE(%s, section), description=%s, unite=%s, prix_unitaire=%s,
                   heures=%s, taux_horaire=%s, sous_traitant_montant=%s,
                   prix_unitaire_st=%s,
                   source_typ_snapshot_at=NOW(),
@@ -7421,7 +7453,7 @@ def register_ad_budget_routes(get_conn):
                 # détection (taux à double source). Seuls desc/unité/coût(MAT)/ST descendent.
                 cur.execute("""
                     UPDATE ad_budget.budget_lignes SET
-                      section=%s, description=%s, unite=%s, prix_unitaire=%s,
+                      section=COALESCE(%s, section), description=%s, unite=%s, prix_unitaire=%s,
                       sous_traitant_montant=%s, source_typ_snapshot_at=NOW(), updated_at=NOW()
                     WHERE id=%s AND projet_id=%s RETURNING *
                 """, (m["section"], m["description"], m["unite"], new_prix,
@@ -7670,7 +7702,7 @@ def register_ad_budget_routes(get_conn):
                                                       exclude_ligne_id=ligne_id)
                 cur.execute("""
                     UPDATE ad_budget.budget_lignes SET
-                      section=%s, description=%s, unite=%s, prix_unitaire=%s,
+                      section=COALESCE(%s, section), description=%s, unite=%s, prix_unitaire=%s,
                       qte=%s, heures=%s, heures_manuelles=%s, taux_horaire=%s, sous_traitant_montant=%s,
                       prix_unitaire_st=%s,
                       source_typ_code=%s, source_typ_snapshot_at=NOW(),

@@ -165,6 +165,9 @@ jobs:
       - name: Pastilles Ad BUD = classement unique du hub
         run: python tests/test_pastilles_classement_hub.py
 
+      - name: Ligne Ad TYP - code CSI, jamais Uniformat
+        run: python tests/test_section_csi_typ.py
+
       # 16 sept 2026 - troisieme porte muree par le renommage des statuts du
       # 9 sept : creation sans statut refusee par projets_statut_chk, et les
       # quatre gardes catalogue (refresh-typ, maj-typ, maj-typ/apply,
