@@ -844,6 +844,41 @@ def _group_key_for(n):
 _CSI_LINE_RE = re.compile(r"^(\d{2} \d{2} \d{2})\.(\d+)$")
 
 
+# Colonnes de VALEUR recopiées quand une ligne est copiée dans un lot (clic
+# droit « Copier dans le lot », 16 sept 2026). MÊME liste que duplicate_lot
+# (copie profonde, liens Ad MAT/Ad TYP et production compris) — un témoin
+# (tests/test_copier_lignes_vers_lot.py) vérifie qu'elles ne divergent pas.
+_COLONNES_COPIE_LIGNE = (
+    "source_item_id", "section", "description", "unite", "prix_unitaire", "qte",
+    "ajustement_pct", "note", "actif", "source_file", "type_source",
+    "heures", "taux_horaire", "cout_sous_traitant", "sous_traitant_nom",
+    "ajust_materiaux", "ajust_main_oeuvre", "ajust_sous_traitant", "sous_traitant_type", "sous_traitant_montant",
+    "source_viu_analysis_id", "source_viu_item_id", "item_id_ad_mat", "ad_hub_pending_id", "sous_traitant_contact_id",
+    "source_typ_code", "source_typ_snapshot_at",
+    "prix_unitaire_override", "heures_manuelles", "item_ad_mat_scope", "source_mat_prix_snapshot", "source_mat_snapshot_at",
+    "qte_override", "taux_horaire_override", "ajust_materiaux_override", "ajust_main_oeuvre_override",
+    "ajust_sous_traitant_override", "sous_traitant_montant_override",
+    "prix_unitaire_st", "prix_unitaire_st_override",
+    "production_valeur", "production_unite", "production_auto",
+)
+
+
+def _plan_copie_lignes(sources, max_ordre_par_section, gap=10):
+    """Rang des copies : chaque copie va en FIN de sa section, dans l'ordre affiché.
+
+    `sources` : [(id, section)] triées comme la lecture (section, ordre, id).
+    `max_ordre_par_section` : {section: ordre max actuel dans le projet}.
+    Retourne [(id_source, ordre_copie)].
+    """
+    courant = dict(max_ordre_par_section)
+    plan = []
+    for lid, section in sources:
+        ordre = int(courant.get(section) or 0) + gap
+        courant[section] = ordre
+        plan.append((lid, ordre))
+    return plan
+
+
 def _plan_ordre_insertion(voisines, apres_ligne_id=None, gap=10):
     """Rang (`ordre`) d'une ligne créée dans une section, et renumérotation.
 
@@ -8435,6 +8470,84 @@ def register_ad_budget_routes(get_conn):
         if not nb:
             raise HTTPException(status_code=404, detail="Lot introuvable")
         return {"status": "deleted"}
+
+    @router.post("/projets/{projet_id}/lignes/copier-vers-lot")
+    def copier_lignes_vers_lot(projet_id: int, data: dict,
+                               user=Depends(jwt_user),
+                               authorization: Optional[str] = Header(None),
+                               session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
+        """Copie des lignes choisies dans un lot (ou hors lot).
+
+        16 sept 2026, Simon : « j'aimerais ajouter une fonction a clic droit.
+        Pour me permettre de copier coller automatiquement des items dans
+        d'autre lot ». Payload : {"ligne_ids": [int, …], "lot_id": int | null}.
+
+        Copie PROFONDE et INDÉPENDANTE, comme duplicate_lot : toutes les
+        colonnes de valeur (_COLONNES_COPIE_LIGNE), quantités comprises. Les
+        copies vont en fin de leur section, dans l'ordre affiché des sources.
+        """
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        ids_bruts = (data or {}).get("ligne_ids")
+        if not isinstance(ids_bruts, list) or not ids_bruts:
+            raise HTTPException(status_code=400, detail="`ligne_ids` (liste non vide) requis")
+        if len(ids_bruts) > 500:
+            raise HTTPException(status_code=400, detail="500 lignes au maximum par copie")
+        try:
+            ligne_ids = list(dict.fromkeys(int(i) for i in ids_bruts))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="`ligne_ids` doit contenir des identifiants de ligne")
+        lot_id = (data or {}).get("lot_id")
+        if lot_id is not None:
+            try:
+                lot_id = int(lot_id)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="`lot_id` invalide")
+        colonnes = ", ".join(_COLONNES_COPIE_LIGNE)
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            if lot_id is not None:
+                cur.execute("SELECT id, nom FROM ad_budget.lots WHERE id = %s AND projet_id = %s",
+                            (lot_id, projet_id))
+                if not cur.fetchone():
+                    raise HTTPException(status_code=404, detail="Lot introuvable dans ce projet")
+            cur.execute(
+                "SELECT id, section FROM ad_budget.budget_lignes "
+                "WHERE projet_id = %s AND id = ANY(%s) ORDER BY section, ordre, id",
+                (projet_id, ligne_ids),
+            )
+            sources = [(r["id"], r["section"]) for r in cur.fetchall()]
+            manquantes = sorted(set(ligne_ids) - {lid for lid, _ in sources})
+            if manquantes:
+                raise HTTPException(status_code=404, detail=f"Lignes inconnues ou hors projet : {manquantes}")
+            cur.execute(
+                "SELECT section, MAX(ordre) AS max_ordre FROM ad_budget.budget_lignes "
+                "WHERE projet_id = %s GROUP BY section",
+                (projet_id,),
+            )
+            max_par_section = {r["section"]: r["max_ordre"] for r in cur.fetchall()}
+            copies = []
+            for source_id, ordre in _plan_copie_lignes(sources, max_par_section):
+                cur.execute(
+                    f"INSERT INTO ad_budget.budget_lignes (projet_id, lot_id, ordre, {colonnes}) "
+                    f"SELECT projet_id, %s, %s, {colonnes} FROM ad_budget.budget_lignes "
+                    f"WHERE id = %s AND projet_id = %s RETURNING *",
+                    (lot_id, ordre, source_id, projet_id),
+                )
+                copies.append(cur.fetchone())
+            conn.commit()
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cur.close()
+            conn.close()
+        _mark_budget_dirty_if_emitted(projet_id)  # nouvelles lignes -> snapshot
+        _push_budget_snapshot(get_conn, projet_id, authorization, session_cookie)  # pipeline Ad ANA (fire-and-forget)
+        return {"status": "copied", "nb": len(copies), "lignes": copies}
 
     @router.post("/projets/{projet_id}/lots/{lot_id}/duplicate")
     def duplicate_lot(projet_id: int, lot_id: int, data: Optional[dict] = None,

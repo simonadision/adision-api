@@ -173,6 +173,10 @@ jobs:
       - name: Creation de ligne - rang persiste (+ Ligne)
         run: pytest tests/test_create_ligne_a_completer.py -v
 
+      # 16 sept 2026 - clic droit « Copier dans le lot ».
+      - name: Copier des lignes dans un lot
+        run: pytest tests/test_copier_lignes_vers_lot.py -v
+
       # 16 sept 2026 - troisieme porte muree par le renommage des statuts du
       # 9 sept : creation sans statut refusee par projets_statut_chk, et les
       # quatre gardes catalogue (refresh-typ, maj-typ, maj-typ/apply,
