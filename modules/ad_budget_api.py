@@ -1645,7 +1645,7 @@ def _section_csi_typ(typ: dict):
     return None
 
 
-def _map_typ_to_budget_cols(typ: dict, qte) -> dict:
+def _map_typ_to_budget_cols(typ: dict, qte, conn=None) -> dict:
     """Aplatissement d'une ligne Ad TYP (catalogue cross-service) → colonnes
     budget_lignes (3 sections). PRÉSERVE les montants Ad TYP exacts :
       - MAT : prix_unitaire ← prix_mat (roulé Ad TYP, PAR UNITÉ) ; getRow le
@@ -1695,6 +1695,25 @@ def _map_typ_to_budget_cols(typ: dict, qte) -> dict:
     # Code Uniformat (« B30110305 ») → rattachement CSI de l'assemblage, cf.
     # _section_csi_typ ; None = aucun CSI connu, les UPDATE gardent la section.
     section = _section_csi_typ(typ)
+    # TAUX PAR DÉFAUT quand Ad TYP n'en donne pas de vrai (16 sept 2026, Simon,
+    # ligne « Portes extérieures en aluminium » à 3 $/h : « Taux horaire mauvais
+    # doit etre menuisier compagnon par defaut »). Deux cas :
+    #   - MO sans rendement (mo_flat) : le « taux » était le MONTANT MO par
+    #     unité (3 $) — un pseudo-taux affiché comme un taux horaire ;
+    #   - aucune MO : taux 0, soit une main-d'œuvre gratuite dès qu'on saisit
+    #     des heures ou une production.
+    # Le taux devient celui de la division (csi_division_default_metier), sinon
+    # charpentier-menuisier compagnon (METIER_REPLI). En mo_flat, les heures
+    # portent le montant Ad TYP : heures = prix_mo × qté / taux (MO inchangée
+    # tant que l'utilisateur ne saisit pas sa production). Sans connexion
+    # (appelants qui n'utilisent ni heures ni taux, ex. onglet MAJ) : inchangé.
+    if conn is not None and (mo_flat or taux <= 0):
+        taux_defaut = _resolve_taux_default(section, conn)
+        if taux_defaut is not None and float(taux_defaut) > 0:
+            t = float(taux_defaut)
+            if mo_flat:
+                heures = round(prix_mo * qte / t, 4)
+            taux = round(t, 4)
     return {
         "section": section,
         "description": typ.get("description") or "",
@@ -7313,9 +7332,9 @@ def register_ad_budget_routes(get_conn):
             typ = typ_service.get_ligne(jwt_token, code, org=proj_org)
         except typ_service.TypServiceError as e:
             raise _typ_err(e)
-        m = _map_typ_to_budget_cols(typ, qte)
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
+        m = _map_typ_to_budget_cols(typ, qte, conn)
         try:
             # Sprint PU_ST référence Ad TYP — pré-remplissage prix_unitaire_st à
             # la création. override = FALSE (valeur héritée du carnet, pas une
@@ -7375,7 +7394,7 @@ def register_ad_budget_routes(get_conn):
                 typ = typ_service.get_ligne(jwt_token, ligne["source_typ_code"], org=proj_org)
             except typ_service.TypServiceError as e:
                 raise _typ_err(e)
-            m = _map_typ_to_budget_cols(typ, ligne["qte"])   # re-mappe à la qté courante
+            m = _map_typ_to_budget_cols(typ, ligne["qte"], conn)   # re-mappe à la qté courante
             # ⟳ EXPLICITE = acceptation user : réaligne le coût sur Ad TYP et
             # remet TOUS les overrides à FALSE (ignore volontairement les flags).
             # Règle métier validée Simon : clic ⟳ = l'utilisateur sait ce qu'il
@@ -7692,7 +7711,7 @@ def register_ad_budget_routes(get_conn):
                 typ = typ_service.get_ligne(jwt_token, code, org=proj_org)
             except typ_service.TypServiceError as e:
                 raise _typ_err(e)
-            m = _map_typ_to_budget_cols(typ, qte)
+            m = _map_typ_to_budget_cols(typ, qte, conn)
             # auto=True : re-snapshot AUTOMATIQUE déclenché par un changement de
             # qté (pas un clic d'acceptation). Dans ce cas, on NE re-pull PAS le
             # MAT (prix_unitaire est PAR UNITÉ et scale déjà via getRow) : on
