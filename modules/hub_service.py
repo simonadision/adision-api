@@ -142,7 +142,7 @@ def patch_snapshot(jwt_token: str, hub_project_id: int, module: str, fields: dic
 
 def fetch_revision_meta(jwt_token: str, hub_ids: list) -> dict:
     """Méta révision en BATCH pour des projets hub : GET /api/projects/revision-meta.
-    Retourne {str(id): {numero_revision, est_revision_active, nb_revisions, racine_id, name}}.
+    Retourne {str(id): {numero_revision, est_revision_active, nb_revisions, racine_id, name, code}}.
     Best-effort : {} si le hub est indisponible (la liste Ad BUD ne doit pas planter)."""
     ids = [int(i) for i in (hub_ids or []) if i is not None]
     if not ids:

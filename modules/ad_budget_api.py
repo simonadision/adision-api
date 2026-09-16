@@ -2290,6 +2290,12 @@ def register_ad_budget_routes(get_conn):
                 # (source unique). Même pattern batch que /projects/mine (fetch_revision_meta
                 # renvoie `name`). Best-effort : None si le hub est indisponible.
                 r["nom"] = m.get("name")
+                # Numéro interne du projet (code hub, ex. 2026-017-SQI-Sous) —
+                # 16 sept 2026, Simon : « pourquoi mes projet ad bud non pas de
+                # numero ». Même raison que `nom` : l'identité vit au hub, la
+                # carte (p.numero_projet || p.numero) affichait donc « Sans
+                # numéro » pour TOUS les projets.
+                r["numero"] = m.get("code")
                 r["revision_numero"] = m.get("numero_revision") or 0
                 r["revision_active"] = m.get("est_revision_active")
                 r["nb_revisions"] = m.get("nb_revisions") or 1
@@ -2306,6 +2312,7 @@ def register_ad_budget_routes(get_conn):
             else:
                 # Pas de lien hub OU hub indisponible -> traité comme standalone actif.
                 r["nom"] = None
+                r["numero"] = None
                 r["revision_numero"] = 0
                 r["revision_active"] = True
                 r["nb_revisions"] = 1
