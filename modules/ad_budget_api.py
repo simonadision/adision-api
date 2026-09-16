@@ -844,6 +844,40 @@ def _group_key_for(n):
 _CSI_LINE_RE = re.compile(r"^(\d{2} \d{2} \d{2})\.(\d+)$")
 
 
+def _plan_ordre_insertion(voisines, apres_ligne_id=None, gap=10):
+    """Rang (`ordre`) d'une ligne créée dans une section, et renumérotation.
+
+    16 sept 2026, Simon : « pourquoi au refresh l'ordre de mes items change, ca
+    doit persister ». « + Ligne » insère la nouvelle ligne SOUS sa ligne de
+    référence à l'écran, mais l'INSERT la laissait à ordre = 0 (défaut BD) :
+    GET /lignes trie par (section, ordre, id), donc au rechargement toutes les
+    lignes neuves remontaient en tête de leur section.
+
+    `voisines` : [(id, ordre)] des lignes de la MÊME section, triées comme la
+    lecture (ordre, id) — c'est l'ordre affiché.
+      - `apres_ligne_id` présent parmi elles → la section est renumérotée
+        (gap, 2×gap, …) avec la nouvelle ligne juste après la référence ;
+      - sinon → la nouvelle ligne va à la fin (dernier ordre + gap), rien
+        d'autre ne bouge (ajout de section, copies multi-lot).
+    Retourne (ordre_nouvelle, [(id, nouvel_ordre)] des seules lignes qui changent).
+    """
+    ids = [v[0] for v in voisines]
+    if apres_ligne_id is None or apres_ligne_id not in ids:
+        dernier = max((int(v[1] or 0) for v in voisines), default=0)
+        return dernier + gap, []
+    anciens = {v[0]: int(v[1] or 0) for v in voisines}
+    pos = ids.index(apres_ligne_id) + 1
+    ordre_nouvelle = None
+    changements = []
+    for i, lid in enumerate(ids[:pos] + [None] + ids[pos:]):
+        ordre = (i + 1) * gap
+        if lid is None:
+            ordre_nouvelle = ordre
+        elif anciens[lid] != ordre:
+            changements.append((lid, ordre))
+    return ordre_nouvelle, changements
+
+
 def _next_free_csi_suffix(cur, projet_id, code_demande, *, exclude_ligne_id=None,
                           extra_used=None):
     """Auto-incrémente le suffixe .NN d'un code CSI déjà occupé pour ce projet.
@@ -7113,12 +7147,34 @@ def register_ad_budget_routes(get_conn):
         production_valeur = data.get("production_valeur")
         production_valeur = production_valeur if production_valeur else None
 
+        # RANG PERSISTÉ (16 sept 2026) — cf. _plan_ordre_insertion : « + Ligne »
+        # envoie `apres_ligne_id`, la ligne est enregistrée là où l'écran l'a
+        # posée ; sans lui, elle va en fin de section (plus jamais en tête).
+        try:
+            apres_ligne_id = int(data["apres_ligne_id"]) if data.get("apres_ligne_id") is not None else None
+        except (TypeError, ValueError):
+            apres_ligne_id = None
+        cur.execute(
+            "SELECT id, ordre FROM ad_budget.budget_lignes "
+            "WHERE projet_id = %s AND section IS NOT DISTINCT FROM %s "
+            "ORDER BY ordre, id FOR UPDATE",
+            (projet_id, section),
+        )
+        ordre, renumerotees = _plan_ordre_insertion(
+            [(r["id"], r["ordre"]) for r in cur.fetchall()], apres_ligne_id,
+        )
+        for lid, nouvel_ordre in renumerotees:
+            cur.execute(
+                "UPDATE ad_budget.budget_lignes SET ordre = %s WHERE id = %s AND projet_id = %s",
+                (nouvel_ordre, lid, projet_id),
+            )
+
         cur.execute("""
             INSERT INTO ad_budget.budget_lignes
             (projet_id, source_item_id, section, description, unite, prix_unitaire, qte, ajustement_pct, note, actif,
              item_id_ad_mat, ad_hub_pending_id, taux_horaire, lot_id, a_completer,
-             heures, heures_manuelles, production_valeur, production_unite)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             heures, heures_manuelles, production_valeur, production_unite, ordre)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """, (
             projet_id,
@@ -7145,6 +7201,7 @@ def register_ad_budget_routes(get_conn):
             bool(data.get("heures_manuelles", False)),
             production_valeur,
             data.get("production_unite") or None,
+            ordre,
         ))
         row = cur.fetchone()
         conn.commit()
@@ -7152,7 +7209,11 @@ def register_ad_budget_routes(get_conn):
         conn.close()
         _mark_budget_dirty_if_emitted(projet_id)  # ajout de ligne -> snapshot
         _push_budget_snapshot(get_conn, projet_id, authorization, session_cookie)  # pipeline Ad ANA (fire-and-forget)
-        return {"status": "created", "ligne": row}
+        # `ordres` : rangs des voisines renumérotées, que le client applique à
+        # son état (sinon un glisser suivant calculerait son diff sur des rangs
+        # périmés).
+        return {"status": "created", "ligne": row,
+                "ordres": [{"id": lid, "ordre": o} for lid, o in renumerotees]}
 
     # ─── Pont Ad TYP → Ad BUD (étape 1) — lecture cross-service + snapshot ───
     def _typ_err(e):
