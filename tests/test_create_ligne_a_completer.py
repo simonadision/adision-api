@@ -46,11 +46,27 @@ class _FakeCreateLigneCursor:
             })
             return
 
+        if "select id, ordre from ad_budget.budget_lignes" in s:
+            projet_id, section = params
+            voisines = [l for l in self._db["lignes"]
+                        if l["projet_id"] == projet_id and l["section"] == section]
+            voisines.sort(key=lambda l: (l["ordre"], l["id"]))
+            self._pending = ("all", [{"id": l["id"], "ordre": l["ordre"]} for l in voisines])
+            return
+
+        if "update ad_budget.budget_lignes set ordre" in s:
+            ordre, lid, projet_id = params
+            for l in self._db["lignes"]:
+                if l["id"] == lid and l["projet_id"] == projet_id:
+                    l["ordre"] = ordre
+            self._pending = ("all", [])
+            return
+
         if "insert into ad_budget.budget_lignes" in s and "returning" in s:
             (projet_id, source_item_id, section, description, unite, prix_unitaire,
              qte, ajustement_pct, note, actif, item_id_ad_mat, ad_hub_pending_id,
              taux_horaire, lot_id, a_completer,
-             heures, heures_manuelles, production_valeur, production_unite) = params
+             heures, heures_manuelles, production_valeur, production_unite, ordre) = params
             self._db["next_id"] += 1
             row = {
                 "id": self._db["next_id"], "projet_id": projet_id,
@@ -61,6 +77,7 @@ class _FakeCreateLigneCursor:
                 "taux_horaire": taux_horaire, "lot_id": lot_id, "a_completer": a_completer,
                 "heures": heures, "heures_manuelles": heures_manuelles,
                 "production_valeur": production_valeur, "production_unite": production_unite,
+                "ordre": ordre,
             }
             self._db["lignes"].append(row)
             self._pending = ("one", dict(row))
@@ -186,3 +203,61 @@ if __name__ == "__main__":
     test_production_et_heures_persistees_a_la_creation()
     test_production_et_heures_absents_par_defaut()
     print("5/5 PASS")
+
+
+# ── RANG PERSISTÉ (16 sept 2026) ─────────────────────────────────────────
+# Simon : « pourquoi au refresh l'ordre de mes items change, ca doit
+# persister ». « + Ligne » posait la ligne sous sa référence à l'écran, mais
+# l'INSERT la laissait à ordre = 0 : au rechargement (ORDER BY section, ordre,
+# id) elle remontait en tête de section.
+
+def _ordre_lu(db, section):
+    """Ordre de lecture GET /lignes pour une section : (ordre, id)."""
+    lignes = [l for l in db["lignes"] if l["section"] == section]
+    return [l["description"] for l in sorted(lignes, key=lambda l: (l["ordre"], l["id"]))]
+
+
+def test_plus_ligne_persiste_sous_sa_reference():
+    db = _make_db()
+    create = _get_create_ligne(lambda: _FakeCreateLigneConn(db))
+    a = _call(create, 1, {"section": "06 00 00", "description": "A"})["ligne"]
+    b = _call(create, 1, {"section": "06 00 00", "description": "B"})["ligne"]
+    _call(create, 1, {"section": "06 00 00", "description": "C"})
+    # Sous A, puis sous B : l'écran montre A, A2, B, B2, C.
+    r = _call(create, 1, {"section": "06 00 00", "description": "A2", "apres_ligne_id": a["id"]})
+    _call(create, 1, {"section": "06 00 00", "description": "B2", "apres_ligne_id": b["id"]})
+    assert _ordre_lu(db, "06 00 00") == ["A", "A2", "B", "B2", "C"]
+    # Les voisines renumérotées sont renvoyées au client.
+    assert {"id": b["id"], "ordre": 30} in r["ordres"]
+
+
+def test_sans_reference_la_ligne_va_en_fin_de_section():
+    db = _make_db()
+    create = _get_create_ligne(lambda: _FakeCreateLigneConn(db))
+    for d in ("A", "B"):
+        _call(create, 1, {"section": "06 00 00", "description": d})
+    _call(create, 1, {"section": "09 00 00", "description": "autre section"})
+    r = _call(create, 1, {"section": "06 00 00", "description": "Z"})
+    assert _ordre_lu(db, "06 00 00") == ["A", "B", "Z"]
+    assert r["ordres"] == []
+
+
+def test_lignes_heritees_a_ordre_zero_restent_dans_l_ordre_affiche():
+    # Projet 324 : six lignes déjà créées à ordre 0 (affichées par id), puis
+    # des lignes importées à 10, 30… Insérer sous la 2e doit donner l'ordre
+    # affiché, pas remonter ni descendre les autres.
+    db = _make_db()
+    db["lignes"] = [
+        {"id": 5, "projet_id": 1, "section": "06 00 00", "description": "Import 10", "ordre": 10},
+        {"id": 7, "projet_id": 1, "section": "06 00 00", "description": "Neuve 1", "ordre": 0},
+        {"id": 8, "projet_id": 1, "section": "06 00 00", "description": "Neuve 2", "ordre": 0},
+    ]
+    db["next_id"] = 8
+    create = _get_create_ligne(lambda: _FakeCreateLigneConn(db))
+    _call(create, 1, {"section": "06 00 00", "description": "Sous neuve 1", "apres_ligne_id": 7})
+    assert _ordre_lu(db, "06 00 00") == ["Neuve 1", "Sous neuve 1", "Neuve 2", "Import 10"]
+
+
+def test_plan_ordre_insertion_reference_inconnue_ajoute_a_la_fin():
+    assert B._plan_ordre_insertion([(1, 10), (2, 20)], 99) == (30, [])
+    assert B._plan_ordre_insertion([], 3) == (10, [])
