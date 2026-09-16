@@ -273,6 +273,26 @@ DATE_ADJ_ALLOWED_FOR_STATUTS = {"en_cours", "en_execution", "perdu"}
 # onglet projet perdu »). Meme vocabulaire que ALLOWED_STATUTS ci-dessus.
 ALLOWED_CATEGORIES_AFFICHAGE = {"en_soumission", "en_cours", "en_execution", "perdu", "archive"}
 
+# CLASSEMENT UNIQUE (Simon, 16 sept 2026 : « Quand un projet est deplacer, il
+# est mise a jour deplacer dans tous les modules »). Pour un budget LIÉ à Ad
+# HUB, la pastille n'est plus un rangement local : elle LIT le classement du
+# projet hub (soumission / obtenu / fermé, dérivé de son statut) et glisser
+# une carte ÉCRIT ce classement au hub, qui déplace aussi le projet dans son
+# arbre et dans les autres modules. `categorie_affichage` local ne sert plus
+# qu'aux budgets sans projet hub.
+_CATEGORIE_VERS_CLASSEMENT_HUB = {
+    "en_soumission": "soumission",
+    "en_cours": "obtenu",
+    "en_execution": "obtenu",
+    "perdu": "ferme",
+    "archive": "ferme",
+}
+_CLASSEMENT_HUB_VERS_CATEGORIE = {
+    "soumission": "en_soumission",
+    "obtenu": "en_cours",
+    "ferme": "archive",
+}
+
 # === Sprint B : statuts qui figent le budget (snapshot dans app_ana) ===
 # Quand un projet bascule depuis un statut hors de ce set vers un statut dedans,
 # le hook PUT /projets/{id} declenche la creation d'un snapshot consomme par
@@ -2296,6 +2316,9 @@ def register_ad_budget_routes(get_conn):
                 # carte (p.numero_projet || p.numero) affichait donc « Sans
                 # numéro » pour TOUS les projets.
                 r["numero"] = m.get("code")
+                # Classement unique (16 sept 2026) : la pastille suit le hub.
+                if m.get("classement") in _CLASSEMENT_HUB_VERS_CATEGORIE:
+                    r["categorie_affichage"] = _CLASSEMENT_HUB_VERS_CATEGORIE[m["classement"]]
                 r["revision_numero"] = m.get("numero_revision") or 0
                 r["revision_active"] = m.get("est_revision_active")
                 r["nb_revisions"] = m.get("nb_revisions") or 1
@@ -3293,7 +3316,7 @@ def register_ad_budget_routes(get_conn):
         # Sprint A : récupère le statut actuel pour la cross-field validation
         # (date_adjudication permise uniquement si statut ∈ adjuge/complet/perdu).
         cur.execute(
-            "SELECT statut FROM ad_budget.projets WHERE id = %s",
+            "SELECT statut, ad_hub_project_id FROM ad_budget.projets WHERE id = %s",
             (projet_id,),
         )
         existing = cur.fetchone()
@@ -3302,6 +3325,22 @@ def register_ad_budget_routes(get_conn):
             conn.close()
             raise HTTPException(status_code=404, detail="Projet not found")
         _validate_projet_fields(data, current_statut=existing["statut"])
+        # CLASSEMENT UNIQUE (16 sept 2026) — glisser la carte d'un budget lié
+        # écrit d'abord au hub (source unique). Fail-closed : si le hub refuse
+        # ou ne répond pas, rien n'est écrit ici non plus, pour que la pastille
+        # ne montre jamais un classement que les autres modules ignorent.
+        _classement_hub = _CATEGORIE_VERS_CLASSEMENT_HUB.get(data.get("categorie_affichage") or "")
+        if _classement_hub and existing.get("ad_hub_project_id") is not None:
+            _jwt = _extract_bearer(authorization, None, session_cookie)
+            try:
+                hub_service.set_project_classement(
+                    _jwt, existing["ad_hub_project_id"], _classement_hub)
+            except hub_service.HubServiceError as e:
+                cur.close()
+                conn.close()
+                if e.status_code in (403, 404, 409):
+                    raise HTTPException(status_code=e.status_code, detail=e.detail)
+                raise HTTPException(status_code=502, detail=f"Ad HUB indisponible : {e.detail}")
 
         fields = []
         values = []

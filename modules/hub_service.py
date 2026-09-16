@@ -467,6 +467,17 @@ def patch_project(jwt_token: str, project_id: int, patch: dict) -> Optional[dict
     return raw
 
 
+def set_project_classement(jwt_token: str, project_id: int, classement: str) -> Optional[dict]:
+    """Classement unique (16 sept 2026) — PATCH /api/projects/{id}/classement :
+    range le projet hub dans soumission / obtenu / ferme (statut + dossier de
+    l'arbre + code). Lève HubServiceError sur 4xx/5xx/réseau."""
+    raw = _hub_request("PATCH", f"/api/projects/{int(project_id)}/classement", jwt_token,
+                       json_body={"classement": classement})
+    if isinstance(raw, dict) and isinstance(raw.get("project"), dict):
+        return raw["project"]
+    return raw
+
+
 def fetch_client(jwt_token: str, client_id: int) -> Optional[dict]:
     """Récupère les métadonnées d'un client Ad HUB via
     GET /api/clients/{id} (Sprint DT-56 D1).

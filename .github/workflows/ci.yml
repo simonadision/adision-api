@@ -161,3 +161,6 @@ jobs:
       # de reponses, pas un vrai pytest).
       - name: Backfill taux horaire par defaut - ouverture de projet
         run: python tests/test_taux_horaire_backfill_ouverture.py
+
+      - name: Pastilles Ad BUD = classement unique du hub
+        run: python tests/test_pastilles_classement_hub.py
