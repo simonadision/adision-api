@@ -209,6 +209,30 @@ ALLOWED_STATUTS = {"en_soumission", "en_cours", "en_execution", "perdu", "archiv
 # archive ne se batissent pas.
 EXPORT_CON_STATUTS = {"en_cours", "en_execution"}
 
+# STATUT D'UN PROJET CREE SANS STATUT EXPLICITE. Meme valeur que le DEFAULT
+# de la colonne (sprint_quatre_statuts_projet.sql, etape 4). Il valait encore
+# « brouillon » ici apres le 9 septembre : le code passait ce litteral a
+# l'INSERT, ecrasant le DEFAULT de la base, et `projets_statut_chk` refusait
+# la ligne. Seul le front, qui envoie toujours un statut, masquait la panne.
+STATUT_PAR_DEFAUT = "en_soumission"
+
+# STATUTS OU LE BUDGET SUIT ENCORE LE CATALOGUE (⟳ re-tarif Ad TYP, onglet
+# MAJ Ad TYP et Ad MAT).
+#
+# MEME PORTE MUREE, TROUVEE LE 16 SEPTEMBRE 2026. Les quatre gardes
+# exigeaient `statut == "brouillon"` -- disparu le 9 septembre (brouillon ->
+# en_soumission). Sur les 23 projets de la base, zero passait : 409 sur
+# chaque ⟳, onglet MAJ jamais affiche. Le front, lui, avait deja bascule sur
+# `en_soumission` et appelait ca une double garde.
+#
+# L'INTENTION D'ORIGINE (pont Ad TYP, juin 2026) : le prix catalogue ne
+# descend que tant que le budget se CHIFFRE. Une fois le projet gagne
+# (en_cours), en chantier (en_execution) ou clos (perdu, archive), le budget
+# est gele -- un prix corrige au catalogue ne doit pas reecrire un montant
+# deja engage. « brouillon » etait affiche « En cours » a l'epoque : c'est le
+# piege du renommage, ce libelle designe aujourd'hui un AUTRE statut.
+RESYNC_CATALOGUE_STATUTS = {"en_soumission"}
+
 # LES LIBELLES QUE SIMON VOIT A L'ECRAN. Miroir de STATUS_LABELS
 # (@adision/ui projectEnums.js) : un refus qui dit « statut en_cours »
 # oblige a traduire un code interne en bouton d'interface. Celui-ci nomme
@@ -222,6 +246,18 @@ LIBELLE_STATUT = {
     "perdu": "Projet perdu",
     "archive": "Projet archivé",
 }
+
+
+def _refus_resync_catalogue(operation: str, statut: Optional[str]) -> str:
+    """Message du 409 des gardes RESYNC_CATALOGUE_STATUTS. L'ancien disait
+    « le budget n'est pas « En cours » » : c'etait le libelle de brouillon,
+    et c'est aujourd'hui le nom d'un statut ou la porte est justement FERMEE."""
+    permis = " ou ".join(f"« {LIBELLE_STATUT.get(s, s)} »" for s in sorted(RESYNC_CATALOGUE_STATUTS))
+    return (f"{operation} bloquée : ce budget est au statut "
+            f"« {LIBELLE_STATUT.get(statut, statut)} », le catalogue ne le suit "
+            f"qu'en {permis} (gelé).")
+
+
 ALLOWED_TYPES_BATIMENT = {
     "residentiel", "commercial", "institutionnel", "industriel", "mixte",
 }
@@ -2444,7 +2480,7 @@ def register_ad_budget_routes(get_conn):
                     """
                     INSERT INTO ad_budget.projets
                         (user_id, organization_id, nom, statut)
-                    VALUES (%s, %s, %s, 'brouillon')
+                    VALUES (%s, %s, %s, 'en_soumission')
                     RETURNING id, nom
                     """,
                     (user["id"], user["organization_id"], project_name),
@@ -2654,7 +2690,7 @@ def register_ad_budget_routes(get_conn):
                     """
                     INSERT INTO ad_budget.projets
                         (user_id, organization_id, nom, statut)
-                    VALUES (%s, %s, %s, 'brouillon')
+                    VALUES (%s, %s, %s, 'en_soumission')
                     RETURNING id, nom
                     """,
                     (user["id"], user["organization_id"], project_name),
@@ -2985,9 +3021,9 @@ def register_ad_budget_routes(get_conn):
                 )
 
         # Sprint A : valider les champs descriptifs avant d'insérer. Le default
-        # de statut à la création est 'brouillon', donc passé en current_statut
-        # pour la cross-field validation de date_adjudication.
-        _validate_projet_fields(data, current_statut="brouillon")
+        # de statut à la création est STATUT_PAR_DEFAUT, donc passé en
+        # current_statut pour la cross-field validation de date_adjudication.
+        _validate_projet_fields(data, current_statut=STATUT_PAR_DEFAUT)
 
         # Mode B — créer projet Ad HUB AVANT BUD. Le HUB est source de vérité
         # pour les docs (règle D-GED) → on crée là d'abord, on lie ensuite.
@@ -3083,7 +3119,7 @@ def register_ad_budget_routes(get_conn):
             """, (
                 data["user_id"],
                 user["organization_id"],
-                data.get("statut", "brouillon"),
+                data.get("statut", STATUT_PAR_DEFAUT),
                 _pct(data.get("pct_admin_conditions")),
                 _pct(data.get("pct_admin_architecture")),
                 _pct(data.get("pct_admin_mecanique")),
@@ -7186,8 +7222,8 @@ def register_ad_budget_routes(get_conn):
                                       session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
                                       user=Depends(jwt_user)):
         """Re-tarif d'une ligne liée Ad TYP : re-lit Ad TYP + re-mappe (snapshot
-        rafraîchi). AUTORISÉ UNIQUEMENT si le projet est au statut 'brouillon'
-        (« En cours ») — gelé sinon."""
+        rafraîchi). AUTORISÉ UNIQUEMENT si le statut est dans
+        RESYNC_CATALOGUE_STATUTS (en soumission) — gelé sinon."""
         _load_and_authorize_projet(get_conn, projet_id, user, "write")
         jwt_token = _extract_bearer(authorization, None, session_cookie)
         conn = get_conn()
@@ -7197,9 +7233,9 @@ def register_ad_budget_routes(get_conn):
             prow = cur.fetchone()
             statut = prow["statut"] if prow else None
             proj_org = prow["organization_id"] if prow else None   # org du PROJET (isolation cross-org)
-            if statut != "brouillon":
+            if statut not in RESYNC_CATALOGUE_STATUTS:
                 raise HTTPException(status_code=409,
-                                    detail="Re-tarif Ad TYP bloquée : le budget n'est pas « En cours » (gelé).")
+                                    detail=_refus_resync_catalogue("Re-tarif Ad TYP", statut))
             cur.execute("SELECT id, source_typ_code, qte FROM ad_budget.budget_lignes "
                         "WHERE id = %s AND projet_id = %s", (ligne_id, projet_id))
             ligne = cur.fetchone()
@@ -7258,7 +7294,7 @@ def register_ad_budget_routes(get_conn):
                        user=Depends(jwt_user)):
         """Détecte EN LOT les lignes divergentes de leur source, PAR MODULE : Ad TYP
         (via typ_service) ET Ad MAT (via mat_service), 1 appel cross-service chacun
-        (anti-N+1). Lecture seule. INACTIF hors 'brouillon' → modules=[] (pas d'onglet,
+        (anti-N+1). Lecture seule. INACTIF hors RESYNC_CATALOGUE_STATUTS → modules=[] (pas d'onglet,
         cohérent avec la garde 409 du ⟳). Une ligne est soit TYP soit MAT (exclusivité)
         → aucun double comptage."""
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
@@ -7272,7 +7308,7 @@ def register_ad_budget_routes(get_conn):
             # Org du PROJET (isolation cross-org Loi 25) : la résolution catalogue DOIT
             # se faire sur l'org du projet, pas du JWT (un super_admin ne contamine pas).
             proj_org = prow["organization_id"] if prow else None
-            if statut != "brouillon":
+            if statut not in RESYNC_CATALOGUE_STATUTS:
                 return {"statut": statut, "actif": False, "modules": [], "total": 0}
             cur.execute(f"SELECT {_MAJ_LINE_COLS} FROM ad_budget.budget_lignes "
                         "WHERE projet_id = %s AND source_typ_code IS NOT NULL "
@@ -7340,7 +7376,7 @@ def register_ad_budget_routes(get_conn):
         depuis la source (même mapping que le ⟳) MAIS override-aware — ne touche
         PAS un champ en override volontaire (prix_unitaire_override → coût préservé ;
         heures_manuelles réel → heures/taux préservés). N'altère pas les flags
-        d'override (≠ ⟳ qui les remet à FALSE). Bloqué 409 hors 'brouillon'."""
+        d'override (≠ ⟳ qui les remet à FALSE). Bloqué 409 hors RESYNC_CATALOGUE_STATUTS."""
         _load_and_authorize_projet(get_conn, projet_id, user, "write")
         jwt_token = _extract_bearer(authorization, None, session_cookie)
         ids = data.get("ligne_ids") if isinstance(data, dict) else None
@@ -7357,9 +7393,10 @@ def register_ad_budget_routes(get_conn):
             cur.execute("SELECT statut, organization_id FROM ad_budget.projets WHERE id = %s", (projet_id,))
             prow = cur.fetchone()
             proj_org = prow["organization_id"] if prow else None   # org du PROJET (isolation cross-org)
-            if (prow["statut"] if prow else None) != "brouillon":
+            statut = prow["statut"] if prow else None
+            if statut not in RESYNC_CATALOGUE_STATUTS:
                 raise HTTPException(status_code=409,
-                                    detail="MAJ Ad TYP bloquée : le budget n'est pas « En cours » (gelé).")
+                                    detail=_refus_resync_catalogue("MAJ Ad TYP", statut))
             cur.execute(f"SELECT {_MAJ_LINE_COLS} FROM ad_budget.budget_lignes "
                         "WHERE projet_id = %s AND id = ANY(%s) "
                         "AND source_typ_code IS NOT NULL AND actif IS NOT FALSE",
@@ -7408,7 +7445,7 @@ def register_ad_budget_routes(get_conn):
         (source_mat_prix_snapshot + snapshot_at) → la ligne n'est plus divergente, et
         une future édition manuelle ne re-déclenchera pas le MAJ (le snapshot reste la
         référence catalogue). Le flag prix_unitaire_override n'est PAS un signal MAT
-        (snapshot dédié) → non touché. Bloqué 409 hors 'brouillon'. Indépendant d'Ad TYP."""
+        (snapshot dédié) → non touché. Bloqué 409 hors RESYNC_CATALOGUE_STATUTS. Indépendant d'Ad TYP."""
         _load_and_authorize_projet(get_conn, projet_id, user, "write")
         jwt_token = _extract_bearer(authorization, None, session_cookie)
         ids = data.get("ligne_ids") if isinstance(data, dict) else None
@@ -7425,9 +7462,10 @@ def register_ad_budget_routes(get_conn):
             cur.execute("SELECT statut, organization_id FROM ad_budget.projets WHERE id = %s", (projet_id,))
             prow = cur.fetchone()
             proj_org = prow["organization_id"] if prow else None   # org du PROJET (isolation cross-org)
-            if (prow["statut"] if prow else None) != "brouillon":
+            statut = prow["statut"] if prow else None
+            if statut not in RESYNC_CATALOGUE_STATUTS:
                 raise HTTPException(status_code=409,
-                                    detail="MAJ Ad MAT bloquée : le budget n'est pas « En cours » (gelé).")
+                                    detail=_refus_resync_catalogue("MAJ Ad MAT", statut))
             cur.execute(f"SELECT {_MAJ_MAT_LINE_COLS} FROM ad_budget.budget_lignes "
                         "WHERE projet_id = %s AND id = ANY(%s) "
                         "AND item_id_ad_mat IS NOT NULL AND actif IS NOT FALSE",

@@ -125,7 +125,7 @@ def _ensure_schema():
         # Pont Ad TYP → Ad BUD : lien LOGIQUE (cross-DB, pas de FK) vers la ligne
         # Ad TYP d'origine + horodatage du snapshot. NULL = ligne manuelle
         # classique. La re-tarif depuis Ad TYP n'est permise que si le projet est
-        # au statut 'brouillon' (« En cours ») — gelée sinon.
+        # au statut 'en_soumission' (RESYNC_CATALOGUE_STATUTS) — gelée sinon.
         cur.execute(
             "ALTER TABLE ad_budget.budget_lignes "
             "ADD COLUMN IF NOT EXISTS source_typ_code TEXT DEFAULT NULL, "

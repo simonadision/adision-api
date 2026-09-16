@@ -164,3 +164,12 @@ jobs:
 
       - name: Pastilles Ad BUD = classement unique du hub
         run: python tests/test_pastilles_classement_hub.py
+
+      # 16 sept 2026 - troisieme porte muree par le renommage des statuts du
+      # 9 sept : creation sans statut refusee par projets_statut_chk, et les
+      # quatre gardes catalogue (refresh-typ, maj-typ, maj-typ/apply,
+      # maj-mat/apply) fermees pour TOUS les projets (`== "brouillon"`).
+      # Execute les vraies routes pour chacun des cinq statuts, et interdit
+      # toute comparaison de statut hors ALLOWED_STATUTS (Python et SQL).
+      - name: Statuts - aucune comparaison a une valeur disparue
+        run: python tests/test_statuts_litteraux_morts.py
