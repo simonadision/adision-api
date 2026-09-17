@@ -4034,6 +4034,20 @@ def register_ad_budget_routes(get_conn):
                 "st_subtotal_origin": round(st_subtotal, 2),
             })
 
+        # 4bis) Administration & profit + sous-total avant taxes (Simon, 16
+        # sept. 2026 : « je veux ajouter toute ces infos donc admin profit
+        # $$$$ et % montant avec admin et profit »). DÉLÈGUE à
+        # compute_budget_totals -- même chemin que l'écran, le PDF et le push
+        # hub (_prix_vente_total) -- plutôt que de réimplémenter le calcul
+        # par regroupement CSI ici : une 3e implémentation à tenir d'accord
+        # avec les deux autres, pour un total qui doit déjà leur être égal.
+        # Les taxes (TPS/TVQ) restent calculées côté Ad CON depuis son propre
+        # tps_rate/tvq_rate (con_projects) appliqué à subtotal_before_taxes --
+        # Ad BUD n'a pas à connaître le taux de taxe d'Ad CON.
+        _totaux = compute_budget_totals(projet, [dict(r) for r in budget_rows])
+        admin_profit_amount = round(_totaux["admin_profit_total"], 2)
+        subtotal_before_taxes = round(_totaux["sous_total_avant_taxes"], 2)
+
         # 5) Fallback organization_id (décision STOP 1.A.1 critique #2).
         proj_org = projet.get("organization_id")
         if proj_org is None:
@@ -4082,6 +4096,8 @@ def register_ad_budget_routes(get_conn):
                 "date_adjudication": _ident.get("date_adjudication"),
                 "superficie_m2": _ident.get("superficie_m2"),
                 "contract_initial_amount": round(contract_total, 2),
+                "admin_profit_amount": admin_profit_amount,
+                "subtotal_before_taxes": subtotal_before_taxes,
                 "organization_id_source": org_source,
             },
             "lines": lines_out,
