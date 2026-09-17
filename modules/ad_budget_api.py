@@ -3458,8 +3458,22 @@ def register_ad_budget_routes(get_conn):
         # Un PUT qui ne touche QUE ce champ passe donc désormais SANS
         # vérifier le verrou — un vrai changement de contenu (n'importe quel
         # autre champ de cette route) reste bloqué normalement.
+        #
+        # MÊME EXCEPTION POUR `statut` SEUL (Simon, 16 sept. 2026, en direct :
+        # « peu importe qu'un projet soit verrouillé ou pas, il doit passer en
+        # ouverture dans Ad CON. C'est par défaut. »). Ouvrir un chantier Ad
+        # CON bascule automatiquement le budget lié vers « gagné »
+        # (bud_client.mark_bud_project_gagne côté Ad CON) : un verrou de
+        # CONTENU (figé pour ne pas modifier prix/lignes) n'a pas à bloquer
+        # cette transition de CYCLE DE VIE, qui ne touche aucune ligne ni
+        # aucun prix. Même logique que categorie_affichage : le verrou protège
+        # le contenu chiffré, pas la mécanique d'ouverture de chantier.
         _seulement_categorie = bool(data) and set(data.keys()) <= {"categorie_affichage"}
-        _load_and_authorize_projet(get_conn, projet_id, user, "write", check_lock=not _seulement_categorie)
+        _seulement_statut = bool(data) and set(data.keys()) <= {"statut"}
+        _load_and_authorize_projet(
+            get_conn, projet_id, user, "write",
+            check_lock=not (_seulement_categorie or _seulement_statut),
+        )
         # Brief 5a — identité projet = source unique Ad HUB. Refus 403 explicite.
         _forbidden = sorted(set((data or {}).keys()) & _HUB_OWNED_BUD_FIELDS)
         if _forbidden:
@@ -3973,7 +3987,19 @@ def register_ad_budget_routes(get_conn):
             ajust_st = float(row.get("ajust_sous_traitant") or 0)
 
             mat_subtotal = qty_eff * prix_u * (1.0 + ajust_mat / 100.0)
-            mo_subtotal = qty_eff * heures * taux * (1.0 + ajust_mo / 100.0)
+            # PAS de qty_eff ici (trouvé 16 sept. 2026, capture de Simon : Main
+            # d'œuvre à 5 416,96 $ dans Ad CON contre 41 049,00 $ dans Ad BUD
+            # pour le même budget). `heures` est déjà le total HEURES de la
+            # ligne, pas un taux par unité -- contrairement à `prix_unitaire`
+            # (MAT), qui EST par unité et a donc besoin de qty_eff. Miroir
+            # exact de compute_budget_totals (st_mo = heures * taux *
+            # (1+ajmo/100), ligne ~1046) : c'est CETTE formule qui alimente
+            # l'écran, le PDF et le push hub. `_effective_qte` renvoie `qte`
+            # tel quel (BUD.qte=0 partout, cf. docstring plus haut) -- la
+            # multiplier ici mettait à 0 le M-O de toute ligne à qté=0, alors
+            # que ces lignes (mobilisation, démobilisation, contremaître...)
+            # sont justement celles qui n'ont jamais de quantité saisie.
+            mo_subtotal = heures * taux * (1.0 + ajust_mo / 100.0)
             # Règle #2 (2026-08-17, décision Simon) : QTÉ=0 exclut le montant
             # ST du SUBTOTAL poussé à Ad CON — même règle que
             # compute_budget_totals. `st_amount` (st_amount_origin, plus bas)
