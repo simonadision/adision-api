@@ -349,6 +349,31 @@ _HUB_OWNED_BUD_FIELDS = {
 }
 
 
+# QUANTITÉS LIÉES (18 sept 2026) : ce qu'une copie « avec les quantités »
+# reprend de sa ligne d'origine tant qu'on ne la retouche pas. Les montants
+# en découlent (heures × taux, qté × prix), et sous_traitant_montant suit
+# aussi : il vaut qté × PU S-T sur une ligne dont les prix sont identiques.
+CHAMPS_QUANTITES_LIEES = (
+    "qte", "heures", "heures_manuelles",
+    "production_valeur", "production_unite", "production_auto",
+    "sous_traitant_montant",
+)
+# Ceux dont une modification DIRECTE sur la copie la rend indépendante.
+CHAMPS_QUI_DETACHENT = ("qte", "heures", "production_valeur")
+
+
+def _valeur_change(avant, apres) -> bool:
+    """Vrai si une saisie modifie réellement la valeur en base : l'écran
+    renvoie toute la ligne à chaque sauvegarde, une quantité inchangée ne doit
+    ni détacher une copie ni se propager."""
+    if avant is None and apres in (None, ""):
+        return False
+    try:
+        return abs(float(avant or 0) - float(apres or 0)) > 1e-9
+    except (TypeError, ValueError):
+        return str(avant or "") != str(apres or "")
+
+
 def _est_zero(valeur) -> bool:
     """Un taux « vide » — ni renseigné, ni zéro, ni une chaîne vide.
 
@@ -7265,12 +7290,28 @@ def register_ad_budget_routes(get_conn):
                 (nouvel_ordre, lid, projet_id),
             )
 
+        # Copie « avec les quantités » (18 sept 2026) : liée à son origine,
+        # qui doit appartenir au MÊME projet -- jamais de lien vers un autre.
+        quantites_liees_a = None
+        if data.get("quantites_liees_a") is not None:
+            try:
+                _origine = int(data["quantites_liees_a"])
+            except (TypeError, ValueError):
+                _origine = None
+            if _origine is not None:
+                cur.execute(
+                    "SELECT 1 FROM ad_budget.budget_lignes WHERE id = %s AND projet_id = %s",
+                    (_origine, projet_id),
+                )
+                if cur.fetchone():
+                    quantites_liees_a = _origine
+
         cur.execute("""
             INSERT INTO ad_budget.budget_lignes
             (projet_id, source_item_id, section, description, unite, prix_unitaire, qte, ajustement_pct, note, actif,
              item_id_ad_mat, ad_hub_pending_id, taux_horaire, lot_id, a_completer,
-             heures, heures_manuelles, production_valeur, production_unite, ordre)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             heures, heures_manuelles, production_valeur, production_unite, ordre, quantites_liees_a)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """, (
             projet_id,
@@ -7298,6 +7339,7 @@ def register_ad_budget_routes(get_conn):
             production_valeur,
             data.get("production_unite") or None,
             ordre,
+            quantites_liees_a,
         ))
         row = cur.fetchone()
         conn.commit()
@@ -8105,6 +8147,23 @@ def register_ad_budget_routes(get_conn):
         fields.append("updated_at = NOW()")
         if not fields:
             return {"error": "No fields to update"}
+        # QUANTITÉS LIÉES (18 sept 2026) : l'état AVANT la saisie, pour savoir
+        # si elle change réellement une quantité (l'écran renvoie toute la ligne).
+        cur_liens = conn.cursor(row_factory=dict_row)
+        cur_liens.execute(
+            "SELECT quantites_liees_a, " + ", ".join(CHAMPS_QUANTITES_LIEES)
+            + " FROM ad_budget.budget_lignes WHERE id = %s AND projet_id = %s",
+            (ligne_id, projet_id),
+        )
+        avant = cur_liens.fetchone() or {}
+        quantite_touchee = any(
+            f in data and _valeur_change(avant.get(f), data.get(f)) for f in CHAMPS_QUI_DETACHENT
+        )
+        # Une copie qu'on retouche elle-même devient indépendante (« suivre,
+        # jusqu'à retouche », choix de Simon).
+        if quantite_touchee and avant.get("quantites_liees_a") is not None:
+            fields.insert(0, "quantites_liees_a = NULL")
+
         sql = f"""
             UPDATE ad_budget.budget_lignes
             SET {', '.join(fields)}
@@ -8112,12 +8171,33 @@ def register_ad_budget_routes(get_conn):
         """
         values.extend([ligne_id, projet_id])
         cur.execute(sql, values)
+
+        # Une origine dont la quantité change : ses copies encore liées suivent,
+        # par une écriture directe qui ne les détache pas.
+        copies = []
+        if quantite_touchee:
+            colonnes = ", ".join(f"{c} = o.{c}" for c in CHAMPS_QUANTITES_LIEES)
+            cur_liens.execute(
+                f"""
+                UPDATE ad_budget.budget_lignes c
+                   SET {colonnes}, updated_at = NOW()
+                  FROM ad_budget.budget_lignes o
+                 WHERE o.id = %s AND o.projet_id = %s
+                   AND c.quantites_liees_a = o.id AND c.projet_id = o.projet_id
+                RETURNING c.*
+                """,
+                (ligne_id, projet_id),
+            )
+            copies = cur_liens.fetchall()
+        cur_liens.close()
         conn.commit()
         cur.close()
         conn.close()
         _mark_budget_dirty_if_emitted(projet_id)  # mutation de ligne -> snapshot
         _push_budget_snapshot(get_conn, projet_id, authorization, session_cookie)  # pipeline Ad ANA (fire-and-forget)
-        return {"status": "updated"}
+        # `copies` : lignes des autres lots qui viennent de suivre, que l'écran
+        # remplace dans son état sans tout relire.
+        return {"status": "updated", "copies": copies}
 
     # ─────────────────────────────────────────────────────────────────
     # PATCH /projets/{projet_id}/lignes/reorder

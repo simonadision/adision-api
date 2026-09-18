@@ -62,11 +62,19 @@ class _FakeCreateLigneCursor:
             self._pending = ("all", [])
             return
 
+        if "select 1 from ad_budget.budget_lignes where id = %s and projet_id = %s" in s:
+            # Copie « avec les quantités » : l'origine doit être du même projet.
+            lid, projet_id = params
+            existe = any(l["id"] == lid and l["projet_id"] == projet_id for l in self._db["lignes"])
+            self._pending = ("one", {"?column?": 1} if existe else None)
+            return
+
         if "insert into ad_budget.budget_lignes" in s and "returning" in s:
             (projet_id, source_item_id, section, description, unite, prix_unitaire,
              qte, ajustement_pct, note, actif, item_id_ad_mat, ad_hub_pending_id,
              taux_horaire, lot_id, a_completer,
-             heures, heures_manuelles, production_valeur, production_unite, ordre) = params
+             heures, heures_manuelles, production_valeur, production_unite, ordre,
+             quantites_liees_a) = params
             self._db["next_id"] += 1
             row = {
                 "id": self._db["next_id"], "projet_id": projet_id,
@@ -77,7 +85,7 @@ class _FakeCreateLigneCursor:
                 "taux_horaire": taux_horaire, "lot_id": lot_id, "a_completer": a_completer,
                 "heures": heures, "heures_manuelles": heures_manuelles,
                 "production_valeur": production_valeur, "production_unite": production_unite,
-                "ordre": ordre,
+                "ordre": ordre, "quantites_liees_a": quantites_liees_a,
             }
             self._db["lignes"].append(row)
             self._pending = ("one", dict(row))
@@ -261,3 +269,37 @@ def test_lignes_heritees_a_ordre_zero_restent_dans_l_ordre_affiche():
 def test_plan_ordre_insertion_reference_inconnue_ajoute_a_la_fin():
     assert B._plan_ordre_insertion([(1, 10), (2, 20)], 99) == (30, [])
     assert B._plan_ordre_insertion([], 3) == (10, [])
+
+
+# ── QUANTITÉS LIÉES (18 sept 2026) ────────────────────────────────────────
+# Simon : « copier l'item aussi dans le lot Rimini avec les quantités… copié
+# mais sans les quantités » -- il les tape dans le tableau après la création.
+# La copie naît liée à son origine ; le lien n'est posé que vers une ligne du
+# MÊME projet.
+
+def test_copie_avec_quantites_nait_liee_a_son_origine():
+    db = _make_db()
+    create = _get_create_ligne(lambda: _FakeCreateLigneConn(db))
+    origine = _call(create, 7, {"section": "01 00 00", "description": "Frais de transport",
+                                "taux_horaire": 50, "lot_id": 51})["ligne"]
+    copie = _call(create, 7, {"section": "01 00 00", "description": "Frais de transport",
+                              "taux_horaire": 50, "lot_id": 52,
+                              "quantites_liees_a": origine["id"]})["ligne"]
+    assert copie["quantites_liees_a"] == origine["id"]
+    assert origine["quantites_liees_a"] is None
+
+
+def test_lien_refuse_vers_une_ligne_d_un_autre_projet():
+    db = _make_db()
+    create = _get_create_ligne(lambda: _FakeCreateLigneConn(db))
+    ailleurs = _call(create, 99, {"section": "01 00 00", "taux_horaire": 50})["ligne"]
+    copie = _call(create, 7, {"section": "01 00 00", "taux_horaire": 50,
+                              "quantites_liees_a": ailleurs["id"]})["ligne"]
+    assert copie["quantites_liees_a"] is None
+
+
+def test_sans_lien_demande_aucun_lien():
+    db = _make_db()
+    create = _get_create_ligne(lambda: _FakeCreateLigneConn(db))
+    ligne = _call(create, 7, {"section": "01 00 00", "taux_horaire": 50})["ligne"]
+    assert ligne["quantites_liees_a"] is None
