@@ -3978,6 +3978,16 @@ def register_ad_budget_routes(get_conn):
                 (projet_id,),
             )
             budget_rows = cur.fetchall()
+            # LOTS (21 sept 2026, Simon : « il s'agit d'un projet en 2 lots…
+            # je dois avoir l'option de produire sur 1 lot ou l'autre, ou sur
+            # les deux »). Ad CON recevait les lignes SANS leur lot : les
+            # mêmes descriptions y apparaissaient en double, sans moyen de
+            # les distinguer ni de suivre un lot à part.
+            cur.execute(
+                "SELECT id, nom FROM ad_budget.lots WHERE projet_id = %s",
+                (projet_id,),
+            )
+            noms_lots = {r["id"]: r["nom"] for r in cur.fetchall()}
         finally:
             try:
                 cur.close()
@@ -4057,6 +4067,10 @@ def register_ad_budget_routes(get_conn):
                 "st_amount_origin": st_amount,
                 "st_adjustment_pct_origin": ajust_st,
                 "st_subtotal_origin": round(st_subtotal, 2),
+                # Lot d'origine : l'identifiant pour relier, le nom pour
+                # afficher sans dépendre d'Ad BUD. Hors lot : les deux à None.
+                "bud_lot_id": row.get("lot_id"),
+                "lot_nom": noms_lots.get(row.get("lot_id")),
             })
 
         # 4bis) Administration & profit + sous-total avant taxes (Simon, 16
