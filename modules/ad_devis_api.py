@@ -602,17 +602,21 @@ def register_ad_devis_routes(get_conn):
             "budget_fingerprint": empreinte or empreinte_courante,
             "budget_fingerprint_current": empreinte_courante,
             "budget_divergent": divergent,
-            # Titre affiché dans Espace Rapports. Fixé à « Devis » (15 sept
-            # 2026, Simon : « pour propostion et devis : Devis » — remplace
-            # le NOM DU PROJET utilisé depuis le 2026-08-12, qui rendait
-            # chaque ligne indistincte de son propre nom de projet.
-            # ⚠ Le sous-titre IMPRIMÉ dans le PDF lui-même (buildDevisPdf.js,
-            # adision-monorepo/packages/devis-pdf) reste « Proposition /
-            # Devis — {révision} », inchangé par ce correctif — seul le
-            # libellé Espace Rapports/nom de fichier (REPORT_TYPE_LABELS
-            # ["proposition_devis"], adision-app-api/modules/
-            # report_filename.py, à aligner séparément si besoin) change ici.
-            "titre": "Devis",
+            # Titre affiché dans Espace Rapports, et donc NOM DU FICHIER PDF
+            # (build_report_filename donne la priorité au titre libre).
+            # « Proposition & devis » depuis le 23 sept 2026 — Simon : « le nom
+            # de la section est bon, mais les fichiers doivent se nommer
+            # proposition & devis ». Valait « Devis » depuis le 15 sept, et le
+            # NOM DU PROJET avant ça (qui rendait chaque ligne indistincte de
+            # son propre nom de projet).
+            # Le sous-titre IMPRIMÉ dans le PDF lui-même (buildDevisPdf.js,
+            # adision-monorepo/packages/devis-pdf) dit « Proposition /
+            # Devis — {révision} » : c'est le même document, dit de la même
+            # façon, à la barre oblique près.
+            # ⚠ Ne change QUE les émissions à venir. Les versions déjà en base
+            # gardent le titre posé le jour de leur émission — c'est un
+            # enregistrement d'audit, pas un libellé d'affichage.
+            "titre": "Proposition & devis",
         }
         try:
             result = hub_service.post_report(jwt_token, int(hub_pid), pdf_bytes, fields)
