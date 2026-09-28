@@ -56,6 +56,27 @@ def _org(user) -> str:
     return str(org)
 
 
+def _csi_cle(code) -> Optional[str]:
+    """Chiffres d'un code CSI ("01 52 00" → "015200"), None s'il n'en a pas."""
+    chiffres = "".join(ch for ch in (code or "") if ch.isdigit())
+    return chiffres or None
+
+
+def _index_insertion_par_code(codes, nouveau) -> int:
+    """Où ranger `nouveau` dans une liste ORDONNÉE de codes CSI : juste après
+    le dernier code <= nouveau. Les éléments sans code (division vide, None)
+    sont ignorés dans la comparaison. Les gabarits réels ne sont pas triés
+    (gabarit 7 : 01 00 00, 01 52 00, 01 31 00…) : « après le dernier plus
+    petit » range le nouveau à côté de ses voisins sans exiger un tri global."""
+    cle = _csi_cle(nouveau) or "999999"
+    pos = 0
+    for i, c in enumerate(codes):
+        k = _csi_cle(c)
+        if k is not None and k <= cle:
+            pos = i + 1
+    return pos
+
+
 def register_ad_gabarits_routes(get_conn):
     jwt_user, _jwt_user_or_token, _jwt_admin, jwt_super_admin = make_jwt_deps(get_conn)
     router = APIRouter(prefix="/budget", tags=["Ad BUD — Gabarits"])
@@ -916,6 +937,168 @@ def register_ad_gabarits_routes(get_conn):
                 )
             conn.commit()
             return {"status": "created", "id": gid}
+        except HTTPException:
+            conn.rollback()
+            raise
+        finally:
+            cur.close()
+            conn.close()
+
+    @router.post("/gabarits/add-ligne")
+    def add_ligne_gabarits(data: dict, user=Depends(jwt_user)):
+        """Menu clic-droit de la grille Ad BUD → « Ajouter au gabarit » :
+        copie UNE ligne du budget (structure seule, sans qté ni prix) dans un
+        ou plusieurs gabarits de l'organisation.
+
+        Body : {gabarit_ids: "all" | [id…], code_csi, libelle_csi,
+        code_division, libelle_division, description, type, code_typ}.
+
+        Pour chaque gabarit :
+          1. la sous-section `code_csi` est cherchée dans TOUT le gabarit, pas
+             seulement sous sa division MasterFormat — les gabarits réels
+             rangent parfois « 01 52 00 » comme sa propre division ;
+          2. absente → division `code_division` (créée si absente), puis
+             sous-section créée dedans, rangées par code ;
+          3. même description (strip + casefold) déjà dans la sous-section →
+             doublon, rien n'est ajouté ;
+          4. sinon la ligne va EN FIN de sous-section.
+        INSERT ciblés (jamais _replace_structure) : les ids des lignes
+        existantes ne bougent pas. Un id d'une autre organisation est ignoré en
+        silence (jamais une erreur qui révélerait son existence). Une seule
+        transaction ; chaque gabarit verrouillé FOR UPDATE, deux clics
+        simultanés ne créent pas deux fois la même sous-section."""
+        org = _org(user)
+        code_csi = (data.get("code_csi") or "").strip()
+        description = (data.get("description") or "").strip()
+        if not code_csi:
+            raise HTTPException(status_code=400, detail="Code CSI requis")
+        if not description:
+            raise HTTPException(status_code=400, detail="Description requise")
+        libelle_csi = (data.get("libelle_csi") or "").strip()
+        code_div = (data.get("code_division") or "").strip() or f"{code_csi[:2]} 00 00"
+        libelle_div = (data.get("libelle_division") or "").strip()
+        code_typ = (data.get("code_typ") or "").strip() or None
+        ltype = "ad_typ" if data.get("type") == "ad_typ" and code_typ else "manuelle"
+        if ltype != "ad_typ":
+            code_typ = None
+        cle_desc = description.casefold()
+
+        ids_demandes = data.get("gabarit_ids")
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            if ids_demandes == "all":
+                cur.execute(
+                    "SELECT id FROM ad_budget.gabarits WHERE organization_id = %s "
+                    "ORDER BY id FOR UPDATE",
+                    (org,),
+                )
+            else:
+                if not isinstance(ids_demandes, list):
+                    raise HTTPException(status_code=400, detail="gabarit_ids invalide")
+                ids_propres = sorted({
+                    int(i) for i in ids_demandes
+                    if isinstance(i, (int, float)) and not isinstance(i, bool) and int(i) > 0
+                })
+                if not ids_propres:
+                    raise HTTPException(status_code=400, detail="Aucun gabarit choisi.")
+                cur.execute(
+                    "SELECT id FROM ad_budget.gabarits "
+                    "WHERE organization_id = %s AND id = ANY(%s) ORDER BY id FOR UPDATE",
+                    (org, ids_propres),
+                )
+            ids = [r["id"] for r in cur.fetchall()]
+
+            ajoutes, doublons = [], []
+            for gid in ids:
+                cur.execute(
+                    "SELECT ss.id FROM ad_budget.gabarit_sous_sections ss "
+                    "JOIN ad_budget.gabarit_sections s ON s.id = ss.gabarit_section_id "
+                    "WHERE s.gabarit_id = %s AND TRIM(ss.code_csi) = %s "
+                    "ORDER BY s.ordre, s.id, ss.ordre, ss.id LIMIT 1",
+                    (gid, code_csi),
+                )
+                row = cur.fetchone()
+                ss_id = row["id"] if row else None
+
+                if ss_id is None:
+                    cur.execute(
+                        "SELECT id, numero, ordre FROM ad_budget.gabarit_sections "
+                        "WHERE gabarit_id = %s ORDER BY ordre, id",
+                        (gid,),
+                    )
+                    divisions = cur.fetchall()
+                    div = next((d for d in divisions
+                                if (d["numero"] or "").strip() == code_div), None)
+                    if div is None:
+                        pos = _index_insertion_par_code([d["numero"] for d in divisions], code_div)
+                        ordre = divisions[pos]["ordre"] if pos < len(divisions) else (
+                            (divisions[-1]["ordre"] + 1) if divisions else 0)
+                        cur.execute(
+                            "UPDATE ad_budget.gabarit_sections SET ordre = ordre + 1 "
+                            "WHERE gabarit_id = %s AND ordre >= %s",
+                            (gid, ordre),
+                        )
+                        cur.execute(
+                            "INSERT INTO ad_budget.gabarit_sections "
+                            "(gabarit_id, nom_section, numero, ordre, est_sous_total) "
+                            "VALUES (%s, %s, %s, %s, FALSE) RETURNING id",
+                            (gid, libelle_div, code_div, ordre),
+                        )
+                        div_id = cur.fetchone()["id"]
+                    else:
+                        div_id = div["id"]
+
+                    cur.execute(
+                        "SELECT code_csi, ordre FROM ad_budget.gabarit_sous_sections "
+                        "WHERE gabarit_section_id = %s ORDER BY ordre, id",
+                        (div_id,),
+                    )
+                    sous = cur.fetchall()
+                    pos = _index_insertion_par_code([s["code_csi"] for s in sous], code_csi)
+                    ordre = sous[pos]["ordre"] if pos < len(sous) else (
+                        (sous[-1]["ordre"] + 1) if sous else 0)
+                    cur.execute(
+                        "UPDATE ad_budget.gabarit_sous_sections SET ordre = ordre + 1 "
+                        "WHERE gabarit_section_id = %s AND ordre >= %s",
+                        (div_id, ordre),
+                    )
+                    cur.execute(
+                        "INSERT INTO ad_budget.gabarit_sous_sections "
+                        "(gabarit_section_id, code_csi, libelle, ordre) "
+                        "VALUES (%s, %s, %s, %s) RETURNING id",
+                        (div_id, code_csi, libelle_csi, ordre),
+                    )
+                    ss_id = cur.fetchone()["id"]
+
+                cur.execute(
+                    "SELECT description FROM ad_budget.gabarit_lignes "
+                    "WHERE gabarit_sous_section_id = %s",
+                    (ss_id,),
+                )
+                if any((r["description"] or "").strip().casefold() == cle_desc
+                       for r in cur.fetchall()):
+                    doublons.append(gid)
+                    continue
+
+                cur.execute(
+                    "INSERT INTO ad_budget.gabarit_lignes "
+                    "(gabarit_sous_section_id, ordre, type, description, code_typ) "
+                    "SELECT %s, COALESCE(MAX(ordre) + 1, 0), %s, %s, %s "
+                    "FROM ad_budget.gabarit_lignes WHERE gabarit_sous_section_id = %s",
+                    (ss_id, ltype, description, code_typ, ss_id),
+                )
+                cur.execute(
+                    "UPDATE ad_budget.gabarits SET updated_at = NOW() WHERE id = %s",
+                    (gid,),
+                )
+                ajoutes.append(gid)
+
+            conn.commit()
+            return {
+                "nb_gabarits": len(ids), "nb_ajoutes": len(ajoutes),
+                "nb_doublons": len(doublons), "ajoutes": ajoutes, "doublons": doublons,
+            }
         except HTTPException:
             conn.rollback()
             raise
