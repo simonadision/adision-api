@@ -96,6 +96,26 @@ def register_ad_gabarits_routes(get_conn):
             raise HTTPException(status_code=404, detail="Gabarit introuvable")
         return g
 
+    def _journaliser(cur, gabarit_id, org, user, action, detail=None):
+        """QUI a modifié QUEL gabarit, QUAND (28 sept 2026, Simon : « ce n'est
+        pas via IP qu'on doit surveiller mais depuis user authentification »).
+        Les journaux HTTP ne gardent que l'IP : deux personnes d'un même
+        bureau y sont indiscernables. On note donc l'utilisateur du JETON, dans
+        la MÊME transaction que l'écriture — un rollback n'y laisse pas de
+        trace, un commit l'y laisse toujours."""
+        uid = user.get("id")
+        try:
+            uid = int(uid) if uid is not None else None
+        except (TypeError, ValueError):
+            uid = None
+        cur.execute(
+            "INSERT INTO ad_budget.gabarit_journal "
+            "(gabarit_id, organization_id, user_id, user_email, action, detail) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (gabarit_id, org, uid, (user.get("email") or None), action,
+             json.dumps(detail) if detail is not None else None),
+        )
+
     def _normaliser_regroupements(data):
         """Valide/nettoie la liste de regroupements reçue du client — une
         liste vide est valide (aucun regroupement, comportement d'avant).
@@ -935,6 +955,7 @@ def register_ad_gabarits_routes(get_conn):
                     "UPDATE ad_budget.gabarits SET regroupements=%s WHERE id=%s",
                     (json.dumps(_normaliser_regroupements(data["regroupements"])), gid),
                 )
+            _journaliser(cur, gid, org, user, "creation", {"nom": nom})
             conn.commit()
             return {"status": "created", "id": gid}
         except HTTPException:
@@ -1092,6 +1113,8 @@ def register_ad_gabarits_routes(get_conn):
                     "UPDATE ad_budget.gabarits SET updated_at = NOW() WHERE id = %s",
                     (gid,),
                 )
+                _journaliser(cur, gid, org, user, "ajout_ligne",
+                             {"code_csi": code_csi, "description": description})
                 ajoutes.append(gid)
 
             conn.commit()
@@ -1150,6 +1173,10 @@ def register_ad_gabarits_routes(get_conn):
                 )
             if "sections" in data:
                 _replace_structure(cur, gabarit_id, data["sections"])
+            _journaliser(cur, gabarit_id, org, user, "enregistrement", {
+                "structure": "sections" in data,
+                "nb_divisions": len(data.get("sections") or []) if "sections" in data else None,
+            })
             conn.commit()
             return {"status": "updated"}
         except HTTPException:
@@ -1190,6 +1217,8 @@ def register_ad_gabarits_routes(get_conn):
                 "WHERE id=%s AND organization_id=%s",
                 (*params, gabarit_id, org),
             )
+            _journaliser(cur, gabarit_id, org, user, "renommage",
+                         {k: data.get(k) for k in ("nom", "description") if k in data})
             conn.commit()
             return {"status": "updated"}
         except HTTPException:
@@ -1205,11 +1234,12 @@ def register_ad_gabarits_routes(get_conn):
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         try:
-            _load_gabarit_scoped(cur, gabarit_id, org)
+            g = _load_gabarit_scoped(cur, gabarit_id, org)
             cur.execute(
                 "DELETE FROM ad_budget.gabarits WHERE id=%s AND organization_id=%s",
                 (gabarit_id, org),
             )
+            _journaliser(cur, gabarit_id, org, user, "suppression", {"nom": g["nom"]})
             conn.commit()
             return {"status": "deleted"}
         except HTTPException:
@@ -1239,6 +1269,7 @@ def register_ad_gabarits_routes(get_conn):
             )
             gid = cur.fetchone()["id"]
             _replace_structure(cur, gid, sections)
+            _journaliser(cur, gid, org, user, "duplication", {"source_id": gabarit_id})
             conn.commit()
             return {"status": "duplicated", "id": gid}
         except HTTPException:
@@ -1334,6 +1365,7 @@ def register_ad_gabarits_routes(get_conn):
             )
             gid = cur.fetchone()["id"]
             _replace_structure(cur, gid, structure)
+            _journaliser(cur, gid, org, user, "creation_depuis_projet", {"projet_id": projet_id})
             conn.commit()
             return {"status": "created", "id": gid, "nb_sections": len(structure)}
         except HTTPException:
