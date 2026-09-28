@@ -21,7 +21,7 @@ from fastapi import HTTPException  # noqa: E402
 import modules.ad_gabarits_api as G  # noqa: E402
 
 ORG = "org-a"
-_USER = {"id": 1, "organization_id": ORG, "nom": "Test"}
+_USER = {"id": 1, "organization_id": ORG, "nom": "Test", "email": "test@contracta.ca"}
 
 
 def test_index_insertion_par_code():
@@ -106,6 +106,10 @@ class _Cur:
                                  "code_typ": code, "ordre": (max(ordres) + 1) if ordres else 0})
         elif s.startswith("update ad_budget.gabarits set updated_at"):
             db["touches"].append(p[0])
+        elif s.startswith("insert into ad_budget.gabarit_journal"):
+            gid, org, uid, email, action, detail = p
+            db["journal"].append({"gabarit_id": gid, "org": org, "user_id": uid,
+                                  "email": email, "action": action, "detail": detail})
         else:
             raise AssertionError(f"SQL inattendu : {s[:90]}")
 
@@ -139,7 +143,7 @@ class _Conn:
 def _db():
     # Gabarit 7 : copie réduite du vrai (01 52 00 rangé comme sa propre division).
     return {
-        "next_id": 1000, "commits": 0, "touches": [],
+        "next_id": 1000, "commits": 0, "touches": [], "journal": [],
         "gabarits": [{"id": 7, "org": ORG}, {"id": 8, "org": ORG}, {"id": 99, "org": "org-b"}],
         "sections": [
             {"id": 1, "gabarit_id": 7, "numero": "01 00 00", "nom": "Exigences générales", "ordre": 0},
@@ -185,6 +189,19 @@ def test_doublon_casse_et_espaces_ignores():
     r = _route(db)(_body(description="  toilette CHIMIQUE "), user=_USER)
     assert (r["nb_ajoutes"], r["nb_doublons"], r["doublons"]) == (0, 1, [7])
     assert len(db["lignes"]) == 1
+    assert db["journal"] == []  # rien d'ajouté = rien de journalisé
+
+
+def test_journal_note_l_utilisateur_du_jeton():
+    # 28 sept 2026 : QUI modifie un gabarit se lit dans le journal, pas dans
+    # l'IP des journaux HTTP (deux personnes d'un bureau y sont confondues).
+    db = _db()
+    _route(db)(_body(gabarit_ids="all"), user=_USER)
+    assert [(j["gabarit_id"], j["user_id"], j["email"], j["action"]) for j in db["journal"]] == [
+        (7, 1, "test@contracta.ca", "ajout_ligne"),
+        (8, 1, "test@contracta.ca", "ajout_ligne"),
+    ]
+    assert all(j["org"] == ORG for j in db["journal"])
 
 
 def test_division_et_sous_section_creees_rangees_par_code():
