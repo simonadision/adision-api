@@ -326,6 +326,27 @@ def _ensure_schema():
             "ADD COLUMN IF NOT EXISTS production_unite TEXT DEFAULT NULL, "
             "ADD COLUMN IF NOT EXISTS production_auto BOOLEAN NOT NULL DEFAULT TRUE"
         )
+        # === Quantite calculee automatiquement (2026-09-30) ===
+        # Demande de PC4, decision de Simon a 15:01 : les quantites de
+        # « Cautionnement » et « Assurance » se calculent seules (total / 1000,
+        # arrondi au superieur), MAIS « les cases doivent rester editables par
+        # double-clic », et une valeur posee a la main tient « POUR TOUJOURS,
+        # POUR TOUS » -- jusqu'a ce qu'il remette la ligne en automatique.
+        #
+        # POURQUOI UNE COLONNE ET PAS qte_override : ce dernier est pose par
+        # le backend a TOUT PUT qui touche qte, donc aussi aux ecritures
+        # AUTOMATIQUES. Il dit « quelqu'un a ecrit ici », pas « n'y touchez
+        # plus ». Et les lignes existantes l'ont deja.
+        #
+        # POLARITE POSITIVE, comme production_auto juste au-dessus : TRUE =
+        # la quantite suit le calcul ; FALSE = Simon l'a posee a la main.
+        # L'inverse (`qte_auto_desactivee`) aurait mis deux polarites
+        # opposees dans la meme table, et fabrique un `not ..._desactivee`
+        # que personne ne relit sans se tromper.
+        cur.execute(
+            "ALTER TABLE ad_budget.budget_lignes "
+            "ADD COLUMN IF NOT EXISTS qte_auto BOOLEAN NOT NULL DEFAULT TRUE"
+        )
         conn.commit()
         cur.close()
         conn.close()
