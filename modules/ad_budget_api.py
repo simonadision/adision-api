@@ -885,6 +885,9 @@ _COLONNES_COPIE_LIGNE = (
     "ajust_sous_traitant_override", "sous_traitant_montant_override",
     "prix_unitaire_st", "prix_unitaire_st_override",
     "production_valeur", "production_unite", "production_auto",
+    # Une ligne copiee doit garder son etat MANUEL : sans ca, la copie se
+    # remet a calculer et ecrase la quantite qu'on vient de copier.
+    "qte_auto",
 )
 
 
@@ -2099,7 +2102,7 @@ def _dupliquer_lots_et_lignes(cur, projet_id_source, new_id):
            item_id_ad_mat, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
            source_typ_code, source_typ_snapshot_at,
            source_viu_analysis_id, source_viu_item_id,
-           production_valeur, production_unite, production_auto)
+           production_valeur, production_unite, production_auto, qte_auto)
         SELECT %s, {lot_id_expr}, source_item_id, section, description, unite, prix_unitaire,
                qte, ajustement_pct, note, actif, prix_unitaire_override,
                heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
@@ -2112,7 +2115,7 @@ def _dupliquer_lots_et_lignes(cur, projet_id_source, new_id):
                item_id_ad_mat, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
                source_typ_code, source_typ_snapshot_at,
                source_viu_analysis_id, source_viu_item_id,
-               production_valeur, production_unite, production_auto
+               production_valeur, production_unite, production_auto, qte_auto
         FROM ad_budget.budget_lignes WHERE projet_id = %s
         """,
         (new_id, *case_params, projet_id_source))
@@ -8144,6 +8147,9 @@ def register_ad_budget_routes(get_conn):
             # `heures` recalculé, ces 3 champs ne servent qu'à la persistance
             # + réutilisation future (Ad TIM).
             "production_valeur", "production_unite", "production_auto",
+            # TRUE = la quantite suit le calcul automatique ; FALSE = Simon
+            # l'a posee a la main et elle ne doit plus bouger (2026-09-30).
+            "qte_auto",
             # Format d'achat de l'item (demande PC4, 2026-09-29) : la boite
             # de 12, le paquet de 50. L'ecran d'Ad BUD en deduit une colonne
             # « Qte items » = plafond(qte / format_item), CALCULEE COTE CLIENT.
@@ -8195,6 +8201,7 @@ def register_ad_budget_routes(get_conn):
                     "ajust_materiaux_override", "ajust_main_oeuvre_override",
                     "ajust_sous_traitant_override", "sous_traitant_montant_override",
                     "prix_unitaire_st_override", "production_auto",
+                    "qte_auto",
                 ):
                     val = bool(val)
                 fields.append(f"{field} = %s")
@@ -8859,7 +8866,7 @@ def register_ad_budget_routes(get_conn):
                    qte_override, taux_horaire_override, ajust_materiaux_override, ajust_main_oeuvre_override,
                    ajust_sous_traitant_override, sous_traitant_montant_override,
                    prix_unitaire_st, prix_unitaire_st_override,
-                   production_valeur, production_unite, production_auto)
+                   production_valeur, production_unite, production_auto, qte_auto)
                 SELECT %s, %s, source_item_id, section, description, unite, prix_unitaire, {sel_qte},
                    ajustement_pct, note, actif, source_file, type_source,
                    {sel_heures}, taux_horaire, cout_sous_traitant, sous_traitant_nom,
@@ -8870,7 +8877,7 @@ def register_ad_budget_routes(get_conn):
                    {sel_qte_override}, taux_horaire_override, ajust_materiaux_override, ajust_main_oeuvre_override,
                    ajust_sous_traitant_override, {sel_st_montant_override},
                    prix_unitaire_st, prix_unitaire_st_override,
-                   production_valeur, production_unite, production_auto
+                   production_valeur, production_unite, production_auto, qte_auto
                 FROM ad_budget.budget_lignes
                 WHERE projet_id = %s AND lot_id = %s
                 """,
