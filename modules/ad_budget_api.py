@@ -7422,6 +7422,28 @@ def register_ad_budget_routes(get_conn):
 
         fields = []
         values = []
+        # format_item : NULL efface le format (cas normal, la plupart des
+        # lignes n'en ont pas). Une valeur fournie doit etre STRICTEMENT > 0 --
+        # un format de zero ou negatif ne veut rien dire, et diviser qte par
+        # zero cote client donnerait une infinite silencieuse dans la colonne
+        # « Qte items ». On refuse ici avec un message lisible ; la base pose
+        # la meme garde en CHECK NOT VALID, pour les voies d'ecriture futures
+        # qui ne passeraient pas par cette route.
+        if "format_item" in data and data["format_item"] is not None:
+            try:
+                _fmt = float(data["format_item"])
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    status_code=422,
+                    detail="format_item doit etre un nombre, ou null pour l'effacer",
+                )
+            if _fmt <= 0:
+                raise HTTPException(
+                    status_code=422,
+                    detail="format_item doit etre strictement superieur a 0 "
+                           "(null pour effacer le format)",
+                )
+
         for field in [
             "section", "description", "unite", "prix_unitaire", "qte",
             "ajustement_pct", "note", "actif",
@@ -7464,6 +7486,17 @@ def register_ad_budget_routes(get_conn):
             # `heures` recalculé, ces 3 champs ne servent qu'à la persistance
             # + réutilisation future (Ad TIM).
             "production_valeur", "production_unite", "production_auto",
+            # Format d'achat de l'item (demande PC4, 2026-09-29) : la boite
+            # de 12, le paquet de 50. L'ecran d'Ad BUD en deduit une colonne
+            # « Qte items » = plafond(qte / format_item), CALCULEE COTE CLIENT.
+            # LE SERVEUR NE CALCULE RIEN AVEC CE CHAMP, et c'est deliberé :
+            # il n'entre ni dans sous_total, ni dans total, ni dans
+            # compute_budget_fingerprint. Si quelqu'un l'ajoute un jour a un
+            # total, qu'il sache qu'il contredit une decision, pas un oubli.
+            # NULL efface le format ; 0 et les negatifs sont refuses (422
+            # ci-dessous), et la base pose la meme garde en CHECK NOT VALID
+            # (migrations/sprint_format_item.sql).
+            "format_item",
             # Sprint OVERRIDES GÉNÉRALISATION — flags par champ override-able. La
             # saisie manuelle domine le carnet. Le front peut les envoyer
             # explicitement, mais la pose est AUSSI automatique ci-dessous dès
