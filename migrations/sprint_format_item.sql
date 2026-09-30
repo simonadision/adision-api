@@ -12,7 +12,10 @@
 -- Si un jour quelqu'un l'ajoute a un calcul de total, qu'il sache qu'il
 -- contredit une decision explicite et non un oubli.
 --
--- TYPE : numeric, comme `qte` et `prix_unitaire` (convention de la table).
+-- TYPE : NUMERIC(12,4), EXACTEMENT celui de production_valeur, qui est le
+-- champ le plus proche par nature. Choisi par PC4 ; je le prends sur le sien
+-- plutot que sur le mien (numeric non borne) : borner est mieux, et deux
+-- champs voisins doivent se ressembler.
 -- NULLABLE : une ligne sans format est le cas NORMAL, pas une anomalie --
 -- l'immense majorite des lignes existantes n'en aura jamais.
 -- CONTRAINTE > 0 : un format de zero ou negatif n'a pas de sens ; on refuse
@@ -20,7 +23,7 @@
 -- reste permis, c'est l'absence de format.
 
 ALTER TABLE ad_budget.budget_lignes
-  ADD COLUMN IF NOT EXISTS format_item numeric NULL;
+  ADD COLUMN IF NOT EXISTS format_item NUMERIC(12,4) DEFAULT NULL;
 
 -- Contrainte posee separement et NOT VALID : elle s'applique aux ecritures
 -- futures sans imposer un balayage de toute la table au demarrage. Les
