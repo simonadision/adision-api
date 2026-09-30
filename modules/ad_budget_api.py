@@ -8082,6 +8082,26 @@ def register_ad_budget_routes(get_conn):
                            "(null pour effacer le format)",
                 )
 
+        # compte_metier_force : le compte comptable FORCE de la ligne (pont
+        # QuickBooks). NULL = « suis la correspondance section -> compte », et
+        # c'est le cas normal. On NORMALISE ici : une chaine de blancs devient
+        # NULL, parce que « corrige vers rien » n'a pas de sens -- sans ca, ''
+        # et '   ' seraient deux facons invisibles de dire quelque chose
+        # d'indiscernable d'une ligne qui suit la correspondance, alors que
+        # les deux etats ne veulent PAS dire pareil. La base pose la meme
+        # garde en CHECK NOT VALID (migrations/sprint_compte_metier.sql), pour
+        # les voies d'ecriture futures qui ne passeraient pas par cette route.
+        if "compte_metier_force" in data and data["compte_metier_force"] is not None:
+            _cpt = data["compte_metier_force"]
+            if not isinstance(_cpt, str):
+                raise HTTPException(
+                    status_code=422,
+                    detail="compte_metier_force doit etre une chaine, ou null "
+                           "pour suivre la correspondance",
+                )
+            _cpt = _cpt.strip()
+            data["compte_metier_force"] = _cpt or None
+
         for field in [
             "section", "description", "unite", "prix_unitaire", "qte",
             "ajustement_pct", "note", "actif",
@@ -8135,6 +8155,18 @@ def register_ad_budget_routes(get_conn):
             # ci-dessous), et la base pose la meme garde en CHECK NOT VALID
             # (migrations/sprint_format_item.sql).
             "format_item",
+            # Compte comptable FORCE de la ligne (pont QuickBooks, 2026-09-30).
+            # CE N'EST PAS le compte de la ligne : le compte normal se DEDUIT
+            # de la section par une table de correspondance propre a chaque
+            # organisation. Ce champ ne dit que « pour CETTE ligne-ci, la
+            # correspondance se trompe ». NULL = suis la correspondance, et
+            # c'est le cas de l'immense majorite des lignes.
+            # NE JAMAIS y recopier le compte deduit : la valeur deviendrait
+            # fausse des que la correspondance change, et plus rien ne dirait
+            # laquelle des deux a raison.
+            # HORS TOTAUX ET HORS EMPREINTE -- un numero de compte n'est pas
+            # un montant. Verrouille par tests/test_budget_fingerprint_champs_neutres.py.
+            "compte_metier_force",
             # Sprint OVERRIDES GÉNÉRALISATION — flags par champ override-able. La
             # saisie manuelle domine le carnet. Le front peut les envoyer
             # explicitement, mais la pose est AUSSI automatique ci-dessous dès
