@@ -132,6 +132,17 @@ jobs:
       - name: Source unique - pas de copie locale de la regle des heures
         run: python tools/verifier_source_unique.py
 
+      # 1er oct 2026 : 22 fichiers de tests sur 46 n'etaient cites NULLE PART
+      # ici -- ils ne tournaient jamais, et l'on se croyait couvert (dont la
+      # garde des copies, muette depuis le 11 sept). Tout tests/test_*.py et
+      # tests/check_*.py est cite ici, ou nomme dans EXCLUSIONS avec sa raison.
+      - name: Garde-fou - aucun test hors CI sans exclusion nommee
+        run: python tools/verifier_tests_cables.py
+
+      # Le garde-fou ci-dessus, vu en train de mordre (faux depots).
+      - name: Garde-fou - son propre temoin
+        run: python tests/test_verifier_tests_cables.py
+
       # Filet du controle ci-dessus : injecte une copie dans un vrai fichier
       # temporaire et verifie qu'il la detecte pour de vrai.
       - name: Source unique - le controle mord-il pour de vrai (filet)
