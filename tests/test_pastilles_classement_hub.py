@@ -28,8 +28,17 @@ def test_correspondances_aller_retour():
     from modules import ad_budget_api as A
     for classement, categorie in A._CLASSEMENT_HUB_VERS_CATEGORIE.items():
         assert A._CATEGORIE_VERS_CLASSEMENT_HUB[categorie] == classement
-    # Les trois pastilles visibles couvrent les trois classements du hub.
-    assert set(A._CLASSEMENT_HUB_VERS_CATEGORIE) == {"soumission", "obtenu", "ferme"}
+    # Les quatre pastilles visibles couvrent les quatre classements du hub
+    # (« perdu » depuis le 1er oct 2026).
+    assert set(A._CLASSEMENT_HUB_VERS_CATEGORIE) == {"soumission", "obtenu", "ferme", "perdu"}
+
+
+def test_perdu_reste_perdu_au_hub():
+    """Un appel d'offres perdu n'est pas un projet complete : glisser une
+    carte sur « Projets perdus » doit ecrire `perdu` au hub, jamais `ferme`."""
+    from modules import ad_budget_api as A
+    assert A._CATEGORIE_VERS_CLASSEMENT_HUB["perdu"] == "perdu"
+    assert A._CLASSEMENT_HUB_VERS_CATEGORIE["perdu"] == "perdu"
     assert set(A._CATEGORIE_VERS_CLASSEMENT_HUB) <= A.ALLOWED_CATEGORIES_AFFICHAGE
 
 
