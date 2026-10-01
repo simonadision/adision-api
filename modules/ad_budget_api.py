@@ -5124,6 +5124,47 @@ def register_ad_budget_routes(get_conn):
         ws.append(["", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
                    "TOTAL GÉNÉRAL", total_general, ""])
 
+        # CASCADE FINANCIÈRE COMPLÈTE (1er oct. 2026, Simon : « je veux voir
+        # toutes les infos total dans mes rapports PDF et Excel », capture du
+        # grand livre qui s'arrêtait aux 4 totaux par famille alors que
+        # l'écran montre coûtant, administration et profit, taxes). Même
+        # SOURCE UNIQUE que l'écran, le PDF serveur et le hub :
+        # compute_budget_totals, sur les lignes ACTIVES (comme le PDF par
+        # défaut). Les 4 totaux ci-dessus, eux, restent tels qu'avant (toutes
+        # lignes, brutes) : rien de ce qu'un lecteur connaissait ne bouge.
+        conn2 = get_conn()
+        cur2 = conn2.cursor(row_factory=dict_row)
+        try:
+            cur2.execute("SELECT * FROM ad_budget.projets WHERE id = %s", (projet_id,))
+            projet_complet = cur2.fetchone()
+            cur2.execute(
+                """
+                SELECT section, description, unite, qte, prix_unitaire, ajustement_pct,
+                       heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
+                       ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant, production_valeur,
+                       sous_traitant_type, sous_traitant_montant,
+                       sous_total, total, note
+                FROM ad_budget.budget_lignes
+                WHERE projet_id = %s AND actif = TRUE
+                """,
+                (projet_id,),
+            )
+            lignes_actives = cur2.fetchall()
+        finally:
+            cur2.close()
+            conn2.close()
+        if projet_complet:
+            _t = compute_budget_totals(projet_complet, lignes_actives)
+            vide = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+            ws.append([])
+            ws.append(vide + ["Récapitulatif financier (lignes actives)", "", ""])
+            ws.append(vide + ["Coûtant", _t["cout_avant_admin_profit"], ""])
+            ws.append(vide + ["Administration et profit", _t["admin_profit_total"], ""])
+            ws.append(vide + ["Total avec admin. et profit", _t["sous_total_avant_taxes"], ""])
+            ws.append(vide + [f"TPS {TPS_RATE * 100:g} %", _t["tps"], ""])
+            ws.append(vide + [f"TVQ {TVQ_RATE * 100:g} %".replace(".", ","), _t["tvq"], ""])
+            ws.append(vide + ["Total avec taxes", _t["total_general"], ""])
+
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
