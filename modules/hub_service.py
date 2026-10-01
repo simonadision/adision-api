@@ -395,6 +395,29 @@ def map_project_to_identity(hub_project: dict) -> dict:
                        ("telephone_entrepreneur", "entrepreneur_telephone")):
         if _vide(out.get(cle)):
             out[cle] = p.get(repli)
+    # QUI S'IMPRIME DANS LE BLOC ENTREPRENEUR (1er oct. 2026, migration 195 du
+    # hub) — cf. modules/contacts_rapport.py. La principale (après repli
+    # ci-dessus) si sa case est cochée — cochée par défaut, et VRAIE aussi
+    # quand le hub ne connaît pas encore la case —, puis les personnes du
+    # projet cochées « Sur les rapports », dans leur ordre.
+    contacts = []
+    if p.get("entrepreneur_pr_sur_rapports") is not False:
+        contacts.append({
+            "role": "principal",
+            "nom": out.get("contact_entrepreneur"),
+            "fonction": out.get("fonction_entrepreneur"),
+            "email": out.get("email_entrepreneur"),
+            "telephone": out.get("telephone_entrepreneur"),
+        })
+    for c in p.get("contacts_rapports") or []:
+        contacts.append({
+            "role": c.get("categorie") or "",
+            "nom": c.get("nom"),
+            "fonction": c.get("fonction"),
+            "email": c.get("courriel"),
+            "telephone": c.get("telephone"),
+        })
+    out["contacts_entrepreneur"] = contacts
     return out
 
 
