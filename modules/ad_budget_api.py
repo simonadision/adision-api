@@ -316,17 +316,25 @@ ALLOWED_CATEGORIES_AFFICHAGE = {"en_soumission", "en_cours", "en_execution", "pe
 # une carte ÉCRIT ce classement au hub, qui déplace aussi le projet dans son
 # arbre et dans les autres modules. `categorie_affichage` local ne sert plus
 # qu'aux budgets sans projet hub.
+#
+# QUATRIEME CLASSEMENT « perdu » (Ad HUB depuis le 25 sept 2026 ; onglet Ad
+# BUD le 1er oct, Simon : « ajouter un onglet projet perdu pour etre aligne
+# avec le hub »). Jusqu'ici « perdu » partait au hub en « ferme » -- un appel
+# d'offres perdu devenait un projet COMPLETE, et le taux de reussite n'avait
+# plus rien a lire -- et un projet perdu au hub ne trouvait aucune pastille
+# ici : il gardait sa categorie locale, perimee.
 _CATEGORIE_VERS_CLASSEMENT_HUB = {
     "en_soumission": "soumission",
     "en_cours": "obtenu",
     "en_execution": "obtenu",
-    "perdu": "ferme",
+    "perdu": "perdu",
     "archive": "ferme",
 }
 _CLASSEMENT_HUB_VERS_CATEGORIE = {
     "soumission": "en_soumission",
     "obtenu": "en_cours",
     "ferme": "archive",
+    "perdu": "perdu",
 }
 
 # === Sprint B : statuts qui figent le budget (snapshot dans app_ana) ===
