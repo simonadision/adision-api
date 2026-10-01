@@ -5138,9 +5138,12 @@ def register_ad_budget_routes(get_conn):
         # compute_budget_totals, sur les lignes ACTIVES (comme le PDF par
         # défaut). Les 4 totaux ci-dessus, eux, restent tels qu'avant (toutes
         # lignes, brutes) : rien de ce qu'un lecteur connaissait ne bouge.
+        # Connexion ouverte AVANT le try, mais le curseur DEDANS : si cursor()
+        # lève, le finally ferme quand même la connexion (relecture de PC3).
         conn2 = get_conn()
-        cur2 = conn2.cursor(row_factory=dict_row)
+        cur2 = None
         try:
+            cur2 = conn2.cursor(row_factory=dict_row)
             cur2.execute("SELECT * FROM ad_budget.projets WHERE id = %s", (projet_id,))
             projet_complet = cur2.fetchone()
             cur2.execute(
@@ -5157,7 +5160,8 @@ def register_ad_budget_routes(get_conn):
             )
             lignes_actives = cur2.fetchall()
         finally:
-            cur2.close()
+            if cur2 is not None:
+                cur2.close()
             conn2.close()
         if projet_complet:
             _t = compute_budget_totals(projet_complet, lignes_actives)
