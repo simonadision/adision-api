@@ -869,6 +869,44 @@ def figer_photos_au_classement(cur, hub_id: int, classement: str,
             "statut_fige": statut_fige}
 
 
+# COPIES D'UN MÊME PROJET (1er oct 2026, Simon). Olivier et Simon ont copié
+# « Oslo Traiteur » à 7 s d'intervalle : deux « Oslo Traiteur (copie) », et
+# chacun a travaillé seul sans savoir que l'autre existait. La garde
+# d'idempotence ne regardait que le MÊME utilisateur.
+#
+# FENÊTRE D'AVERTISSEMENT = UN JUGEMENT, PAS UNE MESURE. Mesuré par PC3 le
+# 1er oct : une seule paire de copies par deux utilisateurs dans toute la base
+# (n = 1, le cas lui-même) -- il n'y a pas de distribution à lire. Une
+# journée, parce qu'un avertissement qui ne BLOQUE pas ne coûte qu'une
+# question, et que rater le cas coûte un travail fait en double.
+COPIE_AVERTIR_FENETRE_SECONDES = 86400
+COPIE_AVERTIR_MAX = 5
+
+
+def nom_de_copie(nom_source: str, rang: int) -> str:
+    """« X (copie) » pour la première, puis « X (copie 2) », « X (copie 3) ».
+    Le RANG se compte sur duplique_de_projet_id, jamais sur le nom : deux
+    copies de septembre n'ont pas le marqueur, et un nom se renomme."""
+    return f"{nom_source} (copie)" if rang <= 1 else f"{nom_source} (copie {rang})"
+
+
+def copies_recentes_de_collegues(rows, maintenant) -> list:
+    """Met en forme les copies récentes d'AUTRES utilisateurs (lignes SQL :
+    id, created_at, createur_id, createur_nom) pour l'avertissement. L'âge est
+    rendu en secondes : l'écran l'affiche en clair (« il y a 3 h »)."""
+    out = []
+    for r in rows[:COPIE_AVERTIR_MAX]:
+        cree = r["created_at"]
+        out.append({
+            "budget_id": r["id"],
+            "createur_id": r.get("createur_id"),
+            "createur_nom": r.get("createur_nom") or "un collègue",
+            "cree_le": cree.isoformat(),
+            "il_y_a_secondes": max(0, int((maintenant - cree).total_seconds())),
+        })
+    return out
+
+
 def _effective_qte(ligne, mobilisation, surface_plancher, surface_mur, surface_gypse):
     """Qté de la ligne = qté SAISIE (stockée en BD).
 
@@ -4599,6 +4637,58 @@ def register_ad_budget_routes(get_conn):
         # verrouillé se copie (on ne le modifie pas), même raison que la révision.
         _load_and_authorize_projet(get_conn, projet_id, user, "write", check_lock=False)
 
+        _c = get_conn(); _cur = _c.cursor(row_factory=dict_row)
+        try:
+            _cur.execute("SELECT * FROM ad_budget.projets WHERE id=%s", (projet_id,))
+            src = _cur.fetchone()
+        finally:
+            _cur.close(); _c.close()
+        if not src:
+            raise HTTPException(status_code=404, detail="Projet introuvable")
+
+        # CLOISONNEMENT (1er oct 2026). _authorize_projet laisse un super_admin
+        # LIRE n'importe quel projet ; la copie, elle, ÉCRIT dans l'organisation
+        # ACTIVE de l'utilisateur (INSERT organization_id = user org). Un
+        # super_admin pouvait donc copier le projet d'une AUTRE organisation --
+        # données client comprises -- dans la sienne, sans que rien ne le
+        # signale. Même famille que app-api#99 : un décloisonnement implicite
+        # ne se voit nulle part. La copie se fait DANS l'organisation de la
+        # source, sans exception. 404 : on ne révèle pas l'existence du projet.
+        if (src.get("organization_id") is None
+                or src.get("organization_id") != user.get("organization_id")):
+            raise HTTPException(status_code=404, detail="Projet introuvable")
+
+        # VERROU SUR LA SOURCE, tenu jusqu'au COMMIT de la copie (1er oct 2026,
+        # objection de PC1). Deux copies lancées à quelques secondes d'écart
+        # lisaient chacune « aucune copie récente » et le même rang : on aurait
+        # remplacé « deux copies identiques » par « deux copies numérotées 2 ».
+        # SELECT ... FOR UPDATE sérialise : la seconde attend la fin de la
+        # première, puis VOIT sa copie (avertissement, rang + 1). Le verrou
+        # couvre l'appel au hub (~1 s) : c'est le prix d'un rang juste.
+        conn = get_conn(); cur = conn.cursor(row_factory=dict_row)
+
+        def _liberer():
+            try:
+                conn.rollback()
+            finally:
+                cur.close(); conn.close()
+
+        try:
+            cur.execute("SELECT id FROM ad_budget.projets WHERE id = %s FOR UPDATE", (projet_id,))
+        except Exception:
+            _liberer(); raise
+        try:
+            return _dupliquer_sous_verrou(projet_id, data, user, src, conn, cur,
+                                          authorization, session_cookie)
+        except BaseException:
+            # Toute sortie anticipée (409, 400, 401, 502...) rend le verrou.
+            # Le chemin normal a déjà COMMITÉ et fermé dans la fonction.
+            if not conn.closed:
+                _liberer()
+            raise
+
+    def _dupliquer_sous_verrou(projet_id, data, user, src, conn, cur,
+                               authorization, session_cookie):
         # GARDE D'IDEMPOTENCE (11 sept 2026) — un MEME geste repete ne doit pas
         # produire un deuxieme projet. Le front a deja sa garde (dupProjetId),
         # mais elle vit dans un etat React : deux clics dans le meme lot
@@ -4610,22 +4700,18 @@ def register_ad_budget_routes(get_conn):
         # c'est un geste delibere (Simon a duplique 4 fois la meme soumission
         # les 2 et 3 sept, a 17 min, 9 min et 1 jour d'intervalle — chacune
         # voulue). On ne bloque pas un travail reel, on bloque un accident.
-        _c0 = get_conn(); _cur0 = _c0.cursor(row_factory=dict_row)
-        try:
-            _cur0.execute(
-                """
-                SELECT id, created_at FROM ad_budget.projets
-                 WHERE duplique_de_projet_id = %s
-                   AND user_id = %s
-                   AND supprime_le IS NULL
-                   AND created_at > now() - (%s || ' seconds')::interval
-                 ORDER BY created_at DESC LIMIT 1
-                """,
-                (projet_id, user["id"], str(DUPLIQUER_FENETRE_SECONDES)),
-            )
-            _recente = _cur0.fetchone()
-        finally:
-            _cur0.close(); _c0.close()
+        cur.execute(
+            """
+            SELECT id, created_at FROM ad_budget.projets
+             WHERE duplique_de_projet_id = %s
+               AND user_id = %s
+               AND supprime_le IS NULL
+               AND created_at > now() - (%s || ' seconds')::interval
+             ORDER BY created_at DESC LIMIT 1
+            """,
+            (projet_id, user["id"], str(DUPLIQUER_FENETRE_SECONDES)),
+        )
+        _recente = cur.fetchone()
         if _recente:
             raise HTTPException(
                 status_code=409,
@@ -4634,14 +4720,50 @@ def register_ad_budget_routes(get_conn):
                         "elle y est deja."),
             )
 
-        _c = get_conn(); _cur = _c.cursor(row_factory=dict_row)
-        try:
-            _cur.execute("SELECT * FROM ad_budget.projets WHERE id=%s", (projet_id,))
-            src = _cur.fetchone()
-        finally:
-            _cur.close(); _c.close()
-        if not src:
-            raise HTTPException(status_code=404, detail="Projet introuvable")
+        # AVERTISSEMENT ENTRE COLLÈGUES (1er oct 2026). Une copie RÉCENTE de la
+        # même source par un AUTRE membre de l'organisation : on ne crée rien
+        # et on le DIT, avec qui et quand. Jamais bloquant -- l'écran propose
+        # « ouvrir la sienne » ou « créer la mienne quand même », et le second
+        # POST porte {"confirmer": true}. Deux copies voulues restent possibles.
+        # `detail` est un OBJET (motif « copies_recentes ») pour que l'écran le
+        # distingue du 409 anti-double-clic ci-dessus, qui reste une chaîne.
+        _confirmer = bool((data or {}).get("confirmer"))
+        cur.execute(
+            """
+            SELECT p.id, p.created_at, p.user_id AS createur_id,
+                   u.nom AS createur_nom, now() AS maintenant
+              FROM ad_budget.projets p
+              LEFT JOIN ad_budget.users u ON u.id = p.user_id
+             WHERE p.duplique_de_projet_id = %s
+               AND p.organization_id = %s
+               AND p.user_id <> %s
+               AND p.supprime_le IS NULL
+               AND p.created_at > now() - (%s || ' seconds')::interval
+             ORDER BY p.created_at DESC
+            """,
+            (projet_id, src.get("organization_id"), user["id"],
+             str(COPIE_AVERTIR_FENETRE_SECONDES)),
+        )
+        _collegues = cur.fetchall()
+        # Rang de la future copie : les copies VIVANTES de la source, par
+        # provenance (duplique_de_projet_id), jamais par le nom.
+        cur.execute(
+            "SELECT count(*) AS n FROM ad_budget.projets "
+            "WHERE duplique_de_projet_id = %s AND supprime_le IS NULL",
+            (projet_id,),
+        )
+        rang_copie = int((cur.fetchone() or {}).get("n") or 0) + 1
+        if _collegues and not _confirmer:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "motif": "copies_recentes",
+                    "copies_recentes": copies_recentes_de_collegues(
+                        _collegues, _collegues[0]["maintenant"]),
+                    "fenetre_secondes": COPIE_AVERTIR_FENETRE_SECONDES,
+                },
+            )
+
         hub_id = src.get("ad_hub_project_id")
         if hub_id is None:
             # Depuis Phase 6 l'identité vit dans Ad HUB : un budget sans lien hub
@@ -4668,10 +4790,12 @@ def register_ad_budget_routes(get_conn):
                 status_code=404,
                 detail="Le projet Ad HUB source est introuvable — duplication impossible.")
 
-        # 2. Nom de la copie : celui demandé, sinon « <nom source> (copie) ».
+        # 2. Nom de la copie : celui demandé, sinon « <nom source> (copie) »,
+        #    numéroté à partir de la deuxième (« (copie 2) ») -- deux objets au
+        #    même nom dans une liste, c'est un nom qui trompe.
         nom_demande = ((data or {}).get("nom") or "").strip()
         nom_source = (hub_src.get("name") or "").strip() or f"Projet {hub_id}"
-        nouveau_nom = nom_demande or f"{nom_source} (copie)"
+        nouveau_nom = nom_demande or nom_de_copie(nom_source, rang_copie)
 
         payload = {k: hub_src.get(k) for k in _HUB_CHAMPS_COPIES
                    if hub_src.get(k) not in (None, "")}
@@ -4693,8 +4817,8 @@ def register_ad_budget_routes(get_conn):
 
         # 4. Budget neuf lié à CE projet hub + copie des lignes. Même règle que
         #    la révision : AUCUNE identité écrite en local (elle vit au hub), on
-        #    ne copie que les champs PROPRES à Ad BUD.
-        conn = get_conn(); cur = conn.cursor(row_factory=dict_row)
+        #    ne copie que les champs PROPRES à Ad BUD. Même connexion que le
+        #    verrou de la source : le COMMIT ci-dessous le relâche.
         try:
             cur.execute(
                 """
@@ -4753,7 +4877,8 @@ def register_ad_budget_routes(get_conn):
         # 5. Snapshot du nouveau budget vers la fiche hub (fire-and-forget).
         _push_budget_snapshot(get_conn, new_id, authorization, session_cookie)
         return {"status": "duplicated", "projet": new_projet,
-                "nb_lignes_copiees": nb_lignes, "hub_project": hub_new}
+                "nb_lignes_copiees": nb_lignes, "hub_project": hub_new,
+                "rang_copie": rang_copie}
 
     # ─────────────────────────────────────────────────────────────────
     # POST /budget/projets/{id}/reviser-projet
