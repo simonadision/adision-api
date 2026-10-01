@@ -646,7 +646,8 @@ def _build_client_entrepreneur_header(total_w, ident: dict, avec_dates: bool = T
     return header_table
 
 
-def _create_snapshot(cur, projet_row, trigger_event: str, ident: dict) -> int:
+def _create_snapshot(cur, projet_row, trigger_event: str, ident: dict,
+                     statut_fige: Optional[str] = None) -> int:
     """Crée un snapshot du projet dans app_ana.project_snapshots et le marque
     is_latest=TRUE. Marque les anciens snapshots du même projet à FALSE et
     met à jour ad_budget.projets.dernier_snapshot_id.
@@ -659,6 +660,12 @@ def _create_snapshot(cur, projet_row, trigger_event: str, ident: dict) -> int:
     IDENTITÉ du snapshot (nom/client/type/region/date_adj/superficie) viennent de
     `ident` ; `projet_row` reste la source des champs PROPRES (statut, params de
     quantités). La fonction est agnostique de la PROVENANCE de `ident`.
+
+    `statut_fige` (1er oct 2026) : le statut ÉCRIT dans la photo, quand il ne
+    doit PAS être le statut local d'Ad BUD. Une photo prise au CLASSEMENT (hub)
+    porte le statut du hub : la pastille ne change jamais le statut local, et
+    une photo « obtenu » qui porterait « en_soumission » serait comptée non
+    gagnée par Ad ANA. None = statut local (chemin historique update_projet).
     Retourne l'id du snapshot créé.
     """
     projet_id = projet_row["id"]
@@ -738,7 +745,7 @@ def _create_snapshot(cur, projet_row, trigger_event: str, ident: dict) -> int:
             projet_id,
             ident.get("nom"),
             ident.get("nom_client"),
-            projet_row["statut"],
+            statut_fige or projet_row["statut"],
             ident.get("type_batiment"),
             ident.get("region"),
             ident.get("date_adjudication"),
@@ -759,6 +766,100 @@ def _create_snapshot(cur, projet_row, trigger_event: str, ident: dict) -> int:
     )
 
     return snapshot_id
+
+
+# PHOTO AD ANA FIGÉE AU CLASSEMENT (1er oct 2026, Simon : « geste des pastilles »).
+#
+# Depuis le classement unique du 16 sept, le geste réel -- glisser une pastille
+# dans Ad BUD ou Ad HUB, déplacer un projet dans l'arbre, changer son statut au
+# hub -- écrit le classement AU HUB et ne touche jamais le statut local d'Ad BUD.
+# Or la photo ne se prenait QUE sur un changement de ce statut local
+# (update_projet) : Ad ANA s'asséchait. Le hub appelle maintenant
+# /internal/budget-figer-photo/{hub_id} (api.py) au moment du classement, et
+# cette fonction fige.
+#
+# Une photo est un témoignage DATÉ : elle se prend au moment du geste, jamais
+# plus tard à la prochaine ouverture (la date et les montants seraient faux).
+#
+# `ferme` (complété) est RECONNU mais INACTIF : Simon a dit qu'un projet
+# complété ne doit pas sortir du calcul, mais Ad ANA ne sait pas encore s'il
+# compte comme GAGNÉ (« archive » absent de SENS_STATUT_FIGE). Une photo
+# « archive » aujourd'hui ferait baisser le taux. Quand Simon aura tranché :
+# ajouter "ferme" à CLASSEMENTS_QUI_FIGENT, et classer « archive » dans Ad ANA.
+#
+# RETOUR EN SOUMISSION (objection de PC1) : une pastille posée sur « obtenu »
+# par erreur puis remise en soumission laisserait la dernière photo
+# « obtenu » -- le projet compterait GAGNÉ pour toujours. Un projet en
+# soumission n'a pas de sort tranché : sa photo est RETIRÉE du calcul
+# (is_latest = FALSE), jamais effacée. Ad ANA ne lit que is_latest.
+CLASSEMENTS_CONNUS = ("soumission", "obtenu", "perdu", "ferme")
+CLASSEMENTS_QUI_FIGENT = ("obtenu", "perdu")
+CLASSEMENTS_QUI_RETIRENT = ("soumission",)
+
+
+def figer_photos_au_classement(cur, hub_id: int, classement: str,
+                               hub_project: dict, statut_hub: Optional[str]) -> dict:
+    """Fige la photo Ad ANA de chaque budget lié au projet hub `hub_id`.
+
+    IDEMPOTENTE : un budget dont la DERNIÈRE photo porte déjà le motif
+    `classement_vers_{classement}` est ignoré -- deux classements successifs
+    vers « obtenu » ne font qu'une photo. obtenu -> ferme -> obtenu en fait
+    trois : trois faits datés différents.
+
+    Budgets visés : ceux liés à `hub_id`, hors révisions archivées (même
+    périmètre que le miroir du verrou). Un budget vide fige quand même : c'est
+    un fait daté, pas un jugement de valeur.
+
+    NE COMMIT PAS. Lève ValueError sur un classement inconnu."""
+    if classement not in CLASSEMENTS_CONNUS:
+        raise ValueError(f"classement inconnu : {classement!r}")
+    if classement in CLASSEMENTS_QUI_RETIRENT:
+        cur.execute(
+            "UPDATE app_ana.project_snapshots SET is_latest = FALSE "
+            "WHERE is_latest = TRUE AND projet_id IN ("
+            "  SELECT id FROM ad_budget.projets "
+            "  WHERE ad_hub_project_id = %s AND statut <> 'archive') "
+            "RETURNING id",
+            (int(hub_id),),
+        )
+        retirees = len(cur.fetchall())
+        return {"creees": 0, "ignorees": 0, "retirees": retirees}
+    if classement not in CLASSEMENTS_QUI_FIGENT:
+        return {"creees": 0, "ignorees": 0, "inactif": True}
+
+    # Statut ÉCRIT dans la photo : celui du hub (il suit déjà le classement :
+    # en_cours / en_execution / perdu / archive). Repli sur la traduction
+    # UNIQUE classement -> statut qui existe déjà plus haut, jamais une 2e table.
+    statut_fige = (statut_hub if statut_hub in ALLOWED_STATUTS
+                   else _CLASSEMENT_HUB_VERS_CATEGORIE[classement])
+    motif = f"classement_vers_{classement}"
+    ident = hub_service.map_project_to_identity(hub_project or {})
+
+    # FOR UPDATE : deux appels concurrents pour le même projet (double clic,
+    # rattrapage pendant un geste) se sérialisent ; le second voit la photo
+    # du premier et l'ignore.
+    cur.execute(
+        "SELECT * FROM ad_budget.projets "
+        "WHERE ad_hub_project_id = %s AND statut <> 'archive' "
+        "ORDER BY id FOR UPDATE",
+        (int(hub_id),),
+    )
+    budgets = cur.fetchall()
+    creees, ignorees, ids = 0, 0, []
+    for b in budgets:
+        cur.execute(
+            "SELECT trigger_event FROM app_ana.project_snapshots "
+            "WHERE projet_id = %s AND is_latest = TRUE LIMIT 1",
+            (b["id"],),
+        )
+        derniere = cur.fetchone()
+        if derniere and derniere.get("trigger_event") == motif:
+            ignorees += 1
+            continue
+        ids.append(_create_snapshot(cur, b, motif, ident, statut_fige=statut_fige))
+        creees += 1
+    return {"creees": creees, "ignorees": ignorees, "snapshot_ids": ids,
+            "statut_fige": statut_fige}
 
 
 def _effective_qte(ligne, mobilisation, surface_plancher, surface_mur, surface_gypse):

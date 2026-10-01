@@ -920,3 +920,52 @@ def internal_sync_verrou_mirror(
         conn.close()
     return {"status": "ok", "hub_id": int(hub_id), "is_verrouille": is_locked,
             "updated_ids": updated_ids, "rowcount": len(updated_ids)}
+
+
+@app.post("/internal/budget-figer-photo/{hub_id}")
+def internal_figer_photo(
+    hub_id: int,
+    data: dict,
+    x_internal_secret: str = Header(None),
+):
+    """Endpoint service-à-service (1er oct 2026, Simon : « geste des
+    pastilles ») : le hub, APRÈS avoir écrit un classement (pastille, arbre,
+    statut du projet), demande à Ad BUD de figer la photo Ad ANA des budgets
+    liés. Logique et raisons : ad_budget_api.figer_photos_au_classement.
+
+    Auth : X-Internal-Secret, comme /internal/budget-verrou-mirror et pour la
+    même raison -- le geste ne doit pas dépendre du module ad_bud du porteur
+    du jeton. Pas de JWT, donc pas de rappel vers le hub : l'identité vient
+    du projet hub SÉRIALISÉ dans le corps (map_project_to_identity).
+
+    Body : {classement: soumission|obtenu|perdu|ferme, statut: <statut hub>,
+            project: <projet hub sérialisé>}.
+    Réponse : {creees, ignorees[, retirees][, inactif]} -- un chiffre lisible."""
+    expected = os.environ.get("INTERNAL_SERVICE_SECRET")
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail="INTERNAL_SERVICE_SECRET non configuré côté serveur",
+        )
+    if not x_internal_secret or not secrets.compare_digest(x_internal_secret, expected):
+        raise HTTPException(status_code=401, detail="Secret de service invalide")
+
+    from modules.ad_budget_api import figer_photos_au_classement
+    data = data or {}
+    conn = get_conn()
+    cur = conn.cursor(row_factory=dict_row)
+    try:
+        try:
+            res = figer_photos_au_classement(
+                cur, int(hub_id), data.get("classement"),
+                data.get("project") or {}, data.get("statut"))
+        except ValueError as e:
+            conn.rollback()
+            raise HTTPException(status_code=400, detail=str(e))
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+    logging.getLogger("api").info(
+        "[figer-photo] hub_id=%s classement=%s -> %s", hub_id, data.get("classement"), res)
+    return {"status": "ok", "hub_id": int(hub_id), **res}

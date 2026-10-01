@@ -165,6 +165,9 @@ jobs:
       - name: Pastilles Ad BUD = classement unique du hub
         run: python tests/test_pastilles_classement_hub.py
 
+      - name: Photo Ad ANA figee au classement
+        run: python tests/test_figer_photo_au_classement.py
+
       - name: Ligne Ad TYP - code CSI, jamais Uniformat
         run: python tests/test_section_csi_typ.py
 
