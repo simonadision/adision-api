@@ -3583,6 +3583,20 @@ def register_ad_budget_routes(get_conn):
 
             if include_hub and "ad_hub" not in result:
                 result["ad_hub"] = hub_data  # None si 404 (projet HUB supprimé/inaccessible)
+            # NOM ET NUMÉRO DU HUB (1er oct. 2026, Simon : « pourquoi je ne vois
+            # pas le titre de ce projet ? », budget 318 ouvert par son adresse).
+            # Le `nom` local a été retiré en Phase 7B ; seule la LISTE des
+            # projets le reposait depuis le hub. Ce GET — celui d'Ad BUD quand
+            # un budget s'ouvre hors de la liste chargée — le pose aussi
+            # maintenant : depuis le hub s'il a répondu, sinon depuis
+            # l'instantané d'identité.
+            if hub_proj is not None:
+                result["nom"] = hub_proj.get("name")
+                result["numero"] = hub_proj.get("code")
+        if not result.get("nom"):
+            snap = result.get("hub_identity_snapshot")
+            if isinstance(snap, dict) and snap.get("nom"):
+                result["nom"] = snap.get("nom")
         return result
 
     @router.put("/projets/{projet_id}")
