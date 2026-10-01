@@ -21,6 +21,7 @@ from modules import con_service, hub_service, mat_service, typ_service
 from modules.ad_budget_constants import AD_VIU_BLINDSPOT_DIVISIONS
 from modules.aggregates import adapt_budget_lines, compute_aggregates, _js_round
 from modules.aggregates import heures_effectives as _heures_effectives
+from modules.aggregates import quantite_effective
 from modules.lots_calc import compute_lot_totals
 from modules.auth_jwt import SESSION_COOKIE_NAME, _extract_bearer, make_jwt_deps, make_jwt_org_admin
 from modules.taux_horaires_api import (
@@ -1185,7 +1186,7 @@ def compute_budget_totals(projet, raw_lines):
                 mo_h += heures
         prix = float(l.get("prix_unitaire") or 0)
         adj = float(l.get("ajustement_pct") or 0)
-        st_mat = qte * prix * (1 + ajm / 100)
+        st_mat = quantite_effective(qte, l.get("unite")) * prix * (1 + ajm / 100)
         st_mo = heures * taux * (1 + ajmo / 100)
         st_st = st_montant * (1 + ajst / 100)
         st = st_mat + st_mo + st_st
@@ -1864,7 +1865,7 @@ def _map_typ_to_budget_cols(typ: dict, qte, conn=None) -> dict:
         "prix_unitaire": prix_mat,
         "heures": heures,
         "taux_horaire": taux,
-        "sous_traitant_montant": round(prix_st * qte, 4),
+        "sous_traitant_montant": round(prix_st * quantite_effective(qte, typ.get("unite")), 4),
         # Sprint PU_ST référence Ad TYP — propagation à l'insertion. typ.prix_st
         # est déjà PAR UNITÉ d'assemblage (cf. _map_typ_to_budget_cols qui le
         # multiplie par qte pour calculer sous_traitant_montant) → on l'expose
@@ -5112,7 +5113,7 @@ def register_ad_budget_routes(get_conn):
             # Formules de la refonte 3 sections : ajustement appliqué par
             # section, total ligne = somme des 3 sous-totaux. M-O et S-T ne
             # sont PAS multipliés par qte (contrairement aux matériaux).
-            st_mat = qte * prix * (1 + ajm / 100)
+            st_mat = quantite_effective(qte, l.get("unite")) * prix * (1 + ajm / 100)
             st_mo = heures * taux * (1 + ajmo / 100)
             # Règle #2 (2026-08-17) : QTÉ=0 exclut le S/T sous-traitant des
             # totaux Excel — même règle que compute_budget_totals. La colonne
@@ -6223,7 +6224,7 @@ def register_ad_budget_routes(get_conn):
                 _prix = float(_l["prix_unitaire"] or 0)
                 _ajm = float(_l["ajust_materiaux"] or 0)
                 _adj = float(_l["ajustement_pct"] or 0)
-                _st_mat = _qte * _prix * (1 + _ajm / 100)
+                _st_mat = quantite_effective(_qte, _l.get("unite")) * _prix * (1 + _ajm / 100)
                 _st_mo = _heures * _taux * (1 + _ajmo / 100)
                 _st_st = _st_montant * (1 + _ajst / 100)
                 _st = _st_mat + _st_mo + _st_st
@@ -6374,7 +6375,7 @@ def register_ad_budget_routes(get_conn):
                 prix = float(l["prix_unitaire"] or 0)
                 ajm = float(l["ajust_materiaux"] or 0)
                 adj = float(l["ajustement_pct"] or 0)
-                st_mat = qte * prix * (1 + ajm / 100)
+                st_mat = quantite_effective(qte, l.get("unite")) * prix * (1 + ajm / 100)
                 st_mo = heures * taux * (1 + ajmo / 100)
                 # Gaté par qte>0 (règle #2) — st_montant reste brut au-dessus.
                 st_st = (st_montant * (1 + ajst / 100)) if qte > 0 else 0.0
@@ -8022,10 +8023,12 @@ def register_ad_budget_routes(get_conn):
             # ligne["prix_unitaire_st"]). Sinon catalogue.
             _pust_in_body = data.get("prix_unitaire_st") not in (None, "")
             _pust_val = float(data.get("prix_unitaire_st") or 0) if _pust_in_body else 0.0
+            # Unité « % » : la qté est un pourcentage (quantite_effective).
+            _unite_st = data.get("unite") if data.get("unite") not in (None, "") else ligne.get("unite")
             if _pust_in_body and _pust_val > 0:
-                _st_montant_value = qte * _pust_val
+                _st_montant_value = quantite_effective(qte, _unite_st) * _pust_val
             elif ligne.get("prix_unitaire_st_override") and float(ligne.get("prix_unitaire_st") or 0) > 0:
-                _st_montant_value = qte * float(ligne["prix_unitaire_st"])
+                _st_montant_value = quantite_effective(qte, _unite_st) * float(ligne["prix_unitaire_st"])
             else:
                 _st_montant_value = m["sous_traitant_montant"]
             if auto and "prix_unitaire" in data:
