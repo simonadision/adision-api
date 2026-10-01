@@ -64,6 +64,21 @@ def _is_heure_unit(unite) -> bool:
     return str(unite or "").strip().lower() in _HEURE_UNITS
 
 
+def quantite_effective(qte, unite) -> float:
+    """QUANTITÉ EFFECTIVE — SOURCE UNIQUE Python, miroir exact de
+    quantiteEffective (packages/aggregates/src/budgetLigneTotal.js).
+
+    1er oct. 2026, Simon : « l'unité % est censée affecter la quantité en
+    pourcentage » (ligne Contingence, qté 2, unité %, coût unitaire
+    1 010 098 $ : 20 201,96 $ et non 2 020 196 $). Unité « % » : la quantité
+    est un POURCENTAGE -> qte / 100 ; toute autre unité : telle quelle.
+    Appliquée partout où la quantité multiplie un MONTANT (matériaux, coût
+    unitaire S-T) — JAMAIS aux heures (des lignes « Contremaître » en % portent
+    des heures : 320 h ne doivent pas devenir 3,2 h)."""
+    q = float(qte or 0)
+    return q / 100 if str(unite or "").strip() == "%" else q
+
+
 def heures_effectives(unite, heures, heures_manuelles, qte, production_valeur=None) -> float:
     """Heures effectives MO — SOURCE UNIQUE, importée par ad_budget_api.py,
     budget_fingerprint.py (donc lots_calc.py) et adapt_budget_lines ci-dessous.
