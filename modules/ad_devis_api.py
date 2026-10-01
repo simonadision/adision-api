@@ -29,6 +29,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm, mm
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+from modules.contacts_rapport import principal_affiche, contacts_supplementaires, lignes_supplementaires
 from modules import hub_service
 from modules import budget_fingerprint
 from modules.auth_jwt import SESSION_COOKIE_NAME, make_jwt_deps, _extract_bearer
@@ -351,6 +352,10 @@ def register_ad_devis_routes(get_conn):
                 "fonction": _ident.get("fonction_entrepreneur"),
                 "contact_courriel": _ident.get("email_entrepreneur"),
                 "contact_telephone": _ident.get("telephone_entrepreneur"),
+                # PERSONNES CHOISIES DANS LE HUB (1er oct. 2026) — mêmes règles
+                # que le rapport (contacts_rapport.py), servies au moteur jsPDF.
+                "contact_affiche": principal_affiche(_ident),
+                "contacts_supplementaires": contacts_supplementaires(_ident),
                 # Logo de l'org du PROJET, déjà rogné + base64 — MÊME source que le
                 # PDF reportlab (_org_logo_base64). Alimente le moteur client à
                 # l'identique et voyage avec devisData (cache hors ligne). None si
@@ -802,14 +807,17 @@ def register_ad_devis_routes(get_conn):
             # « Contact : » et non « Contact entrepreneur : » — le bloc s'intitule
             # déjà ENTREPRENEUR, et le libellé long tombait pile à la limite de
             # repli de la colonne, où les deux moteurs ne décidaient pas pareil.
-            ("Contact :", _ident.get("contact_entrepreneur") or "—"),
         ]
-        if (_ident.get("fonction_entrepreneur") or "").strip():
-            _entr_lignes.append(("Fonction :", _ident.get("fonction_entrepreneur")))
-        _entr_lignes.append(("Courriel :",
-                             _ident.get("email_entrepreneur") or entreprise.get("courriel") or "—"))
-        _entr_lignes.append(("Téléphone :",
-                             _ident.get("telephone_entrepreneur") or entreprise.get("telephone") or "—"))
+        # PERSONNES CHOISIES DANS LE HUB (1er oct. 2026) — cf. contacts_rapport.py.
+        if principal_affiche(_ident):
+            _entr_lignes.append(("Contact :", _ident.get("contact_entrepreneur") or "—"))
+            if (_ident.get("fonction_entrepreneur") or "").strip():
+                _entr_lignes.append(("Fonction :", _ident.get("fonction_entrepreneur")))
+            _entr_lignes.append(("Courriel :",
+                                 _ident.get("email_entrepreneur") or entreprise.get("courriel") or "—"))
+            _entr_lignes.append(("Téléphone :",
+                                 _ident.get("telephone_entrepreneur") or entreprise.get("telephone") or "—"))
+        _entr_lignes += lignes_supplementaires(contacts_supplementaires(_ident), " :")
         entr = block("ENTREPRENEUR", _entr_lignes)
         client = block("CLIENT", [
             ("", _ident.get("nom_client") or "—"),

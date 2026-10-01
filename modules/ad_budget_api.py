@@ -16,6 +16,7 @@ from psycopg.errors import UniqueViolation
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
+from modules.contacts_rapport import principal_affiche, contacts_supplementaires, lignes_supplementaires
 from modules import con_service, hub_service, mat_service, typ_service
 from modules.ad_budget_constants import AD_VIU_BLINDSPOT_DIVISIONS
 from modules.aggregates import adapt_budget_lines, compute_aggregates, _js_round
@@ -581,14 +582,19 @@ def _build_client_entrepreneur_header(total_w, ident: dict, avec_dates: bool = T
     # c'est cette égalité que le cliquet de fidélité vérifie à chaque push.
     ent_right_lignes = [
         field_line("Entrepreneur", ident.get("entreprise_entrepreneur")),
-        field_line("Contact entrepreneur", ident.get("contact_entrepreneur")),
     ]
-    if (ident.get("fonction_entrepreneur") or "").strip():
-        ent_right_lignes.append(field_line("Fonction", ident.get("fonction_entrepreneur")))
-    ent_right_lignes += [
-        field_line("Courriel", ident.get("email_entrepreneur")),
-        field_line("Téléphone", ident.get("telephone_entrepreneur")),
-    ]
+    # PERSONNES CHOISIES DANS LE HUB (1er oct. 2026) — cf. contacts_rapport.py.
+    # La principale garde ses lignes d'avant ; chaque personne en plus suit.
+    if principal_affiche(ident):
+        ent_right_lignes.append(field_line("Contact entrepreneur", ident.get("contact_entrepreneur")))
+        if (ident.get("fonction_entrepreneur") or "").strip():
+            ent_right_lignes.append(field_line("Fonction", ident.get("fonction_entrepreneur")))
+        ent_right_lignes += [
+            field_line("Courriel", ident.get("email_entrepreneur")),
+            field_line("Téléphone", ident.get("telephone_entrepreneur")),
+        ]
+    ent_right_lignes += [field_line(lib, val)
+                         for lib, val in lignes_supplementaires(contacts_supplementaires(ident))]
     ent_right_html = "<br/>".join(ent_right_lignes)
 
     client_para = Paragraph(client_html, info_style)
