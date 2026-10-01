@@ -345,7 +345,10 @@ def _ensure_schema():
         # que personne ne relit sans se tromper.
         cur.execute(
             "ALTER TABLE ad_budget.budget_lignes "
-            "ADD COLUMN IF NOT EXISTS qte_auto BOOLEAN NOT NULL DEFAULT TRUE"
+            # DEFAULT FALSE depuis le 1er oct. 2026 (calcul strictement sur
+            # demande) -- voir migrations/sprint_qte_auto_defaut_faux.sql,
+            # qui bascule aussi le défaut et les lignes d'une base existante.
+            "ADD COLUMN IF NOT EXISTS qte_auto BOOLEAN NOT NULL DEFAULT FALSE"
         )
         conn.commit()
         cur.close()
