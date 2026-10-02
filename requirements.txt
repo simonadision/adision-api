@@ -1,4 +1,24 @@
-fastapi
+# EPINGLE le 1er oct 2026 (PC3). MESURE, pas precaution : le meme fichier
+# non epingle a resolu TROIS versions differentes le meme soir -- PC2 en
+# 0.142.2, PC3 en 0.141.1, la production en 0.142.2 (derniere publiee le
+# 30 sept). Un banc a rougi pendant une soiree sans qu'aucun fichier du
+# depot ne bouge : app.include_router n'aplatit plus les routes dans
+# app.routes (il n'y reste que /docs, /openapi.json, /redoc et un
+# _IncludedRouter). Le SERVICE n'etait pas touche -- mesure sur la
+# production apres le deploiement de c9974a4 : 110 chemins servis, dont 90
+# sous /budget. Seule l'enumeration avait change.
+#
+# UNE BORNE, PAS UN GEL : >= laisse entrer les correctifs de 0.142.x, < bloque
+# la prochaine mineure, qui est ce qui change les comportements. La borne
+# basse est la version que la PRODUCTION FAIT DEJA TOURNER, donc ce fichier
+# ne change rien au prochain deploiement -- c'est voulu.
+#
+# CE QUI N'EST PAS EPINGLE ICI, ET POURQUOI. Les 12 autres paquets restent
+# libres : je n'ai pas pu mesurer la version que la production a resolue pour
+# chacun, et epingler ce qu'on n'a pas mesure est exactement la faute qu'on
+# vient de corriger. La vraie protection n'est pas l'epinglage, c'est le banc
+# qui mord : celui-la passait VERT PAR VACUITE.
+fastapi>=0.142.2,<0.143
 uvicorn[standard]; sys_platform != 'win32' or platform_machine != 'ARM64'
 uvicorn; sys_platform == 'win32' and platform_machine == 'ARM64'
 psycopg[binary]; sys_platform != 'win32' or platform_machine != 'ARM64'
