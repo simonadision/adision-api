@@ -167,7 +167,8 @@ jobs:
             tests/test_regroupements_lignes.py \
             tests/test_reorder_budget_lignes.py \
             tests/test_scope_deux_onglets.py \
-            tests/test_seed_master_sans_prix.py
+            tests/test_seed_master_sans_prix.py \
+            tests/test_taux_horaires_api.py
 
       # Filet de tools/verifier_source_unique.py (etape « Source unique - pas
       # de copie locale de la regle des heures ») : injecte une copie dans un vrai fichier
