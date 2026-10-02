@@ -74,3 +74,32 @@ def test_le_rapport_serveur_imprime_les_personnes_choisies():
                                                   "contacts_rapports": [SIMON]}))
     assert "Simon Hachey" in seul
     assert "Contact entrepreneur" not in seul
+
+
+# ── Choix au moment du rapport (2 oct. 2026) ────────────────────────────────
+from modules.contacts_rapport import contacts_depuis_param  # noqa: E402
+
+
+def test_param_absent_ou_illisible_retombe_sur_le_hub():
+    for t in (None, "", "pas du json", '{"role": "principal"}', "42"):
+        assert contacts_depuis_param(t) is None
+
+
+def test_liste_vide_est_un_choix_personne_dans_le_bloc():
+    assert contacts_depuis_param("[]") == []
+
+
+def test_choix_normalise_dans_l_ordre():
+    t = ('[{"role": "construction", "nom": "  Olivier B. ", "email": "o@x.ca"},'
+         ' {"role": "principal"}, 7, {"role": "preconstruction", "nom": "' + "x" * 300 + '"}]')
+    choix = contacts_depuis_param(t)
+    assert [c["role"] for c in choix] == ["construction", "principal", "preconstruction"]
+    assert choix[0]["nom"] == "Olivier B." and choix[0]["telephone"] is None
+    assert len(choix[2]["nom"]) == 200
+
+
+def test_le_choix_pilote_l_impression():
+    from modules.contacts_rapport import principal_affiche, contacts_supplementaires
+    ident = {"contacts_entrepreneur": contacts_depuis_param('[{"role": "construction", "nom": "Olivier"}]')}
+    assert principal_affiche(ident) is False
+    assert [c["nom"] for c in contacts_supplementaires(ident)] == ["Olivier"]
