@@ -15,6 +15,7 @@ Format de ligne d'entrée attendu (mat/mo/st nested) :
 
 Si tu pars de rows BD bruts (shape flat), passe d'abord par adapt_budget_lines().
 """
+import re
 import math
 from datetime import datetime, timezone
 from typing import Optional
@@ -64,6 +65,15 @@ def _is_heure_unit(unite) -> bool:
     return str(unite or "").strip().lower() in _HEURE_UNITS
 
 
+_POUCE_PLIN = re.compile(r"^pouces?\s*[x×*]\s*plin$", re.IGNORECASE)
+
+
+def est_pouce_plin(unite) -> bool:
+    """Unité « pouce × pied linéaire » (pouceXplin, pouce*plin…). Miroir exact
+    de estPoucePlin (packages/aggregates/src/budgetLigneTotal.js)."""
+    return bool(_POUCE_PLIN.match(str(unite or "").strip()))
+
+
 def quantite_effective(qte, unite, facteur=None) -> float:
     """QUANTITÉ EFFECTIVE — SOURCE UNIQUE Python, miroir exact de
     quantiteEffective (packages/aggregates/src/budgetLigneTotal.js).
@@ -87,7 +97,18 @@ def quantite_effective(qte, unite, facteur=None) -> float:
         f = float(facteur) if facteur not in (None, "") else 0.0
     except (TypeError, ValueError):
         f = 0.0
-    return q * f if f > 0 else q
+    if f <= 0:
+        return q
+    # POUCE × PLIN (2 oct. 2026, Simon : « qté = pouces et fonction = des
+    # plin… 6 pouces, fonction 10 plin », résultat confirmé : 5 pi²). La
+    # quantité est en POUCES, convertie en pieds (÷ 12), puis multipliée par
+    # les pieds linéaires du facteur : 6 ÷ 12 × 10 = 5 pi². Orthographes
+    # mesurées au catalogue Ad MAT : « pouceXplin » (et « pouce*plin » vu à
+    # l'écran) -- reconnues sans casse ni espaces, séparateur X, ×, * ou x.
+    # Sans facteur : la quantité telle quelle, comme toute autre unité.
+    if est_pouce_plin(unite):
+        return q / 12 * f
+    return q * f
 
 
 def heures_effectives(unite, heures, heures_manuelles, qte, production_valeur=None) -> float:
