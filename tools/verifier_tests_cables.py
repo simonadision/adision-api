@@ -50,7 +50,7 @@ EXCLUSIONS = {
     # ── BANCS PERIMES (mesure PC3, 1er oct 2026). Ce ne sont PAS des defauts
     #    de production ; ils sont ROUGES et ne doivent pas etre affaiblis pour
     #    passer. Chacun est une tache nommee a reprendre, puis a retirer d'ici.
-    "tests/test_taux_horaires_api.py": "PERIME -- 32 echecs 403 « super_admin plateforme requis » : la route a gagne une garde que le banc ne fournit pas",
+    "tests/test_taux_horaires_api.py": "PERIME, reste (c) -- causes mesurees le 1er oct : (a) jetons sans platform_role (27 echecs, corrige) ; (b) 2 tests affirmaient None/0 contre la regle #35 « jamais 0 » (corriges) ; (c) test_26 (x2), test_27, test_28 : file de FakeCursor figee, desalignee de _load_and_authorize_projet (404, KeyError user_id) -- a sortir en tests de la fonction de resolution, pas a refaire en sequence SQL",
 
 }
 
