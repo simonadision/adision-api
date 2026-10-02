@@ -52,7 +52,6 @@ EXCLUSIONS = {
     #    passer. Chacun est une tache nommee a reprendre, puis a retirer d'ici.
     "tests/test_taux_horaires_api.py": "PERIME -- 32 echecs 403 « super_admin plateforme requis » : la route a gagne une garde que le banc ne fournit pas",
     "tests/test_auth_jwt.py": "PERIME -- 2 echecs AttributeError 'Cookie'.strip : changement d'API de bibliotheque",
-    "tests/test_item_routes_supprimees.py": "PERIME -- 2 echecs : son montage ne monte pas le routeur (seules /docs, /openapi.json, /redoc) ; soupconner la fixture d'abord",
 
 }
 
