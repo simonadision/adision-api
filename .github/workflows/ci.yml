@@ -177,6 +177,9 @@ jobs:
       - name: Porte /internal/hub-cache/etat - Ad BUD declare son etat au hub
         run: python tests/test_hub_cache_etat.py
 
+      - name: Le statut d Ad BUD remonte au hub (chemin montant, refus franc)
+        run: python tests/test_statut_remonte_au_hub.py
+
       - name: Ligne Ad TYP - code CSI, jamais Uniformat
         run: python tests/test_section_csi_typ.py
 

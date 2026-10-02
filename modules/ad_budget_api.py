@@ -3695,7 +3695,40 @@ def register_ad_budget_routes(get_conn):
         # écrit d'abord au hub (source unique). Fail-closed : si le hub refuse
         # ou ne répond pas, rien n'est écrit ici non plus, pour que la pastille
         # ne montre jamais un classement que les autres modules ignorent.
-        _classement_hub = _CATEGORIE_VERS_CLASSEMENT_HUB.get(data.get("categorie_affichage") or "")
+        #
+        # ── LE STATUT EMPRUNTE LE MÊME CHEMIN (1er oct. 2026) ─────────────
+        # Simon : « Hub est la vérité » (20:08), « Modif dans Bud remonte au
+        # hub . Modif dans hub remonte dans Bud.... Système bi directionnel
+        # qui défini la structure ad Flo » (20:30).
+        #
+        # CE QUI MANQUAIT, ET CE QUE ÇA A COÛTÉ. Ce garde existait depuis le
+        # 16 septembre, mais il ne regardait QUE `categorie_affichage` — la
+        # pastille. Un PATCH qui écrivait `statut` directement passait à côté :
+        # Ad BUD l'enregistrait chez lui, et le hub n'en savait rien.
+        #
+        # Mesure du 1er oct. : **17 projets sur 23 portaient un statut
+        # différent entre le hub et Ad BUD** — dont « Rénovation intérieure
+        # d'unités de logements », 3 M$, que le hub savait GAGNÉ et qu'Ad BUD
+        # croyait encore en soumission pendant que le chargé de projet y
+        # travaillait. Et comme la photo Ad ANA se déclenche sur le statut
+        # LOCAL, aucune photo n'a été figée : on a cru pendant des jours
+        # qu'aucun projet n'avait été gagné, alors qu'Ad BUD ne le savait pas.
+        #
+        # LE CHEMIN ÉTAIT DÉJÀ LÀ. On ne l'élargit pas : on cesse de le
+        # réserver à un seul champ. Même appel, même table de correspondance,
+        # même refus franc.
+        #
+        # SEULEMENT SI LE STATUT CHANGE VRAIMENT : un PATCH qui réécrit le
+        # statut courant (c'est fréquent, le front renvoie le projet entier)
+        # appellerait le hub pour rien, et ferait dépendre de sa disponibilité
+        # une modification qui ne le concerne pas.
+        _statut_demande = data.get("statut")
+        _statut_change = (_statut_demande is not None
+                          and _statut_demande != existing.get("statut"))
+        _source_classement = (data.get("categorie_affichage")
+                              or (_statut_demande if _statut_change else None)
+                              or "")
+        _classement_hub = _CATEGORIE_VERS_CLASSEMENT_HUB.get(_source_classement)
         if _classement_hub and existing.get("ad_hub_project_id") is not None:
             _jwt = _extract_bearer(authorization, None, session_cookie)
             try:
