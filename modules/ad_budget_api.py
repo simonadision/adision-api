@@ -1044,6 +1044,8 @@ _COLONNES_COPIE_LIGNE = (
     # Une ligne copiee doit garder son etat MANUEL : sans ca, la copie se
     # remet a calculer et ecrase la quantite qu'on vient de copier.
     "qte_auto",
+    # La fonction de la case quantite (2 oct. 2026) voyage avec sa ligne.
+    "qte_formule",
 )
 
 
@@ -2258,7 +2260,7 @@ def _dupliquer_lots_et_lignes(cur, projet_id_source, new_id):
            item_id_ad_mat, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
            source_typ_code, source_typ_snapshot_at,
            source_viu_analysis_id, source_viu_item_id,
-           production_valeur, production_unite, production_auto, qte_auto)
+           production_valeur, production_unite, production_auto, qte_auto, qte_formule)
         SELECT %s, {lot_id_expr}, source_item_id, section, description, unite, prix_unitaire,
                qte, ajustement_pct, note, actif, prix_unitaire_override,
                heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
@@ -2271,7 +2273,7 @@ def _dupliquer_lots_et_lignes(cur, projet_id_source, new_id):
                item_id_ad_mat, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
                source_typ_code, source_typ_snapshot_at,
                source_viu_analysis_id, source_viu_item_id,
-               production_valeur, production_unite, production_auto, qte_auto
+               production_valeur, production_unite, production_auto, qte_auto, qte_formule
         FROM ad_budget.budget_lignes WHERE projet_id = %s
         """,
         (new_id, *case_params, projet_id_source))
@@ -8489,6 +8491,11 @@ def register_ad_budget_routes(get_conn):
             # TRUE = la quantite suit le calcul automatique ; FALSE = Simon
             # l'a posee a la main et elle ne doit plus bouger (2026-09-30).
             "qte_auto",
+            # Fonction de la case quantite (2026-10-02) : le TEXTE seulement
+            # (« 45 plinthes x 6 mois »). Le front l'evalue et envoie qte ;
+            # le serveur ne calcule rien avec. HORS TOTAUX ET HORS EMPREINTE.
+            # Chaine vide -> NULL (fonction retiree).
+            "qte_formule",
             # Format d'achat de l'item (demande PC4, 2026-09-29) : la boite
             # de 12, le paquet de 50. L'ecran d'Ad BUD en deduit une colonne
             # « Qte items » = plafond(qte / format_item), CALCULEE COTE CLIENT.
@@ -8534,6 +8541,8 @@ def register_ad_budget_routes(get_conn):
                 # cast "" → uuid qui planterait). Délier = renvoyer null.
                 if field in ("sous_traitant_contact_id", "lot_id"):
                     val = val or None
+                elif field == "qte_formule":
+                    val = (str(val).strip()[:500] or None) if val is not None else None
                 elif field in (
                     "prix_unitaire_override", "heures_manuelles",
                     "qte_override", "taux_horaire_override",
@@ -9205,7 +9214,7 @@ def register_ad_budget_routes(get_conn):
                    qte_override, taux_horaire_override, ajust_materiaux_override, ajust_main_oeuvre_override,
                    ajust_sous_traitant_override, sous_traitant_montant_override,
                    prix_unitaire_st, prix_unitaire_st_override,
-                   production_valeur, production_unite, production_auto, qte_auto)
+                   production_valeur, production_unite, production_auto, qte_auto, qte_formule)
                 SELECT %s, %s, source_item_id, section, description, unite, prix_unitaire, {sel_qte},
                    ajustement_pct, note, actif, source_file, type_source,
                    {sel_heures}, taux_horaire, cout_sous_traitant, sous_traitant_nom,
@@ -9216,7 +9225,7 @@ def register_ad_budget_routes(get_conn):
                    {sel_qte_override}, taux_horaire_override, ajust_materiaux_override, ajust_main_oeuvre_override,
                    ajust_sous_traitant_override, {sel_st_montant_override},
                    prix_unitaire_st, prix_unitaire_st_override,
-                   production_valeur, production_unite, production_auto, qte_auto
+                   production_valeur, production_unite, production_auto, qte_auto, qte_formule
                 FROM ad_budget.budget_lignes
                 WHERE projet_id = %s AND lot_id = %s
                 """,

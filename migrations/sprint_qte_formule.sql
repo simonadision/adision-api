@@ -1,0 +1,12 @@
+-- FONCTION DANS UNE CASE (2 oct. 2026, Simon) : « dans certains cas des items
+-- se calculent en fonction… Exemple clôture = nombre de plinthes loué × le
+-- nombre de mois… il faudrait ajouter une option en cliquant droit sur la case
+-- qui affiche une fonction ».
+--
+-- qte_formule garde le TEXTE de la fonction telle que Simon l'a écrite
+-- (« 45 plinthes × 6 mois »). La quantité, elle, reste dans qte : c'est
+-- l'écran qui évalue la formule et envoie le résultat, exactement comme pour
+-- la production et le calcul au mille. Le serveur ne calcule RIEN avec ce
+-- champ : il n'entre ni dans les totaux ni dans l'empreinte du budget.
+-- NULL = pas de fonction (toutes les lignes existantes).
+ALTER TABLE ad_budget.budget_lignes ADD COLUMN IF NOT EXISTS qte_formule TEXT NULL;
