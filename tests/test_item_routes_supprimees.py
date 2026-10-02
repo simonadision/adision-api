@@ -22,9 +22,12 @@ ROUTES_MINIMUM = 40
 def _routes():
     """Paires (méthode, chemin) lues SUR LE ROUTEUR, jamais sur app.routes.
 
-    2 oct 2026 (PC2, après le signalement de PC3) : avec fastapi 0.142,
-    app.include_router n'aplatit plus les routes dans app.routes (il n'y reste
-    que /docs, /openapi.json, /redoc et un _IncludedRouter). Ce banc voyait un
+    2 oct 2026 (PC2, après le signalement de PC3) : app.include_router
+    n'aplatit plus les routes dans app.routes (il n'y reste que /docs,
+    /openapi.json, /redoc et un _IncludedRouter). MESURÉ en fastapi 0.141.1
+    (PC3, starlette 1.6.0) comme en 0.142.2 (PC2) ; la version qui a
+    introduit ce changement n'est PAS mesurée -- épingler < 0.142 ne
+    rendrait pas l'aplatissement. Ce banc voyait un
     ensemble VIDE : ses deux tests de présence rougissaient, et -- pire -- son
     test d'ABSENCE restait VERT PAR VACUITÉ, il aurait laissé revenir POST
     /budget/item sans broncher. Les chemins du routeur portent déjà /budget.
