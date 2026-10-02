@@ -925,6 +925,69 @@ def internal_sync_verrou_mirror(
             "updated_ids": updated_ids, "rowcount": len(updated_ids)}
 
 
+@app.get("/internal/hub-cache/etat")
+def internal_hub_cache_etat(x_internal_secret: str = Header(None)):
+    """Ad BUD DÉCLARE ce qu'il croit savoir des projets du hub.
+
+    Simon, 1er oct. 2026 : « le hub est la source » (20:01), « Hub est la
+    vérité » (20:08), et « Système bi directionnel qui défini la structure
+    ad Flo » (20:30).
+
+    CE QUE CETTE ROUTE SERT À VOIR. Le soir du 1er octobre, **17 projets sur
+    23 portaient un statut différent entre le hub et Ad BUD** — dont un
+    chantier de 3 M$ que le hub savait gagné et qu'Ad BUD croyait encore en
+    soumission. L'écart a duré des semaines SANS QUE RIEN NE LE SIGNALE.
+    Cette route est la moitié « Ad BUD » de ce qui le signalera : le hub
+    l'interroge, compare à sa vérité, et compte les écarts.
+
+    POURQUOI UNE ROUTE ET NON UNE LECTURE DE BASE (conception de PC1,
+    1er oct.) : la base d'Ad CON n'est lisible par AUCUN de nos outils. Une
+    réconciliation qui lirait les bases ne marcherait donc pas pour lui. En
+    demandant à chaque module de DÉCLARER son état, le même code sert pour
+    tous — y compris pour un module qu'on n'a pas encore écrit.
+
+    ELLE NE SAIT QUE LIRE. Aucune écriture, aucun effet de bord. La
+    correction d'un écart est un geste séparé, et il passe par le hub.
+
+    Auth : X-Internal-Secret, même porte que /internal/budget-figer-photo.
+    **Secret absent = 503, jamais passage ouvert** — règle de Simon du
+    1er oct. 08:59 : la porte interne est pour la famille, et une porte sans
+    serrure n'est pas une porte. Elle expose l'état de TOUS les projets
+    d'Ad BUD : c'est exactement ce qu'il ne faut pas laisser ouvert.
+
+    Réponse : {module, projets: [{hub_id, projet_id, statut}], total}.
+    Les budgets SUPPRIMÉS et ceux SANS lien hub sont exclus : le hub ne peut
+    rien dire des premiers, et les seconds n'ont pas de vérité à comparer.
+    """
+    expected = os.environ.get("INTERNAL_SERVICE_SECRET")
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail="INTERNAL_SERVICE_SECRET non configuré côté serveur",
+        )
+    if not x_internal_secret or not secrets.compare_digest(x_internal_secret, expected):
+        raise HTTPException(status_code=401, detail="Secret de service invalide")
+
+    conn = get_conn()
+    cur = conn.cursor(row_factory=dict_row)
+    try:
+        cur.execute(
+            "SELECT ad_hub_project_id AS hub_id, id AS projet_id, statut "
+            "FROM ad_budget.projets "
+            "WHERE ad_hub_project_id IS NOT NULL AND supprime_le IS NULL "
+            "ORDER BY ad_hub_project_id"
+        )
+        lignes = [
+            {"hub_id": int(r["hub_id"]), "projet_id": int(r["projet_id"]),
+             "statut": r["statut"]}
+            for r in cur.fetchall()
+        ]
+    finally:
+        cur.close()
+        conn.close()
+    return {"module": "ad_bud", "projets": lignes, "total": len(lignes)}
+
+
 @app.post("/internal/budget-figer-photo/{hub_id}")
 def internal_figer_photo(
     hub_id: int,
