@@ -16,7 +16,7 @@ from psycopg.errors import UniqueViolation
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
-from modules.contacts_rapport import principal_affiche, contacts_supplementaires, lignes_supplementaires
+from modules.contacts_rapport import principal_affiche, contacts_supplementaires, lignes_supplementaires, contacts_depuis_param
 from modules import con_service, hub_service, mat_service, typ_service
 from modules.ad_budget_constants import AD_VIU_BLINDSPOT_DIVISIONS
 from modules.aggregates import adapt_budget_lines, compute_aggregates, _js_round
@@ -5851,6 +5851,7 @@ def register_ad_budget_routes(get_conn):
         csi_div_labels: str = "",
         csi_sec_labels: str = "",
         nature: str = Query("budget", description="budget | soumission — titre imprimé seulement"),
+        contacts_rapport: Optional[str] = Query(None, description="JSON : personnes du bloc ENTREPRENEUR choisies pour CE rapport ; absent = choix du hub"),
     ):
         # PHASE 3A — auth (lecture). Délègue au builder partagé qui produit le
         # PDF ET le snapshot JSON dans la MÊME passe ; la route ne renvoie que
@@ -5873,6 +5874,7 @@ def register_ad_budget_routes(get_conn):
             csi_div_labels=csi_div_labels,
             csi_sec_labels=csi_sec_labels,
             nature=nature,
+            contacts_rapport=contacts_rapport,
         )
         safe_nom = "".join(c if c.isalnum() or c in "-_ " else "_" for c in (_snapshot["project"]["nom"] or "projet")).strip() or "projet"
         return StreamingResponse(
@@ -5939,6 +5941,9 @@ def register_ad_budget_routes(get_conn):
         # « soumission ». Ne touche QUE le titre imprimé — aucun calcul,
         # aucun filtre, aucun snapshot n'en dépend.
         nature="budget",
+        # Personnes du bloc ENTREPRENEUR choisies au moment du rapport (JSON,
+        # 2 oct. 2026) ; None = la liste cochée dans le hub.
+        contacts_rapport=None,
     ):
         """Construit le PDF rapport ET le snapshot JSON dans la MÊME passe.
         Retourne (buf: BytesIO, snapshot: dict). Le rendu PDF est INCHANGÉ
@@ -6010,6 +6015,13 @@ def register_ad_budget_routes(get_conn):
                 _cc.commit(); _ccur.close(); _cc.close()
             except Exception:
                 pass  # best-effort
+        # CHOIX DES PERSONNES POUR CE RAPPORT (2 oct. 2026) — APRÈS la
+        # persistance ci-dessus : il vaut pour CE rendu, jamais pour
+        # l'instantané d'identité ni pour la fiche hub.
+        _choix = contacts_depuis_param(contacts_rapport)
+        if _choix is not None:
+            _ident = dict(_ident)
+            _ident["contacts_entrepreneur"] = _choix
 
         sections_groups = OrderedDict()
         for l in lignes:
@@ -7131,6 +7143,7 @@ def register_ad_budget_routes(get_conn):
         # le garde-fou ci-dessous refuse la publication (le titre relu ne
         # correspondrait pas au marqueur attendu).
         nature: str = "budget",
+        contacts_rapport: Optional[str] = None,  # JSON : personnes du bloc ENTREPRENEUR pour CE rapport (2 oct. 2026)
     ):
         """Émet le rapport (calcul quantitatif OU ventilation par lot, cf.
         mode_export) vers l'Espace Rapports HUB.
@@ -7300,6 +7313,7 @@ def register_ad_budget_routes(get_conn):
                 csi_div_labels=csi_div_labels,
                 csi_sec_labels=csi_sec_labels,
                 nature=nature,
+                contacts_rapport=contacts_rapport,
             )
             pdf_bytes = buf.getvalue()
             # Montant TEL QU'AFFICHÉ dans le PDF filtré (TOTAL GÉNÉRAL de la vue

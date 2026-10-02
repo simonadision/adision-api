@@ -65,3 +65,37 @@ def lignes_supplementaires(contacts, suffixe: str = "") -> list:
             if v:
                 out.append((lib + suffixe, v))
     return out
+
+
+# CHOIX AU MOMENT DU RAPPORT (2 oct. 2026, Simon : « je veux pouvoir choisir
+# qui on met dans le rapport. Préconstruction, construction… », puis, entre
+# « par phase », « au moment du rapport » et « les deux » : « au moment du
+# rapport »). L'aperçu envoie la liste des personnes cochées POUR CE RAPPORT ;
+# elle remplace, pour ce rendu seulement, la liste cochée dans le hub. Rien
+# n'est écrit : ni la fiche hub, ni l'instantané d'identité du budget.
+
+_CHAMPS = ("role", "nom", "fonction", "email", "telephone")
+_MAX_PERSONNES = 30
+_MAX_CAR = 200
+
+
+def contacts_depuis_param(texte):
+    """Liste normalisée des personnes choisies, ou None si le paramètre est
+    absent ou illisible (on retombe alors sur le choix du hub). Une liste
+    VIDE est un choix valide : personne dans le bloc."""
+    if texte in (None, ""):
+        return None
+    import json
+    try:
+        brut = json.loads(texte)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(brut, list):
+        return None
+    out = []
+    for c in brut[:_MAX_PERSONNES]:
+        if not isinstance(c, dict):
+            continue
+        out.append({k: (str(c.get(k)).strip()[:_MAX_CAR] if c.get(k) not in (None, "") else None)
+                    for k in _CHAMPS})
+    return out
