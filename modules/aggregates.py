@@ -64,7 +64,7 @@ def _is_heure_unit(unite) -> bool:
     return str(unite or "").strip().lower() in _HEURE_UNITS
 
 
-def quantite_effective(qte, unite) -> float:
+def quantite_effective(qte, unite, facteur=None) -> float:
     """QUANTITÉ EFFECTIVE — SOURCE UNIQUE Python, miroir exact de
     quantiteEffective (packages/aggregates/src/budgetLigneTotal.js).
 
@@ -76,7 +76,18 @@ def quantite_effective(qte, unite) -> float:
     unitaire S-T) — JAMAIS aux heures (des lignes « Contremaître » en % portent
     des heures : 320 h ne doivent pas devenir 3,2 h)."""
     q = float(qte or 0)
-    return q / 100 if str(unite or "").strip() == "%" else q
+    q = q / 100 if str(unite or "").strip() == "%" else q
+    # FACTEUR D'UNITÉ (2 oct. 2026, Simon : « clôture de chantier = 1139,
+    # unité plin/mois… la fonction veut connaître le nombre de mois et calcule
+    # par rapport à la quantité »). La quantité reste 1139 ; le facteur (6 mois)
+    # multiplie ce que la quantité paie : 1139 × 6 × 5 $. NULL, 0 ou négatif =
+    # pas de facteur (1). Comme le %, JAMAIS appliqué aux heures. Miroir exact
+    # de quantiteEffective (packages/aggregates/src/budgetLigneTotal.js).
+    try:
+        f = float(facteur) if facteur not in (None, "") else 0.0
+    except (TypeError, ValueError):
+        f = 0.0
+    return q * f if f > 0 else q
 
 
 def heures_effectives(unite, heures, heures_manuelles, qte, production_valeur=None) -> float:

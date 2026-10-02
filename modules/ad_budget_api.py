@@ -1046,6 +1046,8 @@ _COLONNES_COPIE_LIGNE = (
     "qte_auto",
     # La fonction de la case quantite (2 oct. 2026) voyage avec sa ligne.
     "qte_formule",
+    # Le facteur d'unite (2 oct. 2026) aussi : sans lui, la copie change de montant.
+    "qte_facteur",
 )
 
 
@@ -1228,7 +1230,7 @@ def compute_budget_totals(projet, raw_lines):
                 mo_h += heures
         prix = float(l.get("prix_unitaire") or 0)
         adj = float(l.get("ajustement_pct") or 0)
-        st_mat = quantite_effective(qte, l.get("unite")) * prix * (1 + ajm / 100)
+        st_mat = quantite_effective(qte, l.get("unite"), l.get("qte_facteur")) * prix * (1 + ajm / 100)
         st_mo = heures * taux * (1 + ajmo / 100)
         st_st = st_montant * (1 + ajst / 100)
         st = st_mat + st_mo + st_st
@@ -2297,7 +2299,7 @@ def _dupliquer_lots_et_lignes(cur, projet_id_source, new_id):
            item_id_ad_mat, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
            source_typ_code, source_typ_snapshot_at,
            source_viu_analysis_id, source_viu_item_id,
-           production_valeur, production_unite, production_auto, qte_auto, qte_formule)
+           production_valeur, production_unite, production_auto, qte_auto, qte_formule, qte_facteur)
         SELECT %s, {lot_id_expr}, source_item_id, section, description, unite, prix_unitaire,
                qte, ajustement_pct, note, actif, prix_unitaire_override,
                heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
@@ -2310,7 +2312,7 @@ def _dupliquer_lots_et_lignes(cur, projet_id_source, new_id):
                item_id_ad_mat, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
                source_typ_code, source_typ_snapshot_at,
                source_viu_analysis_id, source_viu_item_id,
-               production_valeur, production_unite, production_auto, qte_auto, qte_formule
+               production_valeur, production_unite, production_auto, qte_auto, qte_formule, qte_facteur
         FROM ad_budget.budget_lignes WHERE projet_id = %s
         """,
         (new_id, *case_params, projet_id_source))
@@ -5352,7 +5354,7 @@ def register_ad_budget_routes(get_conn):
             # Formules de la refonte 3 sections : ajustement appliqué par
             # section, total ligne = somme des 3 sous-totaux. M-O et S-T ne
             # sont PAS multipliés par qte (contrairement aux matériaux).
-            st_mat = quantite_effective(qte, l.get("unite")) * prix * (1 + ajm / 100)
+            st_mat = quantite_effective(qte, l.get("unite"), l.get("qte_facteur")) * prix * (1 + ajm / 100)
             st_mo = heures * taux * (1 + ajmo / 100)
             # Règle #2 (2026-08-17) : QTÉ=0 exclut le S/T sous-traitant des
             # totaux Excel — même règle que compute_budget_totals. La colonne
@@ -6463,7 +6465,7 @@ def register_ad_budget_routes(get_conn):
                 _prix = float(_l["prix_unitaire"] or 0)
                 _ajm = float(_l["ajust_materiaux"] or 0)
                 _adj = float(_l["ajustement_pct"] or 0)
-                _st_mat = quantite_effective(_qte, _l.get("unite")) * _prix * (1 + _ajm / 100)
+                _st_mat = quantite_effective(_qte, _l.get("unite"), _l.get("qte_facteur")) * _prix * (1 + _ajm / 100)
                 _st_mo = _heures * _taux * (1 + _ajmo / 100)
                 _st_st = _st_montant * (1 + _ajst / 100)
                 _st = _st_mat + _st_mo + _st_st
@@ -6614,7 +6616,7 @@ def register_ad_budget_routes(get_conn):
                 prix = float(l["prix_unitaire"] or 0)
                 ajm = float(l["ajust_materiaux"] or 0)
                 adj = float(l["ajustement_pct"] or 0)
-                st_mat = quantite_effective(qte, l.get("unite")) * prix * (1 + ajm / 100)
+                st_mat = quantite_effective(qte, l.get("unite"), l.get("qte_facteur")) * prix * (1 + ajm / 100)
                 st_mo = heures * taux * (1 + ajmo / 100)
                 # Gaté par qte>0 (règle #2) — st_montant reste brut au-dessus.
                 st_st = (st_montant * (1 + ajst / 100)) if qte > 0 else 0.0
@@ -8264,10 +8266,12 @@ def register_ad_budget_routes(get_conn):
             _pust_val = float(data.get("prix_unitaire_st") or 0) if _pust_in_body else 0.0
             # Unité « % » : la qté est un pourcentage (quantite_effective).
             _unite_st = data.get("unite") if data.get("unite") not in (None, "") else ligne.get("unite")
+            # Facteur d'unité (2 oct. 2026) : la saisie en cours domine, sinon la base.
+            _facteur_st = data.get("qte_facteur") if "qte_facteur" in data else ligne.get("qte_facteur")
             if _pust_in_body and _pust_val > 0:
-                _st_montant_value = quantite_effective(qte, _unite_st) * _pust_val
+                _st_montant_value = quantite_effective(qte, _unite_st, _facteur_st) * _pust_val
             elif ligne.get("prix_unitaire_st_override") and float(ligne.get("prix_unitaire_st") or 0) > 0:
-                _st_montant_value = quantite_effective(qte, _unite_st) * float(ligne["prix_unitaire_st"])
+                _st_montant_value = quantite_effective(qte, _unite_st, _facteur_st) * float(ligne["prix_unitaire_st"])
             else:
                 _st_montant_value = m["sous_traitant_montant"]
             if auto and "prix_unitaire" in data:
@@ -8572,6 +8576,10 @@ def register_ad_budget_routes(get_conn):
             # le serveur ne calcule rien avec. HORS TOTAUX ET HORS EMPREINTE.
             # Chaine vide -> NULL (fonction retiree).
             "qte_formule",
+            # FACTEUR D'UNITE (2026-10-02) : multiplie ce que paie la quantite
+            # (1139 plin x 6 mois). ENTRE dans les totaux et dans l'empreinte
+            # (quantite_effective). NULL / vide = pas de facteur ; <= 0 refuse.
+            "qte_facteur",
             # Format d'achat de l'item (demande PC4, 2026-09-29) : la boite
             # de 12, le paquet de 50. L'ecran d'Ad BUD en deduit une colonne
             # « Qte items » = plafond(qte / format_item), CALCULEE COTE CLIENT.
@@ -8617,6 +8625,16 @@ def register_ad_budget_routes(get_conn):
                 # cast "" → uuid qui planterait). Délier = renvoyer null.
                 if field in ("sous_traitant_contact_id", "lot_id"):
                     val = val or None
+                elif field == "qte_facteur":
+                    if val in (None, ""):
+                        val = None
+                    else:
+                        try:
+                            val = float(val)
+                        except (TypeError, ValueError):
+                            raise HTTPException(status_code=422, detail="qte_facteur doit etre un nombre, ou null")
+                        if val <= 0:
+                            raise HTTPException(status_code=422, detail="qte_facteur doit etre strictement superieur a 0 (null pour le retirer)")
                 elif field == "qte_formule":
                     val = (str(val).strip()[:500] or None) if val is not None else None
                 elif field in (
@@ -9290,7 +9308,7 @@ def register_ad_budget_routes(get_conn):
                    qte_override, taux_horaire_override, ajust_materiaux_override, ajust_main_oeuvre_override,
                    ajust_sous_traitant_override, sous_traitant_montant_override,
                    prix_unitaire_st, prix_unitaire_st_override,
-                   production_valeur, production_unite, production_auto, qte_auto, qte_formule)
+                   production_valeur, production_unite, production_auto, qte_auto, qte_formule, qte_facteur)
                 SELECT %s, %s, source_item_id, section, description, unite, prix_unitaire, {sel_qte},
                    ajustement_pct, note, actif, source_file, type_source,
                    {sel_heures}, taux_horaire, cout_sous_traitant, sous_traitant_nom,
@@ -9301,7 +9319,7 @@ def register_ad_budget_routes(get_conn):
                    {sel_qte_override}, taux_horaire_override, ajust_materiaux_override, ajust_main_oeuvre_override,
                    ajust_sous_traitant_override, {sel_st_montant_override},
                    prix_unitaire_st, prix_unitaire_st_override,
-                   production_valeur, production_unite, production_auto, qte_auto, qte_formule
+                   production_valeur, production_unite, production_auto, qte_auto, qte_formule, qte_facteur
                 FROM ad_budget.budget_lignes
                 WHERE projet_id = %s AND lot_id = %s
                 """,

@@ -76,7 +76,7 @@ def _line_total(arr, l):
     ajmo = float(l.get("ajust_main_oeuvre") or 0)
     ajst = float(l.get("ajust_sous_traitant") or 0)
     adj = float(l.get("ajustement_pct") or 0)
-    st = quantite_effective(qte, l.get("unite")) * prix * (1 + ajm / 100) + heures * taux * (1 + ajmo / 100) + st_montant * (1 + ajst / 100)
+    st = quantite_effective(qte, l.get("unite"), l.get("qte_facteur")) * prix * (1 + ajm / 100) + heures * taux * (1 + ajmo / 100) + st_montant * (1 + ajst / 100)
     tot_real = st * (1 + adj / 100)
     return float(_js_round(tot_real)) if arr else tot_real
 
