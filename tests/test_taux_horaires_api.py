@@ -517,97 +517,154 @@ def test_25_resolve_taux_section_vide_ou_courte():
         assert any(params == ("CHARPENTIER_C",) for _, params in cur.executed), section
 
 
-# ── D5 — site D : auto-fill à l'ajout manuel d'une ligne ──────────────────
-# create_budget_ligne (POST /budget/projets/{id}/lignes, modules/ad_budget_api).
-# Flux des requêtes consommées sur le FakeCursor partagé : 1) jwt_user ->
-# _provision_user (SELECT users) ; 2) éventuel _resolve_taux_default ;
-# 3) INSERT ... RETURNING *.
+# ── D5 — sites D (ajout manuel) et C (push from-viu-v2), par MOTIF SQL ────
+#
+# RÉÉCRIT le 2 oct 2026 (PC2). Les versions précédentes pilotaient un
+# FakeCursor par une FILE ORDONNÉE de réponses : chaque requête ajoutée en
+# amont (_load_and_authorize_projet, détention, rang de ligne…) décalait la
+# file et le banc rougissait en 404 / KeyError 'user_id' sans que la règle ait
+# bougé. Ici, le curseur répond selon la REQUÊTE, pas selon l'ordre -- sur le
+# modèle de la « petite base en mémoire » de test_taux_horaire_backfill_
+# ouverture.py. Une requête qu'il ne connaît pas reçoit None / [] : ajouter
+# une lecture en amont ne casse plus le banc.
+#
+# LES ATTENTES viennent de la règle métier (banc câblé test_taux_horaire_
+# backfill_ouverture.py : division non mappée -> repli CHARPENTIER_C ; un taux
+# déjà saisi n'est jamais remplacé), jamais de l'implémentation. L'ancien
+# test_26 « non mappée -> 0 » et test_28 « [84.64, 0, 0] » affirmaient le
+# contraire de la règle #35 (le second était corrigé en production par #100).
 
-def make_budget_client(responses):
-    """Monte le router Ad BUD sur une app de test, get_conn stubbé.
-    Retourne (TestClient, FakeCursor)."""
-    cursor = FakeCursor(responses)
+TAUX_DIVISION_06 = Decimal("84.64")
+
+
+class CurseurParMotif:
+    """Répond selon le CONTENU de la dernière requête. `regles` : liste de
+    (motif, valeur) ; valeur peut être une fonction (sql, params) -> valeur.
+    La première règle dont le motif est dans le SQL gagne."""
+
+    def __init__(self, regles):
+        self.regles = regles
+        self.executed = []
+        self.rowcount = 0
+        self._dernier = None
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+        self._dernier = (sql, params)
+
+    def _reponse(self):
+        sql, params = self._dernier or ("", None)
+        for motif, valeur in self.regles:
+            if motif in sql:
+                return valeur(sql, params) if callable(valeur) else valeur
+        return None
+
+    def fetchone(self):
+        r = self._reponse()
+        return r[0] if isinstance(r, list) else r
+
+    def fetchall(self):
+        r = self._reponse()
+        if r is None:
+            return []
+        return r if isinstance(r, list) else [r]
+
+    def close(self):
+        pass
+
+
+def _taux_division(sql, params):
+    """csi_division_default_metier : seule la division 06 est mappée."""
+    return {"taux_col17": TAUX_DIVISION_06} if params and params[0] == "06" else None
+
+
+def _regles_budget(projet=None):
+    projet = projet or {"id": 1, "user_id": 7, "organization_id": None,
+                        "is_verrouille": False, "detenteur_id": None,
+                        "nom": "Projet test", "statut": "en_soumission"}
+    return [
+        ("FROM ad_budget.users", SAMPLE_USER_ROW),
+        ("INSERT INTO ad_budget.budget_lignes",
+         lambda sql, p: {"id": 1, "taux_horaire": (p or [None])[-1]}),
+        ("csi_division_default_metier", lambda sql, p: (
+            [{"csi_division": "06", "taux_col17": TAUX_DIVISION_06}]
+            if "JOIN" in sql and (p is None or not p) else _taux_division(sql, p))),
+        ("FROM ad_budget.taux_horaires WHERE code", {"taux_col17": TAUX_REPLI_CHARPENTIER}),
+        ("FROM ad_budget.projets", projet),
+    ]
+
+
+def _client_budget(regles):
+    cursor = CurseurParMotif(regles)
     conn = FakeConn(cursor)
     app = FastAPI()
     app.include_router(register_ad_budget_routes(lambda: conn))
     return TestClient(app), cursor
 
 
-def _insert_budget_ligne(cur):
-    """(sql, params) de l'INSERT budget_lignes RETURNING * (site D)."""
-    return next((s, p) for s, p in cur.executed
-                if "INSERT INTO ad_budget.budget_lignes" in s)
+def _taux_insere(sql, params):
+    """La valeur de la COLONNE taux_horaire d'un INSERT, lue par son NOM dans
+    la liste des colonnes -- jamais « le dernier paramètre » : une colonne
+    ajoutée à l'INSERT ne doit pas faire lire autre chose."""
+    import re
+    m = re.search(r"INSERT INTO ad_budget\.budget_lignes\s*\(([^)]*)\)\s*VALUES\s*\((.*)\)",
+                  sql, re.S)
+    colonnes = [c.strip() for c in m.group(1).split(",")]
+    valeurs = [v.strip() for v in m.group(2).split(",")]
+    i = colonnes.index("taux_horaire")
+    assert valeurs[i] == "%s", f"taux_horaire n'est pas paramétré : {valeurs[i]}"
+    return params[sum(1 for v in valeurs[:i] if v == "%s")]
+
+
+def _taux_inseres(cur):
+    return [_taux_insere(s, p) for s, p in cur.executed
+            if "INSERT INTO ad_budget.budget_lignes" in s]
 
 
 def test_26_site_d_absence_declenche_resolution():
-    """Sans taux_horaire fourni : _resolve_taux_default est appelé et son
-    résultat est inséré comme dernier paramètre de l'INSERT."""
-    client, cur = make_budget_client([
-        SAMPLE_USER_ROW,                       # _provision_user
-        {"taux_col17": Decimal("77.00")},      # _resolve_taux_default
-        {"id": 1, "taux_horaire": Decimal("77.00")},  # INSERT RETURNING *
-    ])
+    """Sans taux fourni, division mappée -> le taux de CETTE division."""
+    client, cur = _client_budget(_regles_budget())
     r = client.post("/budget/projets/1/lignes",
-                     json={"section": "06 40 0", "description": "Test"},
-                     headers=headers_user())
-    assert r.status_code == 200
-    assert any("csi_division_default_metier" in s for s, _ in cur.executed)
-    _, params = _insert_budget_ligne(cur)
-    assert params[-1] == Decimal("77.00")
+                    json={"section": "06 40 0", "description": "Test"},
+                    headers=headers_user())
+    assert r.status_code == 200, r.text
+    assert _taux_inseres(cur) == [TAUX_DIVISION_06]
 
 
-def test_26_site_d_division_non_mappee_zero():
-    """Sans taux fourni et division non mappée (_resolve -> None) -> 0 inséré."""
-    client, cur = make_budget_client([
-        SAMPLE_USER_ROW,
-        None,                                  # _resolve_taux_default -> None
-        {"id": 1, "taux_horaire": 0},
-    ])
+def test_26_site_d_division_non_mappee_repli_jamais_zero():
+    """RÈGLE #35 : division NON mappée -> repli charpentier-menuisier, jamais 0
+    (l'ancien test affirmait 0)."""
+    client, cur = _client_budget(_regles_budget())
     r = client.post("/budget/projets/1/lignes",
-                     json={"section": "99 99 9", "description": "Test"},
-                     headers=headers_user())
-    assert r.status_code == 200
-    _, params = _insert_budget_ligne(cur)
-    assert params[-1] == 0
+                    json={"section": "99 99 9", "description": "Test"},
+                    headers=headers_user())
+    assert r.status_code == 200, r.text
+    assert _taux_inseres(cur) == [TAUX_REPLI_CHARPENTIER]
 
 
 def test_27_site_d_taux_explicite_non_ecrase():
-    """Si taux_horaire est fourni explicitement : il n'est PAS écrasé et
-    _resolve_taux_default n'est PAS appelé."""
-    client, cur = make_budget_client([
-        SAMPLE_USER_ROW,
-        {"id": 1, "taux_horaire": 95.5},       # pas de réponse de résolution
-    ])
+    """Un taux SAISI (> 0) n'est jamais remplacé, et aucune résolution n'est
+    lancée."""
+    client, cur = _client_budget(_regles_budget())
     r = client.post("/budget/projets/1/lignes",
-                     json={"section": "06 40 0", "description": "Test",
-                           "taux_horaire": 95.5},
-                     headers=headers_user())
-    assert r.status_code == 200
+                    json={"section": "06 40 0", "description": "Test",
+                          "taux_horaire": 95.5},
+                    headers=headers_user())
+    assert r.status_code == 200, r.text
+    assert _taux_inseres(cur) == [95.5]
     assert not any("csi_division_default_metier" in s for s, _ in cur.executed)
-    _, params = _insert_budget_ligne(cur)
-    assert params[-1] == 95.5
 
 
 # ── D5 — site C : auto-fill au push from-viu-v2 ───────────────────────────
-# projects_from_viu_v2 (POST /budget/projects/from-viu-v2). En mode=existing,
-# le FakeCursor sert dans l'ordre : 1) _provision_user (SELECT users) ;
-# 2) SELECT projets ; 3) counts_before ; 4) samples post-DELETE (fetchall) ;
-# 5) sections existantes (fetchall) ; 6) _load_taux_default_map (fetchall).
-# Les INSERT de la boucle ne consomment rien (pas de RETURNING).
 
 def test_28_site_c_from_viu_v2_autofill():
-    """Push from-viu-v2 : le taux par défaut est résolu par division CSI,
-    le mapping est chargé une seule fois, chaque INSERT reçoit son taux."""
-    client, cur = make_budget_client([
-        SAMPLE_USER_ROW,                                  # _provision_user
-        {"id": 1, "nom": "Projet test", "user_id": 7},    # SELECT projets
-        {"total": 0, "non_blindspot": 0,                  # counts_before
-         "viu_items": 0, "blindspot_skeleton": 0},
-        [],                                               # samples post-DELETE
-        [],                                               # sections existantes
-        [{"csi_division": "06",                           # _load_taux_default_map
-          "taux_col17": Decimal("84.64")}],
-    ])
+    """Push from-viu-v2 : division mappée -> son taux ; non mappée et section
+    absente -> REPLI (règle #35, corrigée en production par #100). La carte et
+    le repli sont chargés UNE fois chacun, pas par item."""
+    regles = _regles_budget()
+    regles.insert(0, ("AS non_blindspot", {"total": 0, "non_blindspot": 0,
+                                           "viu_items": 0, "blindspot_skeleton": 0}))
+    client, cur = _client_budget(regles)
     r = client.post("/budget/projects/from-viu-v2", json={
         "mode": "existing",
         "project_id": 1,
@@ -618,18 +675,7 @@ def test_28_site_c_from_viu_v2_autofill():
             {"description": "Item sans section", "id": 3},
         ],
     }, headers=headers_user())
-    assert r.status_code == 200
-
-    # _load_taux_default_map appelé UNE seule fois (pas par item) : son JOIN
-    # sur csi_division_default_metier ne doit apparaître qu'une fois.
-    map_queries = [s for s, _ in cur.executed
-                   if "csi_division_default_metier" in s]
-    assert len(map_queries) == 1
-
-    # Chaque INSERT budget_lignes (viu_v2) reçoit le bon taux_horaire en
-    # dernier paramètre : division mappée -> 84.64 ; non mappée -> 0 ;
-    # section absente -> 0.
-    inserts = [p for s, p in cur.executed
-               if "INSERT INTO ad_budget.budget_lignes" in s and "viu_v2" in s]
-    assert len(inserts) == 3
-    assert [p[-1] for p in inserts] == [Decimal("84.64"), 0, 0]
+    assert r.status_code == 200, r.text
+    assert _taux_inseres(cur) == [TAUX_DIVISION_06, TAUX_REPLI_CHARPENTIER, TAUX_REPLI_CHARPENTIER]
+    assert len([s for s, _ in cur.executed if "csi_division_default_metier" in s]) == 1
+    assert len([s for s, _ in cur.executed if "FROM ad_budget.taux_horaires WHERE code" in s]) == 1
