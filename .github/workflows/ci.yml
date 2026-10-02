@@ -132,7 +132,7 @@ jobs:
       - name: Source unique - pas de copie locale de la regle des heures
         run: python tools/verifier_source_unique.py
 
-      # 1er oct 2026 : 22 fichiers de tests sur 46 n'etaient cites NULLE PART
+      # 1er oct 2026 : 27 fichiers de tests sur 49 n'etaient cites NULLE PART
       # ici -- ils ne tournaient jamais, et l'on se croyait couvert (dont la
       # garde des copies, muette depuis le 11 sept). Tout tests/test_*.py et
       # tests/check_*.py est cite ici, ou nomme dans EXCLUSIONS avec sa raison.
@@ -143,7 +143,32 @@ jobs:
       - name: Garde-fou - son propre temoin
         run: python tests/test_verifier_tests_cables.py
 
-      # Filet du controle ci-dessus : injecte une copie dans un vrai fichier
+      # 18 bancs VERTS qui ne tournaient nulle part (1er oct 2026, mesure PC3 :
+      # 116 tests). Retires d'EXCLUSIONS du garde-fou dans le MEME commit.
+      - name: Bancs rebranches le 1er oct (18 fichiers, pytest)
+        run: |
+          python -m pytest -q \
+            tests/test_aggregates.py \
+            tests/test_bud_presence.py \
+            tests/test_budget_fingerprint_champs_neutres.py \
+            tests/test_contacts_rapport.py \
+            tests/test_convert_hors_lot_endpoint.py \
+            tests/test_decode_token_graceful.py \
+            tests/test_devis_documents_filter.py \
+            tests/test_duplicate_lot_endpoint.py \
+            tests/test_gabarit_add_ligne.py \
+            tests/test_ligne_commentaires.py \
+            tests/test_lots_calc.py \
+            tests/test_pdf_lots_recap.py \
+            tests/test_quantite_effective.py \
+            tests/test_quantites_liees.py \
+            tests/test_regroupements_lignes.py \
+            tests/test_reorder_budget_lignes.py \
+            tests/test_scope_deux_onglets.py \
+            tests/test_seed_master_sans_prix.py
+
+      # Filet de tools/verifier_source_unique.py (etape « Source unique - pas
+      # de copie locale de la regle des heures ») : injecte une copie dans un vrai fichier
       # temporaire et verifie qu'il la detecte pour de vrai.
       - name: Source unique - le controle mord-il pour de vrai (filet)
         run: pytest tests/test_verifier_source_unique.py -v
