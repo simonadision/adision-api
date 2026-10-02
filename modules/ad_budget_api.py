@@ -1704,6 +1704,43 @@ SEUIL_DETENTION_MINUTES = 15
 SEUIL_DETENTION = timedelta(minutes=SEUIL_DETENTION_MINUTES)
 
 
+def _corbeille_scope_where(user):
+    """WHERE + params bornant la CORBEILLE à l'organisation de l'utilisateur.
+
+    MÊME POLITIQUE QUE `_authorize_projet`, ÉCRITE DEUX FOIS PARCE QU'ELLE
+    S'APPLIQUE À DEUX CHOSES DIFFÉRENTES : ici une LISTE (un WHERE SQL), là
+    un projet DÉJÀ CHARGÉ (un test Python). Seul `super_admin` franchit la
+    frontière entre organisations ; tout le reste est borné à la sienne.
+
+    POURQUOI PAS `OR organization_id IS NULL`, alors que /projets/by-hub
+    l'écrit (compat des projets d'avant le multi-tenant) : un projet sans
+    organisation serait visible par TOUS les gestionnaires, de toutes les
+    entreprises. Dans une corbeille, ce « repli de compatibilité » est
+    exactement le trou qu'on est en train de boucher. Mesure du 2 oct 2026 :
+    **0 projet sur 27 a un organization_id NULL** — la clause ne protégerait
+    rien et ouvrirait tout. Si un jour un projet sans organisation apparaît,
+    il doit rester INVISIBLE ici et être réparé à la source, pas montré à
+    tout le monde.
+
+    `org` est None (JWT sans organisation active) -> 'FALSE' : la corbeille
+    est VIDE, jamais « tout ». Un périmètre indéterminé n'est pas un
+    périmètre universel.
+
+    Pas de staff : `jwt_org_admin` laisse passer platform_role='staff', mais
+    `_authorize_projet` ne donne l'accès total qu'à super_admin. Les deux
+    routes voisines appliquent donc la même borne — et la mesure du 2 oct
+    2026 dit **0 compte staff** (15 client, 3 super_admin), donc cette borne
+    ne retire rien à personne aujourd'hui.
+    """
+    if user.get("platform_role") == "super_admin":
+        return "TRUE", ()
+    org = user.get("organization_id")
+    if org is None:
+        return "FALSE", ()
+    # ::uuid explicite — la colonne est un uuid, le JWT porte une chaîne.
+    return "organization_id = %s::uuid", (str(org),)
+
+
 def _load_and_authorize_projet(get_conn, projet_id, user, mode, check_lock=True):
     """Charge le projet {projet_id} sur une connexion DÉDIÉE (fermée aussitôt
     via try/finally — aucune fuite de connexion, même sur un rejet 403/404)
@@ -3932,19 +3969,26 @@ def register_ad_budget_routes(get_conn):
     # ══════════════════════════════════════════════════════════
 
     @router.get("/admin/projets-supprimes")
-    def admin_list_projets_supprimes(_admin=Depends(jwt_org_admin)):
+    def admin_list_projets_supprimes(user=Depends(jwt_org_admin)):
         """Liste des projets dans la corbeille. Identité (nom/client) lue
         depuis hub_identity_snapshot — le MIROIR local, pas un appel hub :
         cette liste doit rester consultable même hub indisponible, et un
         projet supprimé peut avoir un lien hub lui-même déjà soft-supprimé."""
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
+        # CLOISONNEMENT PAR ORGANISATION — l'omission corrigée le 2 oct 2026.
+        # Cette liste montrait la corbeille de TOUTES les entreprises à tout
+        # gestionnaire, avec le nom du projet et celui du client dans
+        # hub_identity_snapshot.
+        portee, portee_args = _corbeille_scope_where(user)
         cur.execute(
             "SELECT id, ad_hub_project_id, statut, supprime_le, supprime_par, "
             "hub_identity_snapshot "
             "FROM ad_budget.projets "
             "WHERE supprime_le IS NOT NULL "
-            "ORDER BY supprime_le DESC"
+            "AND " + portee + " "
+            "ORDER BY supprime_le DESC",
+            portee_args,
         )
         rows = cur.fetchall()
         cur.close()
@@ -3969,7 +4013,7 @@ def register_ad_budget_routes(get_conn):
         return out
 
     @router.post("/admin/projets/{projet_id}/restaurer")
-    def admin_restaurer_projet(projet_id: int, _admin=Depends(jwt_org_admin)):
+    def admin_restaurer_projet(projet_id: int, user=Depends(jwt_org_admin)):
         """Sort un projet de la corbeille. UPDATE MINIMAL — seulement les deux
         colonnes de la corbeille, jamais une reconstruction de ligne complète
         (même famille de risque que le bug déjà trouvé 2x sur ce dépôt : une
@@ -3982,6 +4026,22 @@ def register_ad_budget_routes(get_conn):
         restauration n'existe côté hub (seulement un script manuel,
         adision-app-api/scripts/restaurer_projets_supprimes.py). Limite
         documentée, pas bloquante — voir le rapport de livraison."""
+        # CLOISONNEMENT PAR ORGANISATION — MÊME GARDE QUE delete_projet.
+        # C'est l'ASYMÉTRIE qui révélait le trou : mettre un projet à la
+        # corbeille passait par _load_and_authorize_projet, l'en sortir (et
+        # le détruire) ne passait par rien. On ne pouvait jeter que les siens,
+        # mais agir sur ceux de tout le monde.
+        #
+        # 404 et non 403, par _authorize_projet : on ne révèle pas l'existence
+        # du projet d'une autre entreprise.
+        #
+        # check_lock=False, DÉLIBÉRÉMENT : le verrou et la détention gèlent le
+        # CONTENU d'un projet ; ces deux routes ne touchent pas au contenu,
+        # elles déplacent le projet dans la corbeille ou l'en sortent. Ajouter
+        # ici des refus 409 qui n'existaient pas serait glisser un changement
+        # de comportement dans un correctif de sécurité. Ce correctif ne fait
+        # que RESTREINDRE, jamais élargir.
+        _load_and_authorize_projet(get_conn, projet_id, user, "write", check_lock=False)
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         cur.execute(
@@ -4003,7 +4063,7 @@ def register_ad_budget_routes(get_conn):
         return {"status": "restaure", "id": projet_id}
 
     @router.delete("/admin/projets/{projet_id}/definitif")
-    def admin_supprimer_definitif_projet(projet_id: int, _admin=Depends(jwt_org_admin)):
+    def admin_supprimer_definitif_projet(projet_id: int, user=Depends(jwt_org_admin)):
         """Suppression PHYSIQUE — pour de vrai, cette fois. DELETE FROM
         ad_budget.projets ; CASCADE (vérifié en direct sur la prod, 3 sept
         2026 : budget_lignes_projet_id_fkey, devis_projet_id_fkey,
@@ -4023,6 +4083,22 @@ def register_ad_budget_routes(get_conn):
         Ne touche pas la fiche Ad HUB : elle a déjà été soft-supprimée (best-
         effort) au moment du premier DELETE /projets/{id} qui a mis ce
         projet dans la corbeille — voir delete_projet() plus haut."""
+        # CLOISONNEMENT PAR ORGANISATION — MÊME GARDE QUE delete_projet.
+        # C'est l'ASYMÉTRIE qui révélait le trou : mettre un projet à la
+        # corbeille passait par _load_and_authorize_projet, l'en sortir (et
+        # le détruire) ne passait par rien. On ne pouvait jeter que les siens,
+        # mais agir sur ceux de tout le monde.
+        #
+        # 404 et non 403, par _authorize_projet : on ne révèle pas l'existence
+        # du projet d'une autre entreprise.
+        #
+        # check_lock=False, DÉLIBÉRÉMENT : le verrou et la détention gèlent le
+        # CONTENU d'un projet ; ces deux routes ne touchent pas au contenu,
+        # elles déplacent le projet dans la corbeille ou l'en sortent. Ajouter
+        # ici des refus 409 qui n'existaient pas serait glisser un changement
+        # de comportement dans un correctif de sécurité. Ce correctif ne fait
+        # que RESTREINDRE, jamais élargir.
+        _load_and_authorize_projet(get_conn, projet_id, user, "write", check_lock=False)
         conn = get_conn()
         cur = conn.cursor(row_factory=dict_row)
         cur.execute(

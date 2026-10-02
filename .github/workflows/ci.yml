@@ -170,6 +170,22 @@ jobs:
             tests/test_seed_master_sans_prix.py \
             tests/test_taux_horaires_api.py
 
+      # CLOISONNEMENT DE LA CORBEILLE (2 oct 2026). Les 3 routes /admin/* de
+      # la corbeille d'Ad BUD ne portaient AUCUN filtre d'organisation : un
+      # gestionnaire de n'importe quelle entreprise cliente voyait, restaurait
+      # et SUPPRIMAIT DEFINITIVEMENT (DELETE physique + CASCADE) les projets
+      # supprimes de toutes les autres. L'asymetrie etait la preuve : METTRE a
+      # la corbeille passait par _load_and_authorize_projet, en SORTIR ne
+      # passait par rien.
+      #
+      # Le banc verrouille la propriete pour les 30 routes du module qui
+      # touchent ad_budget.projets, pas seulement les 3 reparees -- sinon une
+      # QUATRIEME naitrait a cote sans que rien ne la voie. Eprouve A L'ENVERS
+      # avant d'etre cable : rejoue contre le code d'avant le correctif, 7 cas
+      # rougissent et les 5 temoins anti-vacuite restent verts.
+      - name: Corbeille Ad BUD - cloisonnement par organisation
+        run: pytest tests/test_corbeille_cloisonnement_org.py -v
+
       # Filet de tools/verifier_source_unique.py (etape « Source unique - pas
       # de copie locale de la regle des heures ») : injecte une copie dans un vrai fichier
       # temporaire et verifie qu'il la detecte pour de vrai.
