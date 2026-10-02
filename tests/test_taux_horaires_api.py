@@ -44,7 +44,11 @@ def _set_jwt_secret(monkeypatch):
 def forge_jwt(role="super_admin", email="admin@adision.ca"):
     now = int(time.time())
     return jwt.encode(
-        {"sub": email, "email": email, "role": role, "exp": now + 3600},
+        # platform_role : la claim que les gardes LISENT depuis le hotfix
+        # a12d743 (2 juil. 2026) ; `role` seul donnait 403 (27 échecs).
+        {"sub": email, "email": email, "role": role,
+         "platform_role": "super_admin" if role == "super_admin" else "client",
+         "exp": now + 3600},
         TEST_SECRET, algorithm="HS256",
     )
 
@@ -58,7 +62,7 @@ def forge_jwt_user(email="estimateur@adision.ca"):
     jwt_user._check_module). Utilisé pour /budget/taux-horaires."""
     now = int(time.time())
     return jwt.encode(
-        {"sub": email, "email": email, "role": "user",
+        {"sub": email, "email": email, "role": "user", "platform_role": "client",
          "modules": ["ad_bud"], "exp": now + 3600},
         TEST_SECRET, algorithm="HS256",
     )
@@ -485,18 +489,32 @@ def test_25_resolve_taux_section_mappee():
     assert cur.executed[0][1] == ("06",)
 
 
+TAUX_REPLI_CHARPENTIER = Decimal("48.50")  # CHARPENTIER_C
+
+
 def test_25_resolve_taux_division_non_mappee():
-    """fetchone -> None (division absente du mapping) -> None."""
-    assert _resolve_taux_default("99 99 9", FakeConn(FakeCursor([None]))) is None
+    """RÈGLE DE SIMON (#35, 9 sept ; redemandée le 15 sept) : une division NON
+    mappée tombe sur le REPLI charpentier-menuisier compagnon, JAMAIS 0 ni
+    None. Attente reprise du banc métier câblé
+    test_taux_horaire_backfill_ouverture.py (point 2), pas du code.
+    L'ancienne version attendait None et passait PAR ACCIDENT : la file du
+    FakeCursor s'épuisait avant la requête de repli."""
+    cur = FakeCursor([None, {"taux_col17": TAUX_REPLI_CHARPENTIER}])
+    assert _resolve_taux_default("99 99 9", FakeConn(cur)) == TAUX_REPLI_CHARPENTIER
+    assert any(params == ("CHARPENTIER_C",) for _, params in cur.executed)
 
 
 def test_25_resolve_taux_section_vide_ou_courte():
-    """Section None / vide / < 2 caractères -> None, sans aucune requête."""
-    cur = FakeCursor([])
-    assert _resolve_taux_default(None, FakeConn(cur)) is None
-    assert _resolve_taux_default("", FakeConn(FakeCursor([]))) is None
-    assert _resolve_taux_default("0", FakeConn(FakeCursor([]))) is None
-    assert cur.executed == []
+    """Section absente (None / vide) : aucune division à lire, donc même règle
+    qu'une division non mappée -- le REPLI CHARPENTIER_C, jamais None
+    (l'ancienne attente « None, sans aucune requête » affirmait le contraire
+    de la règle #35). La section courte « 0 » n'est plus testée ici : le
+    code la lit comme la division « 00 », et la règle métier ne dit rien de
+    ce cas -- l'affirmer serait faire confirmer le code par lui-même."""
+    for section in (None, ""):
+        cur = FakeCursor([{"taux_col17": TAUX_REPLI_CHARPENTIER}])
+        assert _resolve_taux_default(section, FakeConn(cur)) == TAUX_REPLI_CHARPENTIER, section
+        assert any(params == ("CHARPENTIER_C",) for _, params in cur.executed), section
 
 
 # ── D5 — site D : auto-fill à l'ajout manuel d'une ligne ──────────────────
