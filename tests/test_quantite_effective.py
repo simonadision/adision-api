@@ -80,3 +80,19 @@ def test_facteur_null_ou_un_ne_change_rien():
     for f in (None, 1, "1"):
         lignes = [copy.deepcopy({**CLOTURE, "qte_facteur": f})]
         assert FP.compute_budget_fingerprint(PROJET, lignes, 0) == base
+
+
+# ── pouce × plin (2 oct. 2026) : qté en POUCES, facteur en PLIN -> pi² ──────
+def test_pouce_plin_convertit_les_pouces_en_pieds():
+    # L'exemple de Simon, résultat confirmé par lui : 6 po × 10 plin = 5 pi².
+    for u in ("pouceXplin", "pouce*plin", "POUCE x PLIN", "pouce×plin", " pouces * plin "):
+        assert quantite_effective(6, u, 10) == 5, u
+
+
+def test_pouce_plin_sans_facteur_reste_la_quantite():
+    assert quantite_effective(6, "pouceXplin", None) == 6
+
+
+def test_autres_unites_non_touchees_par_la_conversion():
+    assert quantite_effective(6, "plin/mois", 10) == 60
+    assert quantite_effective(6, "plin", 10) == 60
