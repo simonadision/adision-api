@@ -51,7 +51,6 @@ EXCLUSIONS = {
     #    de production ; ils sont ROUGES et ne doivent pas etre affaiblis pour
     #    passer. Chacun est une tache nommee a reprendre, puis a retirer d'ici.
     "tests/test_taux_horaires_api.py": "PERIME -- 32 echecs 403 « super_admin plateforme requis » : la route a gagne une garde que le banc ne fournit pas",
-    "tests/test_auth_jwt.py": "PERIME -- 2 echecs AttributeError 'Cookie'.strip : changement d'API de bibliotheque",
 
 }
 
