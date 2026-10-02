@@ -26,7 +26,9 @@ from modules.lots_calc import compute_lot_totals
 from modules.auth_jwt import SESSION_COOKIE_NAME, _extract_bearer, make_jwt_deps, make_jwt_org_admin
 from modules.taux_horaires_api import (
     _load_taux_default_map,
+    _load_taux_repli,
     _resolve_taux_default,
+    taux_defaut_depuis_carte,
 )
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_RIGHT
@@ -3162,6 +3164,8 @@ def register_ad_budget_routes(get_conn):
             # CSI -> taux est chargé UNE seule fois ici (et non par item) pour
             # éviter le N+1 ; résolution en mémoire dans la boucle ci-dessous.
             taux_default_map = _load_taux_default_map(conn)
+            # Repli « jamais 0 » (#35), chargé UNE fois -- pas par item.
+            taux_repli = _load_taux_repli(conn)
 
             for item in items:
                 section = (item.get("csi_section") or "").strip()
@@ -3218,9 +3222,8 @@ def register_ad_budget_routes(get_conn):
 
                 # D5 — taux horaire par défaut résolu via la division CSI
                 # (section déjà strippée plus haut ; peut être vide ici -> 0).
-                taux_horaire = (
-                    taux_default_map.get(section[:2], 0) if section else 0
-                )
+                taux_horaire = taux_defaut_depuis_carte(
+                    section, taux_default_map, taux_repli)
                 cur.execute(
                     """
                     INSERT INTO ad_budget.budget_lignes
@@ -8301,6 +8304,8 @@ def register_ad_budget_routes(get_conn):
         # chargé UNE fois (pas par item) pour éviter le N+1 ; résolution en
         # mémoire dans la boucle.
         taux_default_map = _load_taux_default_map(conn)
+        # Repli « jamais 0 » (#35), chargé UNE fois -- pas par item.
+        taux_repli = _load_taux_repli(conn)
 
         inserted = 0
         for item_id in item_ids:
@@ -8313,9 +8318,8 @@ def register_ad_budget_routes(get_conn):
             if not source:
                 continue
             section = source["section"]
-            taux_horaire = (
-                taux_default_map.get(section.strip()[:2], 0) if section else 0
-            )
+            taux_horaire = taux_defaut_depuis_carte(
+                section, taux_default_map, taux_repli)
             cur.execute("""
                 INSERT INTO ad_budget.budget_lignes
                 (projet_id, source_item_id, section, description, unite, prix_unitaire, taux_horaire)

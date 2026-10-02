@@ -155,6 +155,43 @@ def _resolve_taux_default(csi_section: Optional[str], conn) -> Optional[Decimal]
     return row["taux_col17"] if row else None
 
 
+def _load_taux_repli(conn) -> Optional[Decimal]:
+    """Taux du métier de REPLI (METIER_REPLI), en UNE requête. Pour les
+    imports en lot : chargé UNE fois avant la boucle, à côté de
+    _load_taux_default_map -- jamais une requête par ligne."""
+    cur = conn.cursor(row_factory=dict_row)
+    try:
+        cur.execute(
+            "SELECT taux_col17 FROM ad_budget.taux_horaires "
+            "WHERE code = %s AND actif = TRUE",
+            (METIER_REPLI,),
+        )
+        row = cur.fetchone()
+    finally:
+        cur.close()
+    return row["taux_col17"] if row else None
+
+
+def taux_defaut_depuis_carte(csi_section, carte: dict, repli):
+    """Variante EN LOT de _resolve_taux_default, sans requête : division lue
+    par _division_csi (gère « 6 11 00.01 »), puis la carte, puis le REPLI.
+
+    2 oct 2026 (PC2) : les deux imports en lot (from-viu-v2, import d'items)
+    écrivaient `carte.get(section[:2], 0)` -- 0 $/h pour une division non
+    mappée ou une section absente, contre la règle de Simon (#35, « jamais
+    0 »), et « 6 11 00.01 » tombait sur « 6 » donc sur 0. Rattrapé seulement
+    à l'ouverture suivante (#61) : entre-temps, export, rapport et photo Ad
+    ANA voyaient une main-d'œuvre gratuite. Une correction a posteriori d'une
+    écriture fausse n'est pas une règle tenue.
+
+    Ne renvoie 0 que si le métier de repli lui-même est absent ou inactif --
+    il n'y a alors plus aucun taux à proposer."""
+    division = _division_csi(csi_section)
+    if division and carte.get(division) is not None:
+        return carte[division]
+    return repli if repli is not None else 0
+
+
 def _load_taux_default_map(conn) -> dict:
     """Charge tout le mapping division CSI -> taux par défaut en UNE requête.
 

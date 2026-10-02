@@ -206,6 +206,9 @@ jobs:
       - name: Backfill taux horaire par defaut - ouverture de projet
         run: python tests/test_taux_horaire_backfill_ouverture.py
 
+      - name: Imports en lot - taux horaire jamais a 0 (regle #35)
+        run: python tests/test_import_taux_jamais_zero.py
+
       - name: Pastilles Ad BUD = classement unique du hub
         run: python tests/test_pastilles_classement_hub.py
 
