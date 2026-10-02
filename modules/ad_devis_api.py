@@ -29,7 +29,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm, mm
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-from modules.contacts_rapport import principal_affiche, contacts_supplementaires, lignes_supplementaires
+from modules.contacts_rapport import principal_affiche, contacts_supplementaires, lignes_supplementaires, contacts_depuis_param
 from modules import hub_service
 from modules import budget_fingerprint
 from modules.auth_jwt import SESSION_COOKIE_NAME, make_jwt_deps, _extract_bearer
@@ -453,12 +453,16 @@ def register_ad_devis_routes(get_conn):
         montant: float = 0,
         couleur: str = "adision",
         date_devis: Optional[str] = None,
+        # Personnes du bloc ENTREPRENEUR choisies pour CE devis (JSON, 2 oct.
+        # 2026) ; absent = choix coché dans le hub.
+        contacts_rapport: Optional[str] = None,
     ):
         # Phase D-v2b pré-requis — session_cookie en fallback (header + query
         # restent). _load_and_authorize_projet reste APRÈS extraction.
         _load_and_authorize_projet(get_conn, projet_id, user, "read")
         jwt_token = _extract_bearer(authorization, token, session_cookie)
-        buf, _snap, _ident_source = _build_devis(projet_id, montant, couleur, jwt_token, date_devis, user=user)
+        buf, _snap, _ident_source = _build_devis(projet_id, montant, couleur, jwt_token, date_devis, user=user,
+                                                  contacts_rapport=contacts_rapport)
         safe = "".join(c if c.isalnum() or c in "-_ " else "_"
                        for c in (_snap["project"]["nom"] or "devis")).strip() or "devis"
         return StreamingResponse(
@@ -646,7 +650,7 @@ def register_ad_devis_routes(get_conn):
             "hub": result,
         }
 
-    def _build_devis(projet_id, montant, couleur, jwt_token, date_devis=None, user=None):
+    def _build_devis(projet_id, montant, couleur, jwt_token, date_devis=None, user=None, contacts_rapport=None):
         """Construit le PDF devis ET le snapshot (proposition_devis) ; retourne
         (buf, snapshot). Auth faite par l'appelant (route).
 
@@ -689,6 +693,13 @@ def register_ad_devis_routes(get_conn):
         # possiblement périmée → tracée en métadonnée PDF /Subject + log).
         _hubc = {}
         _ident, _ident_source = _resolve_identity_with_snapshot(projet, jwt_token, _hubc)
+        # CHOIX DES PERSONNES POUR CE DEVIS (2 oct. 2026, Simon : « appliquer la
+        # même fonction pour les personnes ressources au devis »). Pour ce rendu
+        # seulement : la résolution ci-dessus a déjà persisté l'instantané, le
+        # choix n'y entre pas.
+        _choix = contacts_depuis_param(contacts_rapport)
+        if _choix is not None:
+            _ident = {**(_ident or {}), "contacts_entrepreneur": _choix}
 
         nb = (couleur == "nb")
         ACCENT = colors.HexColor("#111827") if nb else colors.HexColor("#1e3a8a")
