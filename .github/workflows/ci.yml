@@ -157,6 +157,7 @@ jobs:
             tests/test_devis_documents_filter.py \
             tests/test_duplicate_lot_endpoint.py \
             tests/test_gabarit_add_ligne.py \
+            tests/test_item_routes_supprimees.py \
             tests/test_ligne_commentaires.py \
             tests/test_lots_calc.py \
             tests/test_pdf_lots_recap.py \

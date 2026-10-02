@@ -10,23 +10,38 @@ Ce test INSPECTE LA TABLE DE ROUTES de l'app (pas le source) : réintroduire une
 route /item d'écriture le fait échouer. Il vérifie aussi que /admin/items et les
 LECTURES du maître (GET /search, GET /item/{id}) sont intactes.
 """
-from fastapi import FastAPI
-
 from modules.ad_budget_api import register_ad_budget_routes
 
 METHODES = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 
+# Plancher de plausibilité : le routeur /budget compte ~69 routes (2 oct 2026).
+# Sous ce seuil, l'énumération est cassée -- pas le routeur.
+ROUTES_MINIMUM = 40
+
 
 def _routes():
-    # get_conn factice : construire le router n'ouvre aucune connexion (les
-    # handlers ne sont pas appelés, seules les routes sont enregistrées).
-    app = FastAPI()
-    app.include_router(register_ad_budget_routes(lambda: None))
+    """Paires (méthode, chemin) lues SUR LE ROUTEUR, jamais sur app.routes.
+
+    2 oct 2026 (PC2, après le signalement de PC3) : avec fastapi 0.142,
+    app.include_router n'aplatit plus les routes dans app.routes (il n'y reste
+    que /docs, /openapi.json, /redoc et un _IncludedRouter). Ce banc voyait un
+    ensemble VIDE : ses deux tests de présence rougissaient, et -- pire -- son
+    test d'ABSENCE restait VERT PAR VACUITÉ, il aurait laissé revenir POST
+    /budget/item sans broncher. Les chemins du routeur portent déjà /budget.
+
+    get_conn factice : construire le routeur n'ouvre aucune connexion."""
+    routeur = register_ad_budget_routes(lambda: None)
     paires = set()
-    for r in app.routes:
+    for r in routeur.routes:
         for m in getattr(r, "methods", set()) or set():
             if m in METHODES:
                 paires.add((m, r.path))
+    # GARDE ANTI-VACUITÉ : un test d'absence n'a de sens que si l'ensemble
+    # où l'on cherche est vraiment peuplé. Règle (PC1) : tout test d'absence
+    # porte un témoin de présence dans le MÊME ensemble.
+    assert ("GET", "/budget/search") in paires and len(paires) >= ROUTES_MINIMUM, (
+        f"énumération des routes cassée ({len(paires)} vues) : un test "
+        "d'absence passerait par vacuité")
     return paires
 
 
