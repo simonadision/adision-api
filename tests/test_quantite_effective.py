@@ -31,3 +31,18 @@ def test_contremaitre_en_pourcent_les_heures_ne_bougent_pas():
     # au plus — leurs heures ne doivent JAMAIS être divisées par 100.
     t = _line_total(False, {"qte": 320, "unite": "%", "heures": 320, "taux_horaire": 80})
     assert t == 320 * 80, t
+
+
+def test_facteur_d_unite_multiplie_la_quantite():
+    # Clôture de chantier : 1139 plin/mois, 6 mois.
+    assert quantite_effective(1139, "plin/mois", 6) == 6834
+    assert quantite_effective("1139", "plin/mois", "6") == 6834
+
+
+def test_facteur_absent_nul_ou_negatif_vaut_un():
+    for f in (None, "", 0, -3, "abc"):
+        assert quantite_effective(1139, "plin/mois", f) == 1139
+
+
+def test_facteur_et_pourcentage_se_composent():
+    assert quantite_effective(2, "%", 3) == 0.06
