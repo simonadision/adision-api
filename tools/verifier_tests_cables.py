@@ -1,8 +1,13 @@
 # -*- coding: utf-8 -*-
 """GARDE-FOU -- aucun fichier de test ne reste hors de la CI sans qu'on le sache.
 
-1er oct 2026 : 22 fichiers sur 46 dans tests/ n'etaient cites NULLE PART dans
-.github/workflows/ (mesure PC2, confirmee par PC3). La CI les liste un par un,
+1er oct 2026 : 27 fichiers sur 49 dans tests/ n'etaient cites NULLE PART dans
+.github/workflows/ (hors commentaires). C'est le chiffre que CET outil
+reproduit, mesure par PC3 sur 3bc7e70, EXCLUSIONS videes. Les « 22 sur 46 »
+puis « 21 sur 47 » du recensement initial venaient d'un grep sur le NOM, qui
+comptait comme cites les 6 fichiers « depot frere » nommes seulement dans un
+COMMENTAIRE de ci.yml (21 + 6 = 27). Meme mot, deux instruments : c'est
+l'outil qui fait foi. La CI les liste un par un,
 sans motif de collecte : un banc ajoute et oublie ne tournait jamais, et l'on
 se croyait couvert. Parmi eux :
   - test_dupliquer_idempotence.py, la garde des copies, muette depuis le
@@ -49,27 +54,6 @@ EXCLUSIONS = {
     "tests/test_auth_jwt.py": "PERIME -- 2 echecs AttributeError 'Cookie'.strip : changement d'API de bibliotheque",
     "tests/test_item_routes_supprimees.py": "PERIME -- 2 echecs : son montage ne monte pas le routeur (seules /docs, /openapi.json, /redoc) ; soupconner la fixture d'abord",
 
-    # ── VERTS A BRANCHER (mesure PC3, 1er oct 2026 : tous passent). Sortis
-    #    d'ici par la PR qui les cable en CI -- le garde-fou d'abord, sinon on
-    #    rebrancherait aujourd'hui ce qui se debrancherait seul plus tard.
-    "tests/test_aggregates.py": "VERT, a brancher (PR suivante)",
-    "tests/test_bud_presence.py": "VERT, a brancher (PR suivante)",
-    "tests/test_budget_fingerprint_champs_neutres.py": "VERT, a brancher (PR suivante)",
-    "tests/test_contacts_rapport.py": "VERT, a brancher (PR suivante)",
-    "tests/test_convert_hors_lot_endpoint.py": "VERT, a brancher (PR suivante)",
-    "tests/test_decode_token_graceful.py": "VERT, a brancher (PR suivante)",
-    "tests/test_devis_documents_filter.py": "VERT, a brancher (PR suivante)",
-    "tests/test_duplicate_lot_endpoint.py": "VERT, a brancher (PR suivante)",
-    "tests/test_gabarit_add_ligne.py": "VERT, a brancher (PR suivante)",
-    "tests/test_ligne_commentaires.py": "VERT, a brancher (PR suivante)",
-    "tests/test_lots_calc.py": "VERT, a brancher (PR suivante)",
-    "tests/test_pdf_lots_recap.py": "VERT, a brancher (PR suivante)",
-    "tests/test_quantite_effective.py": "VERT, a brancher (PR suivante) -- banc du « % » (#89)",
-    "tests/test_quantites_liees.py": "VERT, a brancher (PR suivante)",
-    "tests/test_regroupements_lignes.py": "VERT, a brancher (PR suivante)",
-    "tests/test_reorder_budget_lignes.py": "VERT, a brancher (PR suivante)",
-    "tests/test_scope_deux_onglets.py": "VERT, a brancher (PR suivante)",
-    "tests/test_seed_master_sans_prix.py": "VERT, a brancher (PR suivante)",
 }
 
 MOTIFS_TESTS = ("tests/test_*.py", "tests/check_*.py")
