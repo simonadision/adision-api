@@ -153,6 +153,7 @@ jobs:
             tests/test_bud_presence.py \
             tests/test_budget_fingerprint_champs_neutres.py \
             tests/test_contacts_rapport.py \
+            tests/test_versions_debalancees.py \
             tests/test_convert_hors_lot_endpoint.py \
             tests/test_decode_token_graceful.py \
             tests/test_devis_documents_filter.py \
