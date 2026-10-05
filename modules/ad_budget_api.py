@@ -10,15 +10,28 @@ from typing import Optional
 
 import httpx
 import openpyxl
+# DÉBALANCEMENT (5 oct. 2026) : les ajustements et les totaux se comparent en
+# Decimal, jamais en float — on vérifie ici que le grand total NE BOUGE PAS, et
+# un écart de virgule flottante ferait échouer une application pourtant juste.
+from decimal import Decimal, InvalidOperation
 from fastapi import APIRouter, Body, Cookie, Depends, Header, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from psycopg.errors import UniqueViolation
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
+import logging
+
 from modules.contacts_rapport import principal_affiche, contacts_supplementaires, lignes_supplementaires, contacts_depuis_param
 from modules import con_service, hub_service, mat_service, typ_service
 from modules.ad_budget_constants import AD_VIU_BLINDSPOT_DIVISIONS
+
+# Ce module n'avait PAS de journal. Mes deux gestionnaires d'erreur du
+# débalancement s'en servent — sans cette ligne, `logger` lèverait un
+# NameError **dans la branche d'erreur**, c'est-à-dire exactement quand
+# quelque chose a déjà échoué : la vraie cause serait masquée par la panne de
+# l'instrument censé la rapporter.
+logger = logging.getLogger("ad_budget_api")
 from modules.aggregates import adapt_budget_lines, compute_aggregates, _js_round
 from modules.aggregates import heures_effectives as _heures_effectives
 from modules.aggregates import quantite_effective
@@ -3933,6 +3946,262 @@ def register_ad_budget_routes(get_conn):
         if set(data) & SNAPSHOT_AFFECTING_FIELDS:
             _mark_budget_dirty_if_emitted(projet_id)
         return updated
+
+    # ═════════════════════════════════════════════════════════════════
+    # DÉBALANCEMENT — une cible par rangée, le grand total ne bouge pas
+    # ═════════════════════════════════════════════════════════════════
+    # Simon, 5 oct. 2026 13 h 51 : « option débalancement… une colonne cible à
+    # atteindre. Ex. 10 000 en électricité, cible 12 500 = +2 500, mais le
+    # grand total reste le même. […] réduire chacune des lignes au prorata ».
+    #
+    # LE CALCUL N'EST PAS ICI, ET C'EST VOULU. L'écran calcule un facteur par
+    # ligne (packages/aggregates/debalancer.js) et envoie les NOUVELLES
+    # valeurs. Le serveur ne refait pas l'arithmétique — **il VÉRIFIE la
+    # promesse** : le grand total doit être le même avant et après. « Le grand
+    # total ne bouge pas » EST la fonction, pas un effet de bord ; le jour où
+    # un facteur sera faux, rien ne doit partir en soumission.
+    #
+    # LA VÉRIFICATION NE COÛTE RIEN : `budget_lignes.sous_total` et `total`
+    # sont GENERATED ALWAYS. On somme avant, on écrit, on somme après, dans la
+    # MÊME transaction. Écart au-delà du seuil → ROLLBACK et 409 qui DIT
+    # l'écart.
+    #
+    # LE SEUIL EXISTE PARCE QUE `ajustement_pct` EST EN numeric(8,4). Un
+    # facteur arrondi à quatre décimales laisse quelques cents sur un gros
+    # budget. On ne les cache pas — on les tolère et l'écran les affiche.
+    DEBALANCEMENT_SEUIL_CENTS = 100  # 1,00 $ sur l'ensemble du budget
+
+    def _somme_totaux(cur, projet_id) -> Decimal:
+        cur.execute(
+            "SELECT COALESCE(SUM(total), 0) AS s FROM ad_budget.budget_lignes "
+            "WHERE projet_id = %s AND actif IS NOT FALSE",
+            (projet_id,))
+        return Decimal(str((cur.fetchone() or {}).get("s") or 0))
+
+    @router.post("/projets/{projet_id}/debalancements")
+    def creer_debalancement(
+        projet_id: int, data: dict = Body(...), user=Depends(jwt_user),
+    ):
+        """Applique un débalancement et PHOTOGRAPHIE les ajustements d'avant.
+
+        La photo porte, par ligne, `avant` ET `pose` : `avant` restaure,
+        `pose` permet de détecter qu'on peut restaurer sans écraser une saisie
+        faite depuis. Sans elle, « Annuler » ne pourrait ramener qu'à zéro et
+        détruirait le travail manuel de Simon.
+        """
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+
+        lignes = (data or {}).get("lignes")
+        if not isinstance(lignes, list) or not lignes:
+            raise HTTPException(status_code=400, detail="Aucune ligne à ajuster.")
+        voulu = {}
+        for item in lignes:
+            try:
+                lid = int((item or {}).get("ligne_id"))
+                voulu[lid] = Decimal(str((item or {}).get("ajustement_pct")))
+            except (TypeError, ValueError, InvalidOperation):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Chaque ligne doit porter ligne_id et ajustement_pct.")
+
+        conn = get_conn()
+        try:
+            cur = conn.cursor(row_factory=dict_row)
+            try:
+                avant_total = _somme_totaux(cur, projet_id)
+
+                # Les lignes visées, VERROUILLÉES le temps de la transaction :
+                # deux débalancements simultanés sur le même budget doivent
+                # s'attendre, pas s'entrelacer.
+                cur.execute(
+                    "SELECT id, ajustement_pct, description FROM ad_budget.budget_lignes "
+                    "WHERE projet_id = %s AND id = ANY(%s) FOR UPDATE",
+                    (projet_id, list(voulu)))
+                presentes = {r["id"]: r for r in cur.fetchall()}
+                manquantes = sorted(set(voulu) - set(presentes))
+                if manquantes:
+                    # Une ligne visée qui n'appartient pas à CE projet, ou qui
+                    # a été supprimée depuis l'aperçu. On refuse TOUT : un
+                    # débalancement partiel ne balance pas.
+                    raise HTTPException(
+                        status_code=409,
+                        detail=("%d ligne(s) visée(s) n'existent plus dans ce projet "
+                                "(%s). Rafraîchissez le récapitulatif."
+                                % (len(manquantes),
+                                   ", ".join(str(x) for x in manquantes[:5]))))
+
+                photo = {}
+                for lid, nouveau in voulu.items():
+                    ancien = presentes[lid].get("ajustement_pct")
+                    ancien = Decimal(str(ancien if ancien is not None else 0))
+                    cur.execute(
+                        "UPDATE ad_budget.budget_lignes SET ajustement_pct = %s "
+                        "WHERE id = %s AND projet_id = %s",
+                        (nouveau, lid, projet_id))
+                    photo[str(lid)] = {"avant": float(ancien), "pose": float(nouveau)}
+
+                apres_total = _somme_totaux(cur, projet_id)
+                ecart_cents = int((apres_total - avant_total) * 100)
+                if abs(ecart_cents) > DEBALANCEMENT_SEUIL_CENTS:
+                    conn.rollback()
+                    raise HTTPException(status_code=409, detail=(
+                        "Le grand total aurait changé de %s $ : le débalancement "
+                        "a été ANNULÉ, rien n'a été modifié. C'est précisément ce "
+                        "que cette fonction promet de ne pas faire."
+                        % f"{(apres_total - avant_total):+,.2f}"))
+
+                cur.execute(
+                    "INSERT INTO ad_budget.debalancements "
+                    "  (projet_id, cree_par, cibles, compensation, affichage, lignes, nb_lignes) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id, cree_le",
+                    (projet_id, (user or {}).get("email") or str((user or {}).get("id")),
+                     Json((data or {}).get("cibles") or {}),
+                     Json((data or {}).get("compensation") or {}),
+                     (data or {}).get("affichage"),
+                     Json(photo), len(photo)))
+                cree = cur.fetchone()
+                conn.commit()
+            except HTTPException:
+                conn.rollback()
+                raise
+            except Exception as e:
+                conn.rollback()
+                logger.exception("creer_debalancement: echec projet=%s", projet_id)
+                raise HTTPException(status_code=500,
+                                    detail=f"Échec : {type(e).__name__}: {e}")
+            finally:
+                cur.close()
+        finally:
+            conn.close()
+
+        return {
+            "debalancement": {
+                "id": cree["id"],
+                "cree_le": cree["cree_le"].isoformat() if cree["cree_le"] else None,
+                "par": (user or {}).get("email"),
+                "nb_lignes": len(photo),
+            },
+            "ecart_cents": ecart_cents,
+        }
+
+    @router.get("/projets/{projet_id}/debalancements/dernier")
+    def dernier_debalancement(projet_id: int, user=Depends(jwt_user)):
+        """Le dernier débalancement NON ANNULÉ, ou null. Sert la règle « on
+        n'annule que le dernier » : l'écran n'offre le bouton que pour lui."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        conn = get_conn()
+        try:
+            cur = conn.cursor(row_factory=dict_row)
+            cur.execute(
+                "SELECT id, cree_le, cree_par, cibles, nb_lignes "
+                "FROM ad_budget.debalancements "
+                "WHERE projet_id = %s AND annule_le IS NULL "
+                "ORDER BY cree_le DESC LIMIT 1",
+                (projet_id,))
+            r = cur.fetchone()
+            cur.close()
+        finally:
+            conn.close()
+        if not r:
+            return None
+        return {"id": r["id"],
+                "cree_le": r["cree_le"].isoformat() if r["cree_le"] else None,
+                "par": r["cree_par"], "cibles": r["cibles"],
+                "nb_lignes": r["nb_lignes"]}
+
+    @router.post("/projets/{projet_id}/debalancements/{dbl_id}/annuler")
+    def annuler_debalancement(projet_id: int, dbl_id: int, user=Depends(jwt_user)):
+        """Restaure les ajustements d'avant, LÀ OÙ PERSONNE N'A TOUCHÉ DEPUIS.
+
+        DEUX RÈGLES, et elles sont le mécanisme :
+        1. **On n'annule que le dernier.** Annuler un ancien après un récent
+           restaurerait des ajustements périmés par-dessus du travail
+           postérieur.
+        2. **Une ligne modifiée depuis est SAUTÉE et NOMMÉE.** On compare la
+           valeur actuelle à `pose` : si elle diffère, quelqu'un est passé.
+           Une annulation silencieusement partielle est pire qu'un refus.
+
+        ET C'EST UN COUP UNIQUE : `annule_le` est posé quoi qu'il arrive. Un
+        deuxième essai restaurerait `avant` par-dessus des lignes re-modifiées
+        entre les deux.
+        """
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        conn = get_conn()
+        try:
+            cur = conn.cursor(row_factory=dict_row)
+            try:
+                cur.execute(
+                    "SELECT id, lignes, annule_le FROM ad_budget.debalancements "
+                    "WHERE id = %s AND projet_id = %s FOR UPDATE",
+                    (dbl_id, projet_id))
+                dbl = cur.fetchone()
+                if not dbl:
+                    raise HTTPException(status_code=404, detail="Débalancement introuvable.")
+                if dbl["annule_le"] is not None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Ce débalancement a déjà été annulé une fois. "
+                               "Une annulation ne se tente qu'une seule fois.")
+                cur.execute(
+                    "SELECT id FROM ad_budget.debalancements "
+                    "WHERE projet_id = %s AND annule_le IS NULL "
+                    "ORDER BY cree_le DESC LIMIT 1",
+                    (projet_id,))
+                dernier = cur.fetchone()
+                if not dernier or dernier["id"] != dbl["id"]:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Seul le DERNIER débalancement peut être annulé : "
+                               "restaurer un ancien écraserait le travail fait depuis.")
+
+                photo = dbl["lignes"] or {}
+                ids = [int(k) for k in photo]
+                cur.execute(
+                    "SELECT id, ajustement_pct, description FROM ad_budget.budget_lignes "
+                    "WHERE projet_id = %s AND id = ANY(%s) FOR UPDATE",
+                    (projet_id, ids))
+                actuelles = {r["id"]: r for r in cur.fetchall()}
+
+                restaurees, sautees = 0, []
+                for cle, valeurs in photo.items():
+                    lid = int(cle)
+                    ligne = actuelles.get(lid)
+                    if ligne is None:
+                        sautees.append({"ligne_id": lid, "description": "ligne supprimée depuis"})
+                        continue
+                    courant = Decimal(str(ligne.get("ajustement_pct") or 0))
+                    pose = Decimal(str(valeurs.get("pose") or 0))
+                    if courant != pose:
+                        sautees.append({"ligne_id": lid,
+                                        "description": (ligne.get("description") or "")[:120]})
+                        continue
+                    cur.execute(
+                        "UPDATE ad_budget.budget_lignes SET ajustement_pct = %s "
+                        "WHERE id = %s AND projet_id = %s",
+                        (Decimal(str(valeurs.get("avant") or 0)), lid, projet_id))
+                    restaurees += 1
+
+                resultat = {"restaurees": restaurees, "sautees": sautees}
+                cur.execute(
+                    "UPDATE ad_budget.debalancements "
+                    "SET annule_le = NOW(), annule_par = %s, annulation = %s "
+                    "WHERE id = %s",
+                    ((user or {}).get("email") or str((user or {}).get("id")),
+                     Json(resultat), dbl_id))
+                conn.commit()
+            except HTTPException:
+                conn.rollback()
+                raise
+            except Exception as e:
+                conn.rollback()
+                logger.exception("annuler_debalancement: echec dbl=%s", dbl_id)
+                raise HTTPException(status_code=500,
+                                    detail=f"Échec : {type(e).__name__}: {e}")
+            finally:
+                cur.close()
+        finally:
+            conn.close()
+        return resultat
 
     @router.delete("/projets/{projet_id}")
     def delete_projet(
