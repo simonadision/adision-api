@@ -310,6 +310,10 @@ _HUB_IDENTITY_MAP = {
     "description": "description",
     "numero_projet": "numero_projet_externe",
     "contact_client": "client_contact_nom",
+    # Fonction du contact client (migration 201 du hub, 5 oct. 2026). Miroir
+    # de `fonction_entrepreneur` : Simon a demandé « une case fonction comme
+    # dans les autres personnes ressources ».
+    "fonction_client": "client_contact_fonction",
     "email_client": "client_email",
     "telephone_client": "client_telephone",
     # ENTREPRENEUR — brief Simon, 9 septembre 2026, capture du bloc à l'appui :
@@ -409,15 +413,37 @@ def map_project_to_identity(hub_project: dict) -> dict:
             "email": out.get("email_entrepreneur"),
             "telephone": out.get("telephone_entrepreneur"),
         })
+    # ── LE BLOC CLIENT A SA PROPRE LISTE (5 oct. 2026) ──────────────────
+    # Simon : « dans contact client du hub j'aimerais pouvoir ajouter des
+    # contacts… » puis, sur « lequel s'imprime ? » : « la coche coché....
+    # idem entrepreneur ».
+    #
+    # ⚠ LE PARTAGE PAR CATÉGORIE EST CE QUI EMPÊCHE LE DÉFAUT. Avant ce
+    # changement, TOUTES les personnes du projet tombaient dans
+    # `contacts_entrepreneur`, quelle que soit leur catégorie. Un contact
+    # client coché se serait donc imprimé SOUS ENTREPRENEUR, en silence, avec
+    # le libellé « Contact ». C'est PC1 qui l'a mesuré ; je l'avais manqué.
+    # Les deux moteurs JS appliquent le même partage.
+    clients = []
+    if p.get("client_contact_sur_rapports") is not False:
+        clients.append({
+            "role": "principal",
+            "nom": out.get("contact_client"),
+            "fonction": out.get("fonction_client"),
+            "email": out.get("email_client"),
+            "telephone": out.get("telephone_client"),
+        })
     for c in p.get("contacts_rapports") or []:
-        contacts.append({
+        entree = {
             "role": c.get("categorie") or "",
             "nom": c.get("nom"),
             "fonction": c.get("fonction"),
             "email": c.get("courriel"),
             "telephone": c.get("telephone"),
-        })
+        }
+        (clients if entree["role"] == "client" else contacts).append(entree)
     out["contacts_entrepreneur"] = contacts
+    out["contacts_client"] = clients
     return out
 
 

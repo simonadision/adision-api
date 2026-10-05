@@ -363,11 +363,18 @@ def register_ad_devis_routes(get_conn):
                 # jsPDF qui interrogeait l'org ACTIVE (mauvaise source).
                 "logo_base64": _org_logo_base64(entreprise),
             },
+            # CLIENT — miroir strict de l'objet `entreprise` (5 oct. 2026,
+            # Simon : « la coche coché.... idem entrepreneur »). Les trois
+            # clés ajoutées portent les mêmes noms que celles de l'entreprise,
+            # pour que les deux moteurs lisent la même forme.
             "client": {
                 "nom": _ident.get("nom_client"),
                 "contact": _ident.get("contact_client"),
+                "fonction": _ident.get("fonction_client"),
                 "courriel": _ident.get("email_client"),
                 "telephone": _ident.get("telephone_client"),
+                "contact_affiche": principal_affiche(_ident, "client"),
+                "contacts_supplementaires": contacts_supplementaires(_ident, "client"),
             },
             "user": {
                 "nom": user.get("nom"), "email": user.get("email"),
@@ -830,12 +837,19 @@ def register_ad_devis_routes(get_conn):
                                  _ident.get("telephone_entrepreneur") or entreprise.get("telephone") or "—"))
         _entr_lignes += lignes_supplementaires(contacts_supplementaires(_ident), " :")
         entr = block("ENTREPRENEUR", _entr_lignes)
-        client = block("CLIENT", [
-            ("", _ident.get("nom_client") or "—"),
-            ("Contact :", _ident.get("contact_client") or "—"),
-            ("Courriel :", _ident.get("email_client") or "—"),
-            ("Téléphone :", _ident.get("telephone_client") or "—"),
-        ])
+        # CLIENT — mêmes règles que ENTREPRENEUR juste au-dessus, par les
+        # mêmes fonctions paramétrées (5 oct. 2026). La Fonction n'apparaît
+        # que si elle est renseignée, comme chez l'entrepreneur.
+        _client_lignes = [("", _ident.get("nom_client") or "—")]
+        if principal_affiche(_ident, "client"):
+            _client_lignes.append(("Contact :", _ident.get("contact_client") or "—"))
+            if (_ident.get("fonction_client") or "").strip():
+                _client_lignes.append(("Fonction :", _ident.get("fonction_client")))
+            _client_lignes.append(("Courriel :", _ident.get("email_client") or "—"))
+            _client_lignes.append(("Téléphone :", _ident.get("telephone_client") or "—"))
+        _client_lignes += lignes_supplementaires(
+            contacts_supplementaires(_ident, "client"), " :")
+        client = block("CLIENT", _client_lignes)
         # L'ordre des cellules change, PAS le style : le RIGHTPADDING de 12
         # reste sur la colonne (0,0) -- c'est la gouttière de la colonne de
         # GAUCHE, attachée à la position et non au bloc. La déplacer avec

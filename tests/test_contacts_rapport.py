@@ -103,3 +103,81 @@ def test_le_choix_pilote_l_impression():
     ident = {"contacts_entrepreneur": contacts_depuis_param('[{"role": "construction", "nom": "Olivier"}]')}
     assert principal_affiche(ident) is False
     assert [c["nom"] for c in contacts_supplementaires(ident)] == ["Olivier"]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# LE BLOC CLIENT (5 oct. 2026)
+# ══════════════════════════════════════════════════════════════════════════
+# Simon, 11 h 29 : « dans contact client du hub j'aimerais pouvoir ajouter des
+# contacts… et ajouter une case fonction comme dans les autres personnes
+# ressources ». Puis, sur « lequel s'imprime ? » : « la coche coché.... idem
+# entrepreneur ».
+#
+# MEMES DONNEES QUE LES CAS JS DE PC1 (packages/report-pdf/src/__tests__/
+# contactsRapport.test.js, section « contacts du bloc CLIENT ») : Julie Roy en
+# principal, Marc Tremblay « Charge de projet » en role client. Deux moteurs
+# qui impriment la meme chose doivent etre eprouves sur les memes donnees,
+# sinon le cliquet de fidelite rougit sur un libelle.
+
+_JULIE = {"role": "principal", "nom": "Julie Roy", "fonction": None,
+          "email": "julie@client.ca", "telephone": "418-555-0000"}
+_MARC = {"role": "client", "nom": "Marc Tremblay", "fonction": "Chargé de projet",
+         "email": "marc@client.ca", "telephone": None}
+
+
+def test_client_identite_SANS_la_cle_rend_le_bloc_d_AVANT():
+    """TEMOIN DE NON-REGRESSION. Un instantané figé avant aujourd'hui n'a pas
+    `contacts_client` : le principal doit s'imprimer, comme toujours."""
+    from modules.contacts_rapport import principal_affiche, contacts_supplementaires
+    ident = {"nom_client": "DCC"}
+    assert principal_affiche(ident, "client") is True
+    assert contacts_supplementaires(ident, "client") == []
+
+
+def test_client_le_principal_se_DECOCHE():
+    from modules.contacts_rapport import principal_affiche
+    assert principal_affiche({"contacts_client": [_MARC]}, "client") is False
+    assert principal_affiche({"contacts_client": [_JULIE, _MARC]}, "client") is True
+
+
+def test_client_les_contacts_en_plus_sont_rendus_dans_l_ordre():
+    from modules.contacts_rapport import contacts_supplementaires, lignes_supplementaires
+    sup = contacts_supplementaires({"contacts_client": [_JULIE, _MARC]}, "client")
+    assert [c["nom"] for c in sup] == ["Marc Tremblay"]
+    # Fonction OUI (renseignee), Telephone NON (vide) : on n'imprime pas de vide.
+    assert lignes_supplementaires(sup) == [
+        ("Contact", "Marc Tremblay"),
+        ("Fonction", "Chargé de projet"),
+        ("Courriel", "marc@client.ca"),
+    ]
+
+
+def test_un_contact_CLIENT_ne_tombe_JAMAIS_dans_le_bloc_ENTREPRENEUR():
+    """LE CAS QUI EMPECHE LE DEFAUT. Avant le partage par categorie, TOUTES
+    les personnes du projet tombaient dans `contacts_entrepreneur` : un
+    contact client coche se serait imprime SOUS ENTREPRENEUR, en silence.
+    Ce cas garde aussi les VIEUX instantanes, ou le melange est deja ecrit."""
+    from modules.contacts_rapport import contacts_supplementaires
+    vieux = {"contacts_entrepreneur": [
+        {"role": "principal", "nom": "Simon"},
+        {"role": "construction", "nom": "Olivier"},
+        _MARC,
+    ]}
+    noms = [c["nom"] for c in contacts_supplementaires(vieux, "entrepreneur")]
+    assert noms == ["Olivier"], noms
+
+
+def test_les_deux_blocs_ne_se_MELANGENT_pas():
+    from modules.contacts_rapport import contacts_supplementaires
+    ident = {"contacts_entrepreneur": [{"role": "construction", "nom": "Olivier"}],
+             "contacts_client": [_MARC]}
+    assert [c["nom"] for c in contacts_supplementaires(ident, "entrepreneur")] == ["Olivier"]
+    assert [c["nom"] for c in contacts_supplementaires(ident, "client")] == ["Marc Tremblay"]
+
+
+def test_le_defaut_du_parametre_reste_ENTREPRENEUR():
+    """Tous les appels existants passent UN seul argument. Si le defaut
+    changeait, le bloc entrepreneur se viderait partout, sans erreur."""
+    from modules.contacts_rapport import contacts_supplementaires
+    ident = {"contacts_entrepreneur": [{"role": "construction", "nom": "Olivier"}]}
+    assert contacts_supplementaires(ident) == contacts_supplementaires(ident, "entrepreneur")
