@@ -30,24 +30,40 @@ LIBELLES_SECTION = {
 }
 
 
-def _liste(ident):
-    lst = (ident or {}).get("contacts_entrepreneur")
+# PARAMÉTRÉ PAR BLOC, PAS DUPLIQUÉ (5 oct. 2026). Le bloc CLIENT a maintenant
+# sa propre liste, `contacts_client`. Écrire une deuxième famille de fonctions
+# pour elle aurait refait, dans ce moteur, exactement ce qu'on a passé la
+# journée à retirer ailleurs : deux jumelles qui finissent par ne plus dire la
+# même chose. `bloc` vaut "entrepreneur" (défaut — tous les appels existants
+# restent justes) ou "client". Le miroir JS fait de même :
+# packages/report-pdf/src/contactsRapport.js, principalAffiche(ident, bloc).
+def _liste(ident, bloc="entrepreneur"):
+    lst = (ident or {}).get("contacts_%s" % bloc)
     return lst if isinstance(lst, list) else None
 
 
-def principal_affiche(ident) -> bool:
+def principal_affiche(ident, bloc="entrepreneur") -> bool:
     """La personne principale s'imprime-t-elle ? Oui si la liste est absente
     (identité d'avant le choix), sinon seulement si elle y figure."""
-    lst = _liste(ident)
+    lst = _liste(ident, bloc)
     if lst is None:
         return True
     return any((c or {}).get("role") == "principal" for c in lst)
 
 
-def contacts_supplementaires(ident) -> list:
-    """Les personnes cochées en plus de la principale, dans l'ordre du hub."""
-    lst = _liste(ident) or []
-    return [c for c in lst if (c or {}).get("role") != "principal"]
+def contacts_supplementaires(ident, bloc="entrepreneur") -> list:
+    """Les personnes cochées en plus de la principale, dans l'ordre du hub.
+
+    ⚠ FILET DE SÉCURITÉ POUR LES VIEUX INSTANTANÉS. Le partage par catégorie
+    se fait en amont (hub_service.map_project_to_identity). Mais un instantané
+    d'identité FIGÉ AVANT le 5 oct. 2026 porte les contacts client DANS
+    `contacts_entrepreneur` : sans ce filtre, un rapport réédité depuis un
+    vieux budget imprimerait un contact client sous ENTREPRENEUR. On l'écarte
+    ici aussi — une garde en amont ne protège pas ce qui est déjà écrit.
+    """
+    lst = _liste(ident, bloc) or []
+    exclus = {"principal"} if bloc == "client" else {"principal", "client"}
+    return [c for c in lst if (c or {}).get("role") not in exclus]
 
 
 def libelle_section(contact) -> str:

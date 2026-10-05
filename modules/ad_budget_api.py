@@ -561,14 +561,26 @@ def _build_client_entrepreneur_header(total_w, ident: dict, avec_dates: bool = T
             return f"<b>{label}</b> : {value}"
         return f"<b>{label}</b> : <font color='#94a3b8'>—</font>"
 
-    client_html = "<br/>".join([
+    # BLOC CLIENT (5 oct. 2026) — mêmes règles que le bloc ENTREPRENEUR, par
+    # les MÊMES fonctions, paramétrées par bloc. Simon : « la coche coché....
+    # idem entrepreneur ». Le contact principal est décochable, sa Fonction
+    # n'apparaît que si elle est renseignée, puis viennent les contacts du
+    # client cochés. Une identité SANS `contacts_client` (instantané d'avant)
+    # rend le bloc D'AVANT, à l'identique.
+    _lignes_client = [
         "<b><font size='10' color='#1e3a8a'>CLIENT</font></b>",
         field_line("Nom du projet", ident.get("nom")),
         field_line("Nom du client", ident.get("nom_client")),
-        field_line("Contact", ident.get("contact_client")),
-        field_line("Courriel", ident.get("email_client")),
-        field_line("Téléphone", ident.get("telephone_client")),
-    ])
+    ]
+    if principal_affiche(ident, "client"):
+        _lignes_client.append(field_line("Contact", ident.get("contact_client")))
+        if (ident.get("fonction_client") or "").strip():
+            _lignes_client.append(field_line("Fonction", ident.get("fonction_client")))
+        _lignes_client.append(field_line("Courriel", ident.get("email_client")))
+        _lignes_client.append(field_line("Téléphone", ident.get("telephone_client")))
+    for _lib, _val in lignes_supplementaires(contacts_supplementaires(ident, "client")):
+        _lignes_client.append(field_line(_lib, _val))
+    client_html = "<br/>".join(_lignes_client)
     # ENTREPRENEUR : titre sur toute la largeur, puis 2 sous-colonnes
     ent_heading_html = "<b><font size='10' color='#1e3a8a'>ENTREPRENEUR</font></b>"
     ent_left_html = "<br/>".join([
