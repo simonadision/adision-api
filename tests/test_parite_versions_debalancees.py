@@ -153,13 +153,39 @@ def test_le_banc_MORD_sur_une_vraie_divergence():
                "obtenu %+.2f. Le calcul lui-meme est faux." % d["ecart_courant"])
 
 
+def test_la_copie_locale_porte_l_EMPREINTE_CONVENUE():
+    """L'EMPREINTE EST FIGEE DANS LES DEUX DEPOTS, et c'est PC4 qui l'a exige.
+
+    Ma premiere version ne comparait les deux fixtures que si le depot frere
+    etait present — donc jamais en CI, puisque je dis moi-meme qu'il y est
+    absent. **La copie de tests/fixtures/ pouvait donc deriver sans que rien
+    ne rougisse, et ce banc serait reste vert sur une fixture perimee.**
+    C'est exactement la faute que je venais de corriger ailleurs : une garde
+    ecrite mais jamais appelee.
+
+    Avec une empreinte figee, modifier la fixture OBLIGE a changer la
+    constante DES DEUX COTES. Celui qui ne met a jour qu'un depot voit la CI
+    rougir — et c'est le seul signal qui traverse la frontiere entre deux
+    depots qui ne se voient pas.
+    """
+    EMPREINTE = "0d883d7e566358d1bf58333bf10105e2"
+    a = hashlib.md5(open(FIXTURE, "rb").read()).hexdigest()
+    if a != EMPREINTE:
+        _rouge(
+            "la fixture de tests/fixtures/ a change (%s au lieu de %s).\n"
+            "   Si c'est voulu : recopiez-la DANS LES DEUX DEPOTS et mettez a\n"
+            "   jour la constante EMPREINTE ici ET dans le controle du\n"
+            "   monorepo. Sinon la parite verifiee ici ne serait plus celle\n"
+            "   que l'ecran applique." % (a[:8], EMPREINTE[:8]))
+
+
 def test_la_copie_locale_est_IDENTIQUE_a_celle_du_monorepo():
-    """Quand le depot frere est la (poste de travail), les deux fixtures
-    doivent etre au bit pres les memes. En CI il est absent : ce cas ne peut
-    donc pas y echouer, mais les cas de parite ci-dessus, EUX, tournent
-    toujours — c'est tout l'interet de la copie."""
+    """Controle SUPPLEMENTAIRE, quand le depot frere est la (poste de travail) :
+    il attrape la divergence AVANT le push, sans attendre la CI. Il ne
+    remplace pas l'empreinte figee ci-dessus — il la double de maniere plus
+    directe quand c'est possible."""
     if not os.path.isfile(FRERE):
-        print("     (depot frere absent — identite des fixtures non verifiee ici)")
+        print("     (depot frere absent — l'empreinte figee prend le relais)")
         return
     a = hashlib.md5(open(FIXTURE, "rb").read()).hexdigest()
     b = hashlib.md5(open(FRERE, "rb").read()).hexdigest()
