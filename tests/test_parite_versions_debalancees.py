@@ -153,6 +153,41 @@ def test_le_banc_MORD_sur_une_vraie_divergence():
                "obtenu %+.2f. Le calcul lui-meme est faux." % d["ecart_courant"])
 
 
+def _empreinte(chemin):
+    """Empreinte du CONTENU de la fixture, pas de ses octets (PC4, 6 oct.).
+
+    La premiere version hachait les octets : le poste de travail (Windows,
+    git en CRLF) donnait 0d883d7e, le runner de la CI (Linux, LF) b80ed123
+    -- meme fichier, emballage different, CI rouge, et #111 bloquee alors
+    que V.1 l'attendait. On hache donc le JSON LU puis reecrit de facon
+    canonique : les fins de ligne, l'indentation et l'ordre des cles n'y
+    entrent plus ; un CHIFFRE ou un CAS change, si."""
+    with open(chemin, encoding="utf-8") as f:
+        d = json.load(f)
+    canon = json.dumps(d, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.md5(canon.encode("utf-8")).hexdigest()
+
+
+def test_l_empreinte_ignore_les_fins_de_ligne():
+    """Temoin du correctif : la meme fixture en CRLF et en LF a la meme
+    empreinte, et un chiffre change la change."""
+    import tempfile
+    brut = open(FIXTURE, "rb").read()
+    lf = brut.replace(b"\r\n", b"\n")
+    crlf = lf.replace(b"\n", b"\r\n")
+    autre = lf.replace(b"12500", b"12501", 1)
+    empreintes = []
+    for octets in (lf, crlf, autre):
+        with tempfile.NamedTemporaryFile("wb", suffix=".json", delete=False) as t:
+            t.write(octets)
+        empreintes.append(_empreinte(t.name))
+        os.unlink(t.name)
+    if empreintes[0] != empreintes[1]:
+        _rouge("LF et CRLF donnent deux empreintes : le controle depend encore des fins de ligne")
+    if empreintes[0] == empreintes[2]:
+        _rouge("un chiffre change ne change pas l'empreinte : le controle ne mord plus")
+
+
 def test_la_copie_locale_porte_l_EMPREINTE_CONVENUE():
     """L'EMPREINTE EST FIGEE DANS LES DEUX DEPOTS, et c'est PC4 qui l'a exige.
 
@@ -168,8 +203,8 @@ def test_la_copie_locale_porte_l_EMPREINTE_CONVENUE():
     rougir — et c'est le seul signal qui traverse la frontiere entre deux
     depots qui ne se voient pas.
     """
-    EMPREINTE = "0d883d7e566358d1bf58333bf10105e2"
-    a = hashlib.md5(open(FIXTURE, "rb").read()).hexdigest()
+    EMPREINTE = "f0d0910b60be871b1426c2a0116b87b8"
+    a = _empreinte(FIXTURE)
     if a != EMPREINTE:
         _rouge(
             "la fixture de tests/fixtures/ a change (%s au lieu de %s).\n"
@@ -187,8 +222,8 @@ def test_la_copie_locale_est_IDENTIQUE_a_celle_du_monorepo():
     if not os.path.isfile(FRERE):
         print("     (depot frere absent — l'empreinte figee prend le relais)")
         return
-    a = hashlib.md5(open(FIXTURE, "rb").read()).hexdigest()
-    b = hashlib.md5(open(FRERE, "rb").read()).hexdigest()
+    a = _empreinte(FIXTURE)
+    b = _empreinte(FRERE)
     if a != b:
         _rouge("la copie de tests/fixtures/ a DIVERGE de celle du monorepo "
                "(%s vs %s). La parite verifiee ici ne serait plus celle que "
