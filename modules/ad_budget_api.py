@@ -4088,14 +4088,66 @@ def register_ad_budget_routes(get_conn):
     VERSION_TOLERANCE_BASE = Decimal("0.005")
 
     def _lignes_pour_version(cur, projet_id, verrouiller=False):
+        """Les lignes débalançables, avec LEUR VRAI TOTAL.
+
+        ════════════════════════════════════════════════════════════════════
+        ⚠ LA COLONNE `total` NE PORTE QUE LES MATÉRIAUX.
+        ════════════════════════════════════════════════════════════════════
+        Trouvé par PC4 le 6 octobre 2026, mesuré sur « Rénovation intérieure
+        d'unités de logements » (1 209 lignes actives) :
+
+            Σ colonne `total` ....... 643 902,95 $
+            matériaux bruts ......... 643 902,95 $   ← IDENTIQUE
+            main-d'œuvre ............ 701 941,67 $   ← ABSENTE
+            sous-traitants ........ 1 438 171,00 $   ← ABSENTE
+            887 lignes sur 1 209 ont total = 0
+
+        Je lisais cette colonne comme si elle était le total de la ligne. Les
+        conséquences, toutes silencieuses :
+          1. le contrôle d'aperçu périmé comparait le `total_base` du client
+             (qui, lui, est le vrai total : mat + MO + ST) à la part
+             matériaux → **409 sur presque toutes les lignes, donc AUCUNE
+             version ne pouvait être créée** ;
+          2. le seuil du grand total était vérifié sur 643 903 $ au lieu de
+             2,78 M$ — il laissait donc passer des écarts quatre fois trop
+             grands ;
+          3. `derive_version` et `export-for-con` calculaient l'écart sur le
+             mauvais montant : Ad CON aurait affiché une fausse dérive.
+
+        ON PASSE PAR LA SOURCE UNIQUE. `budget_fingerprint._line_total` est la
+        fonction que `verifier_source_unique.py` garde, celle que l'écran
+        (`getRow`) et `compute_budget_totals` appliquent — production_valeur
+        prioritaire sur les heures, QTÉ=0 qui exclut le montant ST, les trois
+        ajustements puis l'ajustement global. **Le client et le serveur
+        calculent enfin la même chose**, et la fixture de parité garde son
+        sens : elle compare deux implémentations de LA MÊME règle.
+        """
+        from modules.budget_fingerprint import _line_total
+
+        cur.execute("SELECT arrondi_dollar FROM ad_budget.projets WHERE id = %s",
+                    (projet_id,))
+        prow = cur.fetchone()
+        arrondi = bool((prow or {}).get("arrondi_dollar"))
+
         # `unite` et `description` servent à RECALCULER l'exclusion côté
-        # serveur — on ne la prend pas du client.
+        # serveur — on ne la prend pas du client. Les autres champs sont ceux
+        # dont _line_total a besoin : en oublier un rendrait un total trop
+        # petit, SANS erreur.
         cur.execute(
-            "SELECT id, total, description, unite FROM ad_budget.budget_lignes "
+            "SELECT id, description, unite, qte, qte_facteur, prix_unitaire, "
+            "       heures, heures_manuelles, production_valeur, taux_horaire, "
+            "       sous_traitant_montant, ajust_materiaux, ajust_main_oeuvre, "
+            "       ajust_sous_traitant, ajustement_pct "
+            "FROM ad_budget.budget_lignes "
             "WHERE projet_id = %s AND actif IS NOT FALSE "
             "ORDER BY id" + (" FOR UPDATE" if verrouiller else ""),
             (projet_id,))
-        return {r["id"]: r for r in cur.fetchall()}
+        lignes = {}
+        for r in cur.fetchall():
+            d = dict(r)
+            d["total"] = _line_total(arrondi, d)
+            lignes[r["id"]] = d
+        return lignes
 
     # `derive_version` vit au NIVEAU DU MODULE (voir sa docstring) : c'est ce
     # qui la rend importable par le test de parité avec le JS. Tant qu'elle
