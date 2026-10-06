@@ -238,6 +238,72 @@ def test_emit_DECLARE_version_id_et_version_nom():
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# AD CON SUIT UNE VERSION (decision de Simon, 6 oct. 2026)
+# « Le chantier SUIT une version » : contrat convenu avec PC4.
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_export_for_con_accepte_version_id():
+    b = _bloc("export_projet_for_con")
+    if "version_id" not in b[:900]:
+        _rouge("export-for-con ne declare pas version_id : FastAPI l'ignorerait "
+               "et Ad CON afficherait l'original en croyant suivre une version")
+
+
+def test_une_version_INCONNUE_donne_404_jamais_l_original():
+    """LA REGLE QUI COMPTE. Servir l'original a la place d'une version
+    demandee, sans rien dire, c'est le defaut le plus cher de la semaine :
+    le chantier croit suivre V.1 et travaille sur autre chose."""
+    b = _bloc("export_projet_for_con")
+    if "status_code=404" not in b:
+        _rouge("une version inconnue ne donne pas 404 : l'original serait "
+               "servi en silence")
+    if "AND projet_id = %s" not in b:
+        _rouge("la version n'est pas bornee au projet : la version d'un AUTRE "
+               "projet serait appliquee")
+
+
+def test_la_version_SUPPRIMEE_reste_lisible():
+    """Un chantier qui suit une version ne doit pas perdre son budget parce
+    que quelqu'un a range. Coherent avec la suppression douce."""
+    b = _bloc("export_projet_for_con")
+    d = b.index("FROM ad_budget.versions_debalancees")
+    if "supprimee_le IS NULL" in b[d:d + 300]:
+        _rouge("export-for-con refuse une version supprimee : le chantier "
+               "perdrait son budget du jour au lendemain")
+
+
+def test_le_facteur_ne_touche_QUE_les_sous_totaux():
+    """Un debalancement deplace des MONTANTS. Il ne change ni un prix
+    unitaire, ni un taux horaire, ni un nombre d'heures — multiplier le taux
+    ferait mentir la feuille de production sur ce que coute une heure."""
+    b = _bloc("export_projet_for_con")
+    for interdit in ("prix_u *=", "taux *=", "heures *=", "qty_eff *="):
+        if interdit in b:
+            _rouge("le facteur de version s'applique a une valeur UNITAIRE "
+                   "(%s) : seuls les sous-totaux doivent bouger" % interdit)
+    for attendu in ("mat_subtotal *=", "mo_subtotal *=", "st_subtotal *="):
+        if attendu not in b:
+            _rouge("le facteur ne s'applique pas a %s" % attendu)
+
+
+def test_l_exclusion_est_RECALCULEE_dans_l_export():
+    b = _bloc("export_projet_for_con")
+    if "_ligne_hors_debalancement" not in b:
+        _rouge("l'export lit l'exclusion de la version au lieu de la "
+               "recalculer : une ligne « %% » serait etiree, et c'est la "
+               "boucle des 346 680 $ du 1er octobre")
+
+
+def test_la_cle_version_est_TOUJOURS_servie():
+    """Ne la servir que lorsqu'il y a derive empecherait Ad CON de distinguer
+    « pas de derive » de « j'ai oublie de demander la version »."""
+    b = _bloc("export_projet_for_con")
+    if '"version": (None if version_info is None' not in b:
+        _rouge("la cle « version » n'est pas toujours presente : une absence "
+               "voudrait dire deux choses a la fois")
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # ANTI-VACUITE
 # ══════════════════════════════════════════════════════════════════════════
 

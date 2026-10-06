@@ -4720,7 +4720,15 @@ def register_ad_budget_routes(get_conn):
         return {"projet_id": row["id"], "statut": row["statut"]}
 
     @router.get("/projets/{projet_id}/export-for-con")
-    def export_projet_for_con(projet_id: int, user=Depends(jwt_user),
+    def export_projet_for_con(projet_id: int,
+                              # LE CHANTIER SUIT UNE VERSION (Simon, 6 oct. 2026).
+                              # Sans ce paramètre, rien ne change : l'original.
+                              # Avec, les SOUS-TOTAUX sont recalculés depuis
+                              # l'original par les facteurs de la version — Ad CON
+                              # ne reçoit donc jamais une copie figée, et
+                              # l'original n'est jamais touché.
+                              version_id: Optional[int] = Query(None),
+                              user=Depends(jwt_user),
                               authorization: Optional[str] = Header(None), session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
         """Sprint 1.A Ad CON — Export du projet+lignes pour Ad CON.
 
@@ -4846,6 +4854,51 @@ def register_ad_budget_routes(get_conn):
         surface_gypse = surface_mur * 2
 
         # 4) Ventilation ligne par ligne + raw passthrough.
+        # ── LA VERSION SUIVIE, s'il y en a une ────────────────────────────
+        # Contrat convenu avec PC4 le 6 oct. 2026. Trois règles :
+        #   1. on lit la version MÊME SUPPRIMÉE — un chantier qui la suit ne
+        #      doit pas perdre son budget parce que quelqu'un a rangé ;
+        #   2. une version inconnue, ou d'un AUTRE projet, donne 404. **Jamais
+        #      l'original servi à sa place en silence** : Ad CON croirait
+        #      suivre V.1 en affichant autre chose, et rien ne le dirait ;
+        #   3. l'exclusion est RECALCULÉE ici, pas lue dans la version. Une
+        #      ligne « % » ou au mille se recalcule depuis le total : l'étirer
+        #      créerait la boucle que l'exclusion existe pour empêcher.
+        #      (PC4 a mesuré +620 $ sur ce défaut dans `derive_version`.)
+        version_info, facteurs_version = None, {}
+        if version_id is not None:
+            cur.execute(
+                "SELECT id, nom, facteurs, supprimee_le "
+                "FROM ad_budget.versions_debalancees "
+                "WHERE id = %s AND projet_id = %s",
+                (version_id, projet_id))
+            vrow = cur.fetchone()
+            if not vrow:
+                raise HTTPException(status_code=404, detail=(
+                    "La version %s n'existe pas pour ce projet. Le budget n'a "
+                    "PAS été servi : un chantier qui croit suivre une version "
+                    "ne doit jamais recevoir l'original sans le savoir."
+                    % version_id))
+            facteurs_version = vrow.get("facteurs") or {}
+            version_info = {
+                "id": vrow["id"],
+                "nom": vrow["nom"],
+                "supprimee_le": (vrow["supprimee_le"].isoformat()
+                                 if vrow.get("supprimee_le") else None),
+            }
+
+        def _facteur_de(row):
+            """1 par défaut, 1 si la ligne est exclue, sinon celui de la version."""
+            if not facteurs_version or _ligne_hors_debalancement(row):
+                return 1.0
+            entree = facteurs_version.get(str(row["id"]))
+            if not entree:
+                return 1.0
+            try:
+                return float(entree.get("facteur", 1))
+            except (TypeError, ValueError):
+                return 1.0
+
         lines_out = []
         contract_total = 0.0
         for idx, row in enumerate(budget_rows, start=1):
@@ -4883,6 +4936,19 @@ def register_ad_budget_routes(get_conn):
             # reste le montant BRUT saisi, non gaté — seul st_subtotal (la
             # contribution au contrat) est exclu tant que qté=0.
             st_subtotal = (st_amount * (1.0 + ajust_st / 100.0)) if qty_eff > 0 else 0.0
+
+            # LE FACTEUR DE LA VERSION S'APPLIQUE AUX SOUS-TOTAUX, JAMAIS AUX
+            # VALEURS UNITAIRES. Un débalancement déplace des MONTANTS entre
+            # lignes ; il ne change ni un prix unitaire, ni un taux horaire, ni
+            # un nombre d'heures. Multiplier le taux ferait mentir la feuille
+            # de production sur ce que coûte une heure de travail.
+            # Sans version, _facteur_de rend 1.0 : le calcul est inchangé.
+            _f = _facteur_de(row)
+            if _f != 1.0:
+                mat_subtotal *= _f
+                mo_subtotal *= _f
+                st_subtotal *= _f
+
             contract_total += mat_subtotal + mo_subtotal + st_subtotal
 
             lines_out.append({
@@ -4957,6 +5023,18 @@ def register_ad_budget_routes(get_conn):
                 "bud_schema_version": "v1.0",
                 "lines_count": len(lines_out),
             },
+            # LA VERSION SUIVIE, OU None — ET TOUJOURS PRÉSENTE.
+            # Si on ne la servait que lorsqu'il y a une dérive, Ad CON ne
+            # pourrait pas distinguer « pas de dérive » de « j'ai oublié de
+            # demander la version ». Une absence doit vouloir dire une seule
+            # chose. La dérive est calculée par la MÊME fonction que les
+            # écrans d'Ad BUD : une seule règle, vérifiée par la fixture de
+            # parité avec le JS.
+            "version": (None if version_info is None else {
+                **version_info,
+                "derive": derive_version(
+                    {r["id"]: r for r in budget_rows}, facteurs_version),
+            }),
             "project": {
                 # Phase 6 — identité depuis le hub (_ident). statut + ad_hub_project_id
                 # restent du projet local (propre / lien).
