@@ -167,6 +167,60 @@ def test_la_base_du_CLIENT_tolere_le_demi_cent():
                "cent, donc TOUT apercu a jour serait refuse")
 
 
+def test_le_total_d_une_ligne_vient_de_la_SOURCE_UNIQUE():
+    """⚠ LA COLONNE `total` NE PORTE QUE LES MATERIAUX.
+
+    Mesure du 6 oct. 2026 sur « Renovation interieure d'unites de logements »
+    (1 209 lignes actives), trouvee par PC4 :
+
+        Somme de la colonne `total` ...... 643 902,95 $
+        materiaux bruts .................. 643 902,95 $   <- IDENTIQUE
+        main-d'oeuvre .................... 701 941,67 $   <- ABSENTE
+        sous-traitants ................. 1 438 171,00 $   <- ABSENTE
+        887 lignes sur 1 209 valent 0
+
+    Le vrai total est **2 785 515 $**, soit 4,3 fois plus.
+
+    Tant que la route lisait cette colonne, AUCUNE version ne pouvait etre
+    creee : le client envoie le vrai total de ligne, le serveur comparait a la
+    part materiaux, et repondait 409 « ont change depuis votre apercu » sur
+    presque toutes les lignes. Le seuil du grand total etait verifie sur le
+    quart du montant, et Ad CON aurait affiche une fausse derive.
+
+    **Une colonne dont le NOM promet plus que son CONTENU est un piege qui ne
+    leve jamais.** On passe donc par `budget_fingerprint._line_total`, la
+    fonction que garde verifier_source_unique.py et qu'appliquent l'ecran
+    (getRow) et compute_budget_totals."""
+    b = _bloc("_lignes_pour_version")
+    # ⚠ ON CHERCHE L'AFFECTATION, PAS LE NOM.
+    # Ma premiere version cherchait « _line_total » n'importe ou dans le bloc.
+    # Un mutant qui RETIRAIT l'appel et laissait l'import la passait au VERT.
+    # C'est la troisieme fois le meme matin que je mesure un NOM au lieu d'un
+    # COMPORTEMENT : un nom present dans un fichier ne dit pas ce que le code
+    # FAIT.
+    if '["total"] = _line_total(' not in b:
+        _rouge("le total de ligne n'est pas AFFECTE depuis _line_total : il "
+               "resterait la part MATERIAUX seule (643 903 $ au lieu de "
+               "2 785 515 $ sur le projet 290), et aucune version ne pourrait "
+               "etre creee")
+    if "SELECT id, total," in b:
+        _rouge("la colonne `total` est relue comme total de ligne : elle ne "
+               "porte que les materiaux (643 903 $ au lieu de 2 785 515 $ sur "
+               "le projet 290)")
+    # _line_total a besoin de TOUS ces champs : en oublier un rendrait un
+    # total trop petit, SANS erreur.
+    for champ in ("qte", "prix_unitaire", "heures", "heures_manuelles",
+                  "production_valeur", "taux_horaire", "sous_traitant_montant",
+                  "ajust_materiaux", "ajust_main_oeuvre", "ajust_sous_traitant",
+                  "ajustement_pct", "qte_facteur"):
+        if champ not in b:
+            _rouge("« %s » n'est pas selectionne : _line_total le lirait a "
+                   "None et rendrait un total trop petit, en silence" % champ)
+    if "arrondi_dollar" not in b:
+        _rouge("l'option arrondi_dollar du projet n'est pas lue : le total "
+               "differerait de celui de l'ecran au cent pres")
+
+
 def test_les_lignes_sont_VERROUILLEES_pendant_l_ecriture():
     if "FOR UPDATE" not in _bloc("_lignes_pour_version"):
         _rouge("pas de FOR UPDATE : deux enregistrements simultanes liraient "
