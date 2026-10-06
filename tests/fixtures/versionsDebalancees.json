@@ -1,0 +1,242 @@
+{
+  "_lisez_moi": "Fixture de PARITÉ des versions débalancées (5 oct. 2026). Lue par appliquerVersion.test.js (JS) ET par le miroir Python d'adision-api. Les deux doivent rendre exactement les mêmes nombres. Ne modifier qu'en modifiant les deux côtés. « bases » = total de chaque ligne au moment du débalancement (total_base gardé par la version).",
+  "cas": [
+    {
+      "nom": "version qui balance : électricité +25 %, finitions compensent",
+      "lignes": [
+        {
+          "id": "e1",
+          "total": 10000,
+          "mat": 6000,
+          "mo": 4000,
+          "st": 0,
+          "unite": "u",
+          "description": "Électricité"
+        },
+        {
+          "id": "f1",
+          "total": 20000,
+          "mat": 12000,
+          "mo": 8000,
+          "st": 0,
+          "unite": "m2",
+          "description": "Finitions"
+        }
+      ],
+      "facteurs": {
+        "e1": 1.25,
+        "f1": 0.875
+      },
+      "attendu": {
+        "totaux": {
+          "e1": 12500,
+          "f1": 17500
+        },
+        "derive": {
+          "ecart_courant": 0,
+          "lignes_sans_facteur": 0,
+          "facteurs_orphelins": 0,
+          "lignes_modifiees": 0
+        }
+      },
+      "bases": {
+        "e1": 10000,
+        "f1": 20000
+      }
+    },
+    {
+      "nom": "ligne AJOUTÉE à l'original depuis : facteur 1, comptée sans facteur, la version balance encore",
+      "lignes": [
+        {
+          "id": "e1",
+          "total": 10000,
+          "unite": "u",
+          "description": "Électricité"
+        },
+        {
+          "id": "f1",
+          "total": 20000,
+          "unite": "m2",
+          "description": "Finitions"
+        },
+        {
+          "id": "n1",
+          "total": 3000,
+          "unite": "u",
+          "description": "Nouvelle ligne"
+        }
+      ],
+      "facteurs": {
+        "e1": 1.25,
+        "f1": 0.875
+      },
+      "attendu": {
+        "totaux": {
+          "e1": 12500,
+          "f1": 17500,
+          "n1": 3000
+        },
+        "derive": {
+          "ecart_courant": 0,
+          "lignes_sans_facteur": 1,
+          "facteurs_orphelins": 0,
+          "lignes_modifiees": 0
+        }
+      },
+      "bases": {
+        "e1": 10000,
+        "f1": 20000
+      }
+    },
+    {
+      "nom": "ligne SUPPRIMÉE de l'original depuis : facteur orphelin, et la version ne balance plus",
+      "lignes": [
+        {
+          "id": "f1",
+          "total": 20000,
+          "unite": "m2",
+          "description": "Finitions"
+        }
+      ],
+      "facteurs": {
+        "e1": 1.25,
+        "f1": 0.875
+      },
+      "attendu": {
+        "totaux": {
+          "f1": 17500
+        },
+        "derive": {
+          "ecart_courant": -2500,
+          "lignes_sans_facteur": 0,
+          "facteurs_orphelins": 1,
+          "lignes_modifiees": 0
+        }
+      },
+      "bases": {
+        "e1": 10000,
+        "f1": 20000
+      }
+    },
+    {
+      "nom": "ligne de l'original MODIFIÉE depuis : la version suit en temps réel, l'écart le dit",
+      "lignes": [
+        {
+          "id": "e1",
+          "total": 12000,
+          "unite": "u",
+          "description": "Électricité"
+        },
+        {
+          "id": "f1",
+          "total": 20000,
+          "unite": "m2",
+          "description": "Finitions"
+        }
+      ],
+      "facteurs": {
+        "e1": 1.25,
+        "f1": 0.875
+      },
+      "attendu": {
+        "totaux": {
+          "e1": 15000,
+          "f1": 17500
+        },
+        "derive": {
+          "ecart_courant": 500,
+          "lignes_sans_facteur": 0,
+          "facteurs_orphelins": 0,
+          "lignes_modifiees": 1
+        }
+      },
+      "bases": {
+        "e1": 10000,
+        "f1": 20000
+      }
+    },
+    {
+      "nom": "lignes « % » et au mille : jamais mises à l'échelle, jamais « sans facteur »",
+      "lignes": [
+        {
+          "id": "e1",
+          "total": 10000,
+          "unite": "u",
+          "description": "Électricité"
+        },
+        {
+          "id": "cont",
+          "total": 500,
+          "unite": "%",
+          "description": "Contingence"
+        },
+        {
+          "id": "caut",
+          "total": 120,
+          "unite": "u",
+          "description": "Cautionnement"
+        }
+      ],
+      "facteurs": {
+        "e1": 1,
+        "cont": 2,
+        "caut": 2
+      },
+      "attendu": {
+        "totaux": {
+          "e1": 10000,
+          "cont": 500,
+          "caut": 120
+        },
+        "derive": {
+          "ecart_courant": 0,
+          "lignes_sans_facteur": 0,
+          "facteurs_orphelins": 0,
+          "lignes_modifiees": 0
+        }
+      },
+      "bases": {
+        "e1": 10000,
+        "cont": 500,
+        "caut": 120
+      }
+    },
+    {
+      "nom": "objection PC3 : version ÉQUILIBRÉE (a 100 × 1,25 + b 100 × 0,75), puis a corrigée à 200 $ -- dérive +25 $, cause nommée",
+      "lignes": [
+        {
+          "id": "a",
+          "total": 200,
+          "unite": "u",
+          "description": "Corrigée"
+        },
+        {
+          "id": "b",
+          "total": 100,
+          "unite": "u",
+          "description": "Compense"
+        }
+      ],
+      "facteurs": {
+        "a": 1.25,
+        "b": 0.75
+      },
+      "bases": {
+        "a": 100,
+        "b": 100
+      },
+      "attendu": {
+        "totaux": {
+          "a": 250,
+          "b": 75
+        },
+        "derive": {
+          "ecart_courant": 25,
+          "lignes_sans_facteur": 0,
+          "facteurs_orphelins": 0,
+          "lignes_modifiees": 1
+        }
+      }
+    }
+  ]
+}

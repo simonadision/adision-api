@@ -69,6 +69,81 @@ def _ligne_hors_debalancement(ligne):
     famille que les 346 680 $ du 1er octobre."""
     unite = str((ligne or {}).get("unite") or "").strip()
     return unite == "%" or _regle_au_mille((ligne or {}).get("description")) is not None
+
+
+def derive_version(lignes, facteurs):
+    """L'écart d'une version et SA CAUSE.
+
+    Un écart sans cause est pire qu'un écart : Simon le verrait sans pouvoir
+    agir. On rend donc les trois raisons possibles.
+
+    ════════════════════════════════════════════════════════════════════════
+    POURQUOI CETTE FONCTION EST AU NIVEAU DU MODULE.
+    ════════════════════════════════════════════════════════════════════════
+    Elle vivait à l'intérieur de `register_ad_budget_routes`, donc elle
+    n'était IMPORTABLE PAR AUCUN TEST. C'est la vraie raison pour laquelle la
+    fixture de parité `packages/aggregates/src/__fixtures__/
+    versionsDebalancees.json` n'était lue par personne : on avait convenu d'un
+    test de parité avec le JS, et mon code n'était pas atteignable.
+    **Une fixture que personne n'ouvre est un décor : elle a l'air d'une
+    garantie et n'en est pas une.**
+
+    ════════════════════════════════════════════════════════════════════════
+    UNE LIGNE EXCLUE PREND FACTEUR 1, QUOI QUE DISE LA VERSION.
+    ════════════════════════════════════════════════════════════════════════
+    Trouvé par PC4 le 6 octobre 2026, et MESURÉ sur le cas 5 de la fixture :
+    « cont » (500 $, unité « % ») et « caut » (120 $, cautionnement) y portent
+    un facteur 2 À DESSEIN. Le JS attend des totaux INCHANGÉS et un écart de
+    0 ; cette fonction rendait **+620 $**.
+
+    Une ligne « % » ou au mille se recalcule depuis le total : l'étirer
+    créerait la boucle même que l'exclusion existe pour empêcher — la famille
+    des 346 680 $ du 1er octobre. L'exclusion est donc RECALCULÉE ici, jamais
+    lue dans la version : un facteur illégitime stocké par un client
+    quelconque ne doit pas pouvoir gonfler un budget.
+
+    Et une ligne exclue n'est comptée NI « sans facteur » NI « modifiée » :
+    elle n'est pas débalancée, donc elle n'a rien à expliquer.
+    """
+    ecart = Decimal("0")
+    sans_facteur, orphelins, modifiees = 0, 0, 0
+    for lid, ligne in lignes.items():
+        exclue = _ligne_hors_debalancement(ligne)
+        total = Decimal(str(ligne.get("total") or 0))
+        entree = (facteurs or {}).get(str(lid))
+        if entree is None:
+            # Ligne AJOUTÉE depuis le débalancement : facteur 1, donc elle
+            # entre telle quelle dans les deux sommes et ne creuse pas
+            # l'écart — mais elle explique pourquoi la version ne couvre plus
+            # tout le budget. Une ligne EXCLUE, elle, n'a jamais eu de facteur
+            # à avoir : la compter ici ferait dire à l'écran qu'il manque des
+            # facteurs alors que tout est en ordre.
+            if not exclue:
+                sans_facteur += 1
+            continue
+        f = Decimal("1") if exclue else Decimal(str(entree.get("facteur", 1)))
+        ecart += total * f - total
+        base = entree.get("base")
+        if (base is not None and not exclue
+                and Decimal(str(base)) != total):
+            modifiees += 1
+    # ON COMPARE EN TEXTE DES DEUX CÔTÉS.
+    # Cette boucle faisait `int(cle)` : une clé non numérique levait une
+    # ValueError et la route entière sortait en 500, sans nommer la cause.
+    # En production les ids sont des entiers, mais les facteurs viennent d'un
+    # JSONB écrit par un client — on ne construit pas un calcul d'argent sur
+    # la confiance qu'un client enverra toujours ce qu'on attend.
+    connues = {str(k) for k in lignes}
+    for cle in (facteurs or {}):
+        if str(cle) not in connues:
+            # Ligne SUPPRIMÉE : son facteur ne s'applique plus à rien. La
+            # version a donc dérivé par SOUSTRACTION — symétrique de l'ajout,
+            # et aussi silencieuse si on ne la compte pas.
+            orphelins += 1
+    return {"ecart_courant": float(ecart.quantize(Decimal("0.01"))),
+            "lignes_sans_facteur": sans_facteur,
+            "facteurs_orphelins": orphelins,
+            "lignes_modifiees": modifiees}
 from modules.aggregates import heures_effectives as _heures_effectives
 from modules.aggregates import quantite_effective
 from modules.lots_calc import compute_lot_totals
@@ -4022,40 +4097,10 @@ def register_ad_budget_routes(get_conn):
             (projet_id,))
         return {r["id"]: r for r in cur.fetchall()}
 
-    def _derive(lignes, facteurs):
-        """L'écart d'une version et SA CAUSE.
-
-        Un écart sans cause est pire qu'un écart : Simon le verrait sans
-        pouvoir agir. On rend donc les trois raisons possibles.
-        """
-        ecart = Decimal("0")
-        sans_facteur, orphelins, modifiees = 0, 0, 0
-        for lid, ligne in lignes.items():
-            total = Decimal(str(ligne.get("total") or 0))
-            entree = (facteurs or {}).get(str(lid))
-            if entree is None:
-                # Ligne AJOUTÉE depuis le débalancement : facteur 1, donc elle
-                # entre telle quelle dans les deux sommes et ne creuse pas
-                # l'écart — mais elle explique pourquoi la version ne couvre
-                # plus tout le budget.
-                sans_facteur += 1
-                continue
-            f = Decimal(str(entree.get("facteur", 1)))
-            ecart += total * f - total
-            base = entree.get("base")
-            if (base is not None and not entree.get("exclue")
-                    and Decimal(str(base)) != total):
-                modifiees += 1
-        for cle in (facteurs or {}):
-            if int(cle) not in lignes:
-                # Ligne SUPPRIMÉE : son facteur ne s'applique plus à rien. La
-                # version a donc dérivé par SOUSTRACTION — symétrique de
-                # l'ajout, et aussi silencieuse si on ne la compte pas.
-                orphelins += 1
-        return {"ecart_courant": float(ecart.quantize(Decimal("0.01"))),
-                "lignes_sans_facteur": sans_facteur,
-                "facteurs_orphelins": orphelins,
-                "lignes_modifiees": modifiees}
+    # `derive_version` vit au NIVEAU DU MODULE (voir sa docstring) : c'est ce
+    # qui la rend importable par le test de parité avec le JS. Tant qu'elle
+    # était ici, la fixture convenue avec PC4 ne pouvait être lue par personne.
+    _derive = derive_version
 
     def _version_resumee(r, derive=None):
         return {
@@ -4104,12 +4149,32 @@ def register_ad_budget_routes(get_conn):
         """
         lignes = _lignes_pour_version(cur, projet_id, verrouiller=True)
 
+        # LE MESSAGE DOIT NOMMER LA BONNE CAUSE.
+        # `_lignes_pour_version` filtre `actif IS NOT FALSE` : une ligne
+        # DÉSACTIVÉE est absente de `lignes` tout en existant encore. Le
+        # message disait « n'existent plus », ce qui envoyait chercher une
+        # suppression qui n'a pas eu lieu. PC4 l'a relevé le 6 octobre.
+        # Un message qui nomme mal la cause oblige le suivant à refaire
+        # l'enquête — c'est le coût caché de chaque approximation.
         manquantes = sorted(set(voulu) - set(lignes))
         if manquantes:
+            cur.execute(
+                "SELECT id FROM ad_budget.budget_lignes "
+                "WHERE projet_id = %s AND id = ANY(%s)",
+                (projet_id, list(manquantes)))
+            desactivees = sorted(r["id"] for r in cur.fetchall())
+            absentes = [x for x in manquantes if x not in set(desactivees)]
+            morceaux = []
+            if desactivees:
+                morceaux.append("%d DÉSACTIVÉE(S) (%s)" % (
+                    len(desactivees), ", ".join(str(x) for x in desactivees[:5])))
+            if absentes:
+                morceaux.append("%d SUPPRIMÉE(S) (%s)" % (
+                    len(absentes), ", ".join(str(x) for x in absentes[:5])))
             raise HTTPException(status_code=422, detail=(
-                "%d ligne(s) visée(s) n'existent plus dans ce projet (%s). "
+                "%d ligne(s) visée(s) ne sont plus débalançables : %s. "
                 "Rafraîchissez le récapitulatif."
-                % (len(manquantes), ", ".join(str(x) for x in manquantes[:5]))))
+                % (len(manquantes), " et ".join(morceaux))))
 
         # L'APERÇU DU CLIENT ÉTAIT-IL À JOUR ? On compare SA base à la nôtre.
         # Un autre poste a pu modifier une ligne pendant que Simon regardait :
@@ -4154,7 +4219,15 @@ def register_ad_budget_routes(get_conn):
         apres = Decimal("0")
         for lid, ligne in lignes.items():
             total = Decimal(str(ligne["total"] or 0))
-            f = voulu[lid]["facteur"] if lid in voulu else Decimal("1")
+            # UNE LIGNE EXCLUE VAUT 1, QUOI QUE LE CLIENT AIT ENVOYÉ.
+            # Trouvé par PC4 le 6 oct. Son client envoie bien 1, mais un autre
+            # pourrait envoyer 2 — et alors deux fautes se compenseraient ici
+            # sans que rien ne le dise. Surtout : le cas 5 de la fixture de
+            # parité porte un facteur 2 sur « cont » et « caut » À DESSEIN, et
+            # le JS la tient pour équilibrée. Sans cette ligne, le serveur
+            # REFUSERAIT en 409 une version parfaitement valide.
+            f = (Decimal("1") if _ligne_hors_debalancement(ligne)
+                 else (voulu[lid]["facteur"] if lid in voulu else Decimal("1")))
             apres += total * f
         ecart_cents = int((apres - avant) * 100)
         if abs(ecart_cents) > VERSION_SEUIL_CENTS:
@@ -4164,7 +4237,13 @@ def register_ad_budget_routes(get_conn):
                 "ne pas faire." % f"{(apres - avant):+,.2f}"))
 
         # LA BASE ENREGISTRÉE EST CELLE DU SERVEUR, lue à l'instant, sous verrou.
-        return ({str(lid): {"facteur": float(v["facteur"]),
+        # ET LE FACTEUR D'UNE LIGNE EXCLUE EST RAMENÉ À 1 AVANT D'ÊTRE STOCKÉ.
+        # Le refuser en 409 serait pire : on bloquerait un client correct pour
+        # une valeur qu'on sait recalculer. Mais la STOCKER telle quelle
+        # laisserait un facteur illégitime dormir dans la base, prêt à gonfler
+        # un budget le jour où quelqu'un lira cette version sans recalculer.
+        return ({str(lid): {"facteur": (1.0 if _ligne_hors_debalancement(lignes[lid])
+                                        else float(v["facteur"])),
                             "base": float(Decimal(str(lignes[lid]["total"] or 0))),
                             "exclue": v["exclue"]}
                  for lid, v in voulu.items()},
