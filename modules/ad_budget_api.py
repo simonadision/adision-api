@@ -4114,6 +4114,46 @@ def register_ad_budget_routes(get_conn):
             "derive": derive,
         }
 
+    def _refuser_caractere_nul(data):
+        """Un caractère nul fait tomber PostgreSQL — en 500, qui ne dit rien.
+
+        PC4 l'a rencontré le 6 octobre 2026 sur son brouillon de débalancement :
+        en mode détaillé, les clés de rangée sont « groupe\\u0000description »,
+        et PostgreSQL répond « unsupported Unicode escape sequence /
+        \\u0000 cannot be converted to text » — en TEXT comme en JSONB. Ses
+        saisies étaient perdues au rechargement, et le message ne nommait rien.
+
+        **Un 500 oblige celui qui le reçoit à deviner. Un 422 qui nomme le
+        caractère lui dit quoi corriger.** Son client encode désormais ses clés
+        en `encodeURIComponent` ; cette garde protège tout autre client, et
+        nous-mêmes le jour où un nom de version viendra d'ailleurs.
+
+        On REFUSE, on ne nettoie pas : retirer silencieusement un caractère
+        d'une donnée qu'on nous confie, c'est enregistrer autre chose que ce
+        qui a été envoyé — exactement ce qu'on passe la semaine à corriger.
+        """
+        def _parcourir(x, chemin="corps"):
+            if isinstance(x, str):
+                if "\x00" in x:
+                    raise HTTPException(status_code=422, detail=(
+                        "Un caractère nul (\\u0000) a été reçu dans « %s ». "
+                        "PostgreSQL ne peut pas le stocker : rien n'a été "
+                        "enregistré. Encodez la valeur (encodeURIComponent) "
+                        "avant de l'envoyer." % chemin))
+            elif isinstance(x, dict):
+                for k, v in x.items():
+                    if isinstance(k, str) and "\x00" in k:
+                        raise HTTPException(status_code=422, detail=(
+                            "Un caractère nul (\\u0000) a été reçu dans une CLÉ "
+                            "sous « %s ». PostgreSQL ne peut pas le stocker : "
+                            "rien n'a été enregistré. Encodez la clé "
+                            "(encodeURIComponent) avant de l'envoyer." % chemin))
+                    _parcourir(v, "%s.%s" % (chemin, k))
+            elif isinstance(x, (list, tuple)):
+                for i, v in enumerate(x):
+                    _parcourir(v, "%s[%d]" % (chemin, i))
+        _parcourir(data)
+
     def _facteurs_depuis_charge(data):
         """Normalise `facteurs: [{ligne_id, facteur, total_base?, exclue?}]`.
 
@@ -4304,6 +4344,7 @@ def register_ad_budget_routes(get_conn):
     @router.post("/projets/{projet_id}/versions", status_code=201)
     def creer_version(projet_id: int, data: dict = Body(...), user=Depends(jwt_user)):
         _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        _refuser_caractere_nul(data)
         nom = ((data or {}).get("nom") or "").strip()
         if not nom:
             raise HTTPException(status_code=400, detail="Un nom est requis.")
@@ -4360,6 +4401,7 @@ def register_ad_budget_routes(get_conn):
         le régime normal, remettre en balance doit coûter un geste, pas une
         suppression suivie d'une recréation."""
         _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        _refuser_caractere_nul(data)
         voulu = _facteurs_depuis_charge(data)
         nom = ((data or {}).get("nom") or "").strip() or None
 
@@ -7927,6 +7969,18 @@ def register_ad_budget_routes(get_conn):
         # document -- l'appelant n'a donc rien a savoir de la taxonomie du HUB,
         # il dit seulement ce qu'il publie.
         mode: Optional[str] = Query(None),
+        # QUELLE VERSION A ÉTÉ IMPRIMÉE (PC4, 6 oct. 2026).
+        # Son client les envoie déjà quand le récapitulatif montre une version
+        # débalancée. **FastAPI les IGNORE tant qu'ils ne sont pas déclarés** :
+        # le client enverrait, le serveur répondrait 200, et la donnée
+        # disparaîtrait EN SILENCE. Un 200 qui perd ce qu'on lui confie est
+        # pire qu'un refus — c'est la faute qu'on passe la semaine à retirer.
+        # On les enregistre avec le rapport pour qu'une réimpression retrouve
+        # la version MÊME SUPPRIMÉE : d'où la suppression douce côté versions,
+        # et le fait que GET /versions/{id} serve aussi les supprimées. Un
+        # rapport parti chez un client doit pouvoir ressortir identique.
+        version_id: Optional[int] = Query(None),
+        version_nom: Optional[str] = Query(None),
         user=Depends(jwt_user),
         authorization: Optional[str] = Header(None),
         session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
@@ -8027,8 +8081,22 @@ def register_ad_budget_routes(get_conn):
             # récapitulatif existe en huit versions et l'Espace Rapports doit
             # dire laquelle il montre, pas huit lignes identiques.
             "titre": (titre or "").strip() or f"Récapitulatif — {projet.get('nom') or ''}".strip(" —"),
-            "snapshot_data": "{}",
+            # LA VERSION IMPRIMÉE EST ENREGISTRÉE AVEC LE RAPPORT.
+            # Sans ça, une réimpression ne saurait pas si le document parti
+            # chez le client montrait l'original ou une version débalancée —
+            # et deux PDF au même titre porteraient des montants différents
+            # sans que rien ne les distingue.
+            "snapshot_data": json.dumps(
+                {"version_id": version_id, "version_nom": version_nom}
+                if version_id is not None else {}),
         }
+        # Le titre DIT la version. L'Espace Rapports liste des titres : deux
+        # récapitulatifs du même projet, l'un original l'autre débalancé,
+        # doivent se distinguer à l'œil, pas seulement dans les données.
+        if version_nom and not (titre or "").strip():
+            fields["titre"] = "%s — %s" % (fields["titre"], version_nom.strip())
+        if version_nom:
+            fields["revision_label"] = version_nom.strip()
         try:
             result = hub_service.post_report(jwt_token, int(hub_pid), pdf_bytes, fields)
         except hub_service.HubServiceError as e:

@@ -196,6 +196,48 @@ def test_la_migration_declare_la_table_et_le_nom_unique():
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# LE CARACTERE NUL, ET LA VERSION IMPRIMEE
+# (deux points trouves par PC4 le 6 oct. 2026 en branchant son client)
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_le_caractere_nul_est_REFUSE_en_422_et_la_garde_est_BRANCHEE():
+    """PostgreSQL ne stocke pas \\u0000, ni en TEXT ni en JSONB : il repond
+    500, qui ne nomme rien. PC4 y a perdu ses saisies le matin meme.
+
+    ⚠ LE POINT QUI COMPTE EST LE SECOND : une garde DEFINIE mais JAMAIS
+    APPELEE ne garde rien, et se relit comme une protection. Les deux routes
+    d'ecriture doivent l'invoquer."""
+    code = _code_seul()
+    if "def _refuser_caractere_nul" not in code:
+        _rouge("aucune garde sur le caractere nul : un client qui en envoie un "
+               "recoit un 500 muet et perd sa saisie")
+    for nom in ("creer_version", "maj_version"):
+        if "_refuser_caractere_nul(data)" not in _bloc(nom):
+            _rouge("%s n'APPELLE pas _refuser_caractere_nul : la garde existe "
+                   "mais ne protege pas cette route" % nom)
+    if "status_code=422" not in _bloc("_refuser_caractere_nul"):
+        _rouge("la garde ne rend pas 422 : un refus doit nommer sa cause")
+
+
+def test_emit_DECLARE_version_id_et_version_nom():
+    """FastAPI IGNORE un parametre non declare : le client enverrait, le
+    serveur repondrait 200, et la donnee disparaitrait EN SILENCE. Un 200 qui
+    perd ce qu'on lui confie est pire qu'un refus."""
+    code = _code_seul()
+    d = code.index("def emit_recap_to_hub(")
+    signature = code[d:code.index("):", d)]
+    for p in ("version_id", "version_nom"):
+        if p not in signature:
+            _rouge("emit_recap_to_hub ne declare pas « %s » : FastAPI l'ignore, "
+                   "le client croit l'avoir transmis, et une reimpression ne "
+                   "saura jamais quelle version est partie chez le client" % p)
+    corps = code[d:d + 6000]
+    if "snapshot_data" not in corps or "version_id" not in corps.split("snapshot_data")[1][:400]:
+        _rouge("la version declaree n'est pas ENREGISTREE avec le rapport : "
+               "la declarer sans la ranger ne change rien")
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # ANTI-VACUITE
 # ══════════════════════════════════════════════════════════════════════════
 
