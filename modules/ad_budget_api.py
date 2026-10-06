@@ -8,6 +8,13 @@ from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
+import logging
+# VERSIONS DÉBALANCÉES (5 oct. 2026) : les montants et les facteurs se
+# comparent en Decimal, jamais en float. On vérifie ici que le grand total NE
+# BOUGE PAS — un écart de virgule flottante ferait refuser une version
+# pourtant juste, ou pire, en laisserait passer une fausse.
+from decimal import Decimal, InvalidOperation
+
 import httpx
 import openpyxl
 from fastapi import APIRouter, Body, Cookie, Depends, Header, HTTPException, Query, UploadFile
@@ -20,6 +27,123 @@ from modules.contacts_rapport import principal_affiche, contacts_supplementaires
 from modules import con_service, hub_service, mat_service, typ_service
 from modules.ad_budget_constants import AD_VIU_BLINDSPOT_DIVISIONS
 from modules.aggregates import adapt_budget_lines, compute_aggregates, _js_round
+
+# Ce module n'avait PAS de journal. Les gestionnaires d'erreur des versions
+# débalancées s'en servent : sans cette ligne, `logger` lèverait un NameError
+# **dans la branche d'erreur** — exactement quand quelque chose a déjà échoué.
+# La vraie cause serait masquée par la panne de l'instrument censé la rapporter.
+logger = logging.getLogger("ad_budget_api")
+
+
+# ── L'EXCLUSION EST CALCULÉE PAR LE SERVEUR, PAS ANNONCÉE PAR LE CLIENT ──
+# Miroir strict de `ligneHorsDebalancement` (@adision/aggregates,
+# debalancer.js) : `estLignePourcentage(unite) || !!regleAuMille(description)`.
+#
+# POURQUOI LE SERVEUR LA REFAIT. PC4 m'a retourné mon propre principe — « on
+# ne fait pas confiance, on compare » — et il avait raison : un aperçu
+# périmé marquerait « non exclue » une ligne passée en « % » entre-temps,
+# et on la mettrait à l'échelle. Le `exclue` envoyé par le client sert donc
+# de CONTRÔLE, comme `total_base`.
+#
+# ⚠ CE MIROIR ET SON ORIGINAL DOIVENT DIRE LA MÊME CHOSE. La fixture
+# partagée (`packages/aggregates/src/__fixtures__/versionsDebalancees.json`)
+# est lue par les DEUX, sans copie — c'est elle qui le garantit, pas la
+# relecture.
+_ACCENTS = str.maketrans("àâäáãåçéèêëíìîïñóòôöõúùûüýÿ",
+                         "aaaaaaceeeeiiiinooooouuuuyy")
+
+def _normaliser(texte):
+    return str(texte or "").translate(_ACCENTS).lower()
+
+def _regle_au_mille(description):
+    d = _normaliser(description)
+    if re.search(r"\bcautionnements?\b", d):
+        return "avecTaxes"
+    if re.search(r"\bassurances?\b", d):
+        return "avantTaxes"
+    return None
+
+def _ligne_hors_debalancement(ligne):
+    """Une ligne « % » ou au mille ne se met JAMAIS à l'échelle : elle se
+    recalcule depuis le total, donc l'étirer créerait une boucle — la même
+    famille que les 346 680 $ du 1er octobre."""
+    unite = str((ligne or {}).get("unite") or "").strip()
+    return unite == "%" or _regle_au_mille((ligne or {}).get("description")) is not None
+
+
+def derive_version(lignes, facteurs):
+    """L'écart d'une version et SA CAUSE.
+
+    Un écart sans cause est pire qu'un écart : Simon le verrait sans pouvoir
+    agir. On rend donc les trois raisons possibles.
+
+    ════════════════════════════════════════════════════════════════════════
+    POURQUOI CETTE FONCTION EST AU NIVEAU DU MODULE.
+    ════════════════════════════════════════════════════════════════════════
+    Elle vivait à l'intérieur de `register_ad_budget_routes`, donc elle
+    n'était IMPORTABLE PAR AUCUN TEST. C'est la vraie raison pour laquelle la
+    fixture de parité `packages/aggregates/src/__fixtures__/
+    versionsDebalancees.json` n'était lue par personne : on avait convenu d'un
+    test de parité avec le JS, et mon code n'était pas atteignable.
+    **Une fixture que personne n'ouvre est un décor : elle a l'air d'une
+    garantie et n'en est pas une.**
+
+    ════════════════════════════════════════════════════════════════════════
+    UNE LIGNE EXCLUE PREND FACTEUR 1, QUOI QUE DISE LA VERSION.
+    ════════════════════════════════════════════════════════════════════════
+    Trouvé par PC4 le 6 octobre 2026, et MESURÉ sur le cas 5 de la fixture :
+    « cont » (500 $, unité « % ») et « caut » (120 $, cautionnement) y portent
+    un facteur 2 À DESSEIN. Le JS attend des totaux INCHANGÉS et un écart de
+    0 ; cette fonction rendait **+620 $**.
+
+    Une ligne « % » ou au mille se recalcule depuis le total : l'étirer
+    créerait la boucle même que l'exclusion existe pour empêcher — la famille
+    des 346 680 $ du 1er octobre. L'exclusion est donc RECALCULÉE ici, jamais
+    lue dans la version : un facteur illégitime stocké par un client
+    quelconque ne doit pas pouvoir gonfler un budget.
+
+    Et une ligne exclue n'est comptée NI « sans facteur » NI « modifiée » :
+    elle n'est pas débalancée, donc elle n'a rien à expliquer.
+    """
+    ecart = Decimal("0")
+    sans_facteur, orphelins, modifiees = 0, 0, 0
+    for lid, ligne in lignes.items():
+        exclue = _ligne_hors_debalancement(ligne)
+        total = Decimal(str(ligne.get("total") or 0))
+        entree = (facteurs or {}).get(str(lid))
+        if entree is None:
+            # Ligne AJOUTÉE depuis le débalancement : facteur 1, donc elle
+            # entre telle quelle dans les deux sommes et ne creuse pas
+            # l'écart — mais elle explique pourquoi la version ne couvre plus
+            # tout le budget. Une ligne EXCLUE, elle, n'a jamais eu de facteur
+            # à avoir : la compter ici ferait dire à l'écran qu'il manque des
+            # facteurs alors que tout est en ordre.
+            if not exclue:
+                sans_facteur += 1
+            continue
+        f = Decimal("1") if exclue else Decimal(str(entree.get("facteur", 1)))
+        ecart += total * f - total
+        base = entree.get("base")
+        if (base is not None and not exclue
+                and Decimal(str(base)) != total):
+            modifiees += 1
+    # ON COMPARE EN TEXTE DES DEUX CÔTÉS.
+    # Cette boucle faisait `int(cle)` : une clé non numérique levait une
+    # ValueError et la route entière sortait en 500, sans nommer la cause.
+    # En production les ids sont des entiers, mais les facteurs viennent d'un
+    # JSONB écrit par un client — on ne construit pas un calcul d'argent sur
+    # la confiance qu'un client enverra toujours ce qu'on attend.
+    connues = {str(k) for k in lignes}
+    for cle in (facteurs or {}):
+        if str(cle) not in connues:
+            # Ligne SUPPRIMÉE : son facteur ne s'applique plus à rien. La
+            # version a donc dérivé par SOUSTRACTION — symétrique de l'ajout,
+            # et aussi silencieuse si on ne la compte pas.
+            orphelins += 1
+    return {"ecart_courant": float(ecart.quantize(Decimal("0.01"))),
+            "lignes_sans_facteur": sans_facteur,
+            "facteurs_orphelins": orphelins,
+            "lignes_modifiees": modifiees}
 from modules.aggregates import heures_effectives as _heures_effectives
 from modules.aggregates import quantite_effective
 from modules.lots_calc import compute_lot_totals
@@ -3934,6 +4058,425 @@ def register_ad_budget_routes(get_conn):
             _mark_budget_dirty_if_emitted(projet_id)
         return updated
 
+    # ═════════════════════════════════════════════════════════════════
+    # VERSIONS DÉBALANCÉES — des facteurs, jamais une copie
+    # ═════════════════════════════════════════════════════════════════
+    # Simon, 5 oct. 2026 : « les versions débalancées existent en VERSION… et
+    # doivent être accessibles dans AD CON EN TEMPS RÉEL », et « **rien ne
+    # peut toucher à l'original** ».
+    #
+    # CES ROUTES N'ÉCRIVENT JAMAIS DANS `budget_lignes`. Une version porte des
+    # FACTEURS ; ses montants se recalculent à la lecture. C'est ce qui rend
+    # « temps réel » possible : Simon corrige une ligne, la version suit.
+    #
+    # L'ÉCRAN CALCULE, LE SERVEUR VÉRIFIE. On ne refait pas l'arithmétique —
+    # on contrôle que Σ(total × facteur) == Σ(total) au seuil près. « Le grand
+    # total ne bouge pas » EST la fonction ; le jour où un facteur sera faux,
+    # rien ne doit s'enregistrer.
+    #
+    # ⚠ LE SEUIL VAUT À L'ÉCRITURE, JAMAIS À LA LECTURE. Une version DÉRIVE
+    # dès qu'une ligne débalancée change de montant — ligne à 100 $ ×1,25
+    # corrigée à 200 $ : écart +25 $, sans qu'aucune ligne n'ait été ajoutée.
+    # **C'est le régime normal.** On refuse d'enregistrer une version qui ne
+    # balance pas ; on ne refuse JAMAIS d'en lire une qui a dérivé, on la sert
+    # avec son écart. Appliquer le seuil ici ferait cesser Ad CON d'afficher
+    # un budget parce qu'il a dérivé de 25 $.
+    VERSION_SEUIL_CENTS = 100  # 1,00 $ sur l'ensemble du budget
+    # L'écran arrondit `total_base` AU CENT (`getRow(l).total`). Comparer au
+    # centième exact rejetterait donc des aperçus parfaitement à jour. On
+    # tolère le demi-cent : au-delà, la ligne a vraiment changé.
+    VERSION_TOLERANCE_BASE = Decimal("0.005")
+
+    def _lignes_pour_version(cur, projet_id, verrouiller=False):
+        # `unite` et `description` servent à RECALCULER l'exclusion côté
+        # serveur — on ne la prend pas du client.
+        cur.execute(
+            "SELECT id, total, description, unite FROM ad_budget.budget_lignes "
+            "WHERE projet_id = %s AND actif IS NOT FALSE "
+            "ORDER BY id" + (" FOR UPDATE" if verrouiller else ""),
+            (projet_id,))
+        return {r["id"]: r for r in cur.fetchall()}
+
+    # `derive_version` vit au NIVEAU DU MODULE (voir sa docstring) : c'est ce
+    # qui la rend importable par le test de parité avec le JS. Tant qu'elle
+    # était ici, la fixture convenue avec PC4 ne pouvait être lue par personne.
+    _derive = derive_version
+
+    def _version_resumee(r, derive=None):
+        return {
+            "id": r["id"], "nom": r["nom"],
+            "cree_le": r["cree_le"].isoformat() if r.get("cree_le") else None,
+            "par": r.get("cree_par"),
+            "maj_le": r["maj_le"].isoformat() if r.get("maj_le") else None,
+            "nb_facteurs": r.get("nb_facteurs") or 0,
+            "supprimee_le": (r["supprimee_le"].isoformat()
+                             if r.get("supprimee_le") else None),
+            "derive": derive,
+        }
+
+    def _refuser_caractere_nul(data):
+        """Un caractère nul fait tomber PostgreSQL — en 500, qui ne dit rien.
+
+        PC4 l'a rencontré le 6 octobre 2026 sur son brouillon de débalancement :
+        en mode détaillé, les clés de rangée sont « groupe\\u0000description »,
+        et PostgreSQL répond « unsupported Unicode escape sequence /
+        \\u0000 cannot be converted to text » — en TEXT comme en JSONB. Ses
+        saisies étaient perdues au rechargement, et le message ne nommait rien.
+
+        **Un 500 oblige celui qui le reçoit à deviner. Un 422 qui nomme le
+        caractère lui dit quoi corriger.** Son client encode désormais ses clés
+        en `encodeURIComponent` ; cette garde protège tout autre client, et
+        nous-mêmes le jour où un nom de version viendra d'ailleurs.
+
+        On REFUSE, on ne nettoie pas : retirer silencieusement un caractère
+        d'une donnée qu'on nous confie, c'est enregistrer autre chose que ce
+        qui a été envoyé — exactement ce qu'on passe la semaine à corriger.
+        """
+        def _parcourir(x, chemin="corps"):
+            if isinstance(x, str):
+                if "\x00" in x:
+                    raise HTTPException(status_code=422, detail=(
+                        "Un caractère nul (\\u0000) a été reçu dans « %s ». "
+                        "PostgreSQL ne peut pas le stocker : rien n'a été "
+                        "enregistré. Encodez la valeur (encodeURIComponent) "
+                        "avant de l'envoyer." % chemin))
+            elif isinstance(x, dict):
+                for k, v in x.items():
+                    if isinstance(k, str) and "\x00" in k:
+                        raise HTTPException(status_code=422, detail=(
+                            "Un caractère nul (\\u0000) a été reçu dans une CLÉ "
+                            "sous « %s ». PostgreSQL ne peut pas le stocker : "
+                            "rien n'a été enregistré. Encodez la clé "
+                            "(encodeURIComponent) avant de l'envoyer." % chemin))
+                    _parcourir(v, "%s.%s" % (chemin, k))
+            elif isinstance(x, (list, tuple)):
+                for i, v in enumerate(x):
+                    _parcourir(v, "%s[%d]" % (chemin, i))
+        _parcourir(data)
+
+    def _facteurs_depuis_charge(data):
+        """Normalise `facteurs: [{ligne_id, facteur, total_base?, exclue?}]`.
+
+        `total_base` envoyé par le client N'EST PAS CONSERVÉ : il sert à le
+        CONTRÔLER. Le serveur enregistre SA propre base, lue sous FOR UPDATE —
+        l'aperçu de l'écran peut avoir plusieurs minutes, et enregistrer sa
+        vision ferait calculer la dérive contre une fiction.
+        """
+        brut = (data or {}).get("facteurs")
+        if not isinstance(brut, list) or not brut:
+            raise HTTPException(status_code=400, detail="Aucun facteur fourni.")
+        out = {}
+        for item in brut:
+            try:
+                lid = int((item or {}).get("ligne_id"))
+                f = Decimal(str((item or {}).get("facteur")))
+            except (TypeError, ValueError, InvalidOperation):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Chaque facteur doit porter ligne_id et facteur.")
+            base_client = (item or {}).get("total_base")
+            out[lid] = {"facteur": f,
+                        "base_client": (None if base_client is None
+                                        else Decimal(str(base_client))),
+                        "exclue": bool((item or {}).get("exclue"))}
+        return out
+
+    def _ecrire_version(cur, projet_id, data, voulu):
+        """Contrôles communs au POST et au PUT, puis la carte des facteurs.
+
+        Rend (facteurs_a_stocker, ecart_cents). Lève 409/422 si quelque chose
+        ne tient pas — AUCUNE écriture dans `budget_lignes` nulle part ici.
+        """
+        lignes = _lignes_pour_version(cur, projet_id, verrouiller=True)
+
+        # LE MESSAGE DOIT NOMMER LA BONNE CAUSE.
+        # `_lignes_pour_version` filtre `actif IS NOT FALSE` : une ligne
+        # DÉSACTIVÉE est absente de `lignes` tout en existant encore. Le
+        # message disait « n'existent plus », ce qui envoyait chercher une
+        # suppression qui n'a pas eu lieu. PC4 l'a relevé le 6 octobre.
+        # Un message qui nomme mal la cause oblige le suivant à refaire
+        # l'enquête — c'est le coût caché de chaque approximation.
+        manquantes = sorted(set(voulu) - set(lignes))
+        if manquantes:
+            cur.execute(
+                "SELECT id FROM ad_budget.budget_lignes "
+                "WHERE projet_id = %s AND id = ANY(%s)",
+                (projet_id, list(manquantes)))
+            desactivees = sorted(r["id"] for r in cur.fetchall())
+            absentes = [x for x in manquantes if x not in set(desactivees)]
+            morceaux = []
+            if desactivees:
+                morceaux.append("%d DÉSACTIVÉE(S) (%s)" % (
+                    len(desactivees), ", ".join(str(x) for x in desactivees[:5])))
+            if absentes:
+                morceaux.append("%d SUPPRIMÉE(S) (%s)" % (
+                    len(absentes), ", ".join(str(x) for x in absentes[:5])))
+            raise HTTPException(status_code=422, detail=(
+                "%d ligne(s) visée(s) ne sont plus débalançables : %s. "
+                "Rafraîchissez le récapitulatif."
+                % (len(manquantes), " et ".join(morceaux))))
+
+        # L'APERÇU DU CLIENT ÉTAIT-IL À JOUR ? On compare SA base à la nôtre.
+        # Un autre poste a pu modifier une ligne pendant que Simon regardait :
+        # enregistrer une version fondée sur ce qu'il ne voyait déjà plus
+        # serait pire qu'un refus.
+        perimees = [lid for lid, v in voulu.items()
+                    if v["base_client"] is not None
+                    and abs(v["base_client"] - Decimal(str(lignes[lid]["total"] or 0)))
+                        > VERSION_TOLERANCE_BASE]
+        if perimees:
+            raise HTTPException(status_code=409, detail={
+                "motif": "apercu_perime",
+                "message": ("%d ligne(s) ont changé depuis votre aperçu. "
+                            "Rafraîchissez : la version n'a pas été enregistrée."
+                            % len(perimees)),
+                "lignes": [{"ligne_id": lid,
+                            "description": (lignes[lid].get("description") or "")[:120]}
+                           for lid in perimees[:20]],
+            })
+
+        # L'EXCLUSION EST RECALCULÉE ICI, et celle du client sert de contrôle.
+        # Une ligne passée en « % » depuis son aperçu serait marquée « non
+        # exclue » et on l'étirerait — en créant la boucle que l'exclusion
+        # existe pour empêcher.
+        desaccords = [lid for lid, v in voulu.items()
+                      if v["exclue"] != _ligne_hors_debalancement(lignes[lid])]
+        if desaccords:
+            raise HTTPException(status_code=409, detail={
+                "motif": "exclusion_perimee",
+                "message": ("%d ligne(s) ont changé de nature (unité « %% » ou "
+                            "cautionnement/assurance) depuis votre aperçu. "
+                            "Rafraîchissez : la version n'a pas été enregistrée."
+                            % len(desaccords)),
+                "lignes": [{"ligne_id": lid,
+                            "description": (lignes[lid].get("description") or "")[:120]}
+                           for lid in desaccords[:20]],
+            })
+
+        # LE GRAND TOTAL NE DOIT PAS BOUGER. On ne refait pas le calcul de
+        # l'écran — on vérifie sa promesse.
+        avant = sum((Decimal(str(l["total"] or 0)) for l in lignes.values()), Decimal("0"))
+        apres = Decimal("0")
+        for lid, ligne in lignes.items():
+            total = Decimal(str(ligne["total"] or 0))
+            # UNE LIGNE EXCLUE VAUT 1, QUOI QUE LE CLIENT AIT ENVOYÉ.
+            # Trouvé par PC4 le 6 oct. Son client envoie bien 1, mais un autre
+            # pourrait envoyer 2 — et alors deux fautes se compenseraient ici
+            # sans que rien ne le dise. Surtout : le cas 5 de la fixture de
+            # parité porte un facteur 2 sur « cont » et « caut » À DESSEIN, et
+            # le JS la tient pour équilibrée. Sans cette ligne, le serveur
+            # REFUSERAIT en 409 une version parfaitement valide.
+            f = (Decimal("1") if _ligne_hors_debalancement(ligne)
+                 else (voulu[lid]["facteur"] if lid in voulu else Decimal("1")))
+            apres += total * f
+        ecart_cents = int((apres - avant) * 100)
+        if abs(ecart_cents) > VERSION_SEUIL_CENTS:
+            raise HTTPException(status_code=409, detail=(
+                "Le grand total aurait changé de %s $ : la version n'a PAS été "
+                "enregistrée. C'est précisément ce que cette fonction promet de "
+                "ne pas faire." % f"{(apres - avant):+,.2f}"))
+
+        # LA BASE ENREGISTRÉE EST CELLE DU SERVEUR, lue à l'instant, sous verrou.
+        # ET LE FACTEUR D'UNE LIGNE EXCLUE EST RAMENÉ À 1 AVANT D'ÊTRE STOCKÉ.
+        # Le refuser en 409 serait pire : on bloquerait un client correct pour
+        # une valeur qu'on sait recalculer. Mais la STOCKER telle quelle
+        # laisserait un facteur illégitime dormir dans la base, prêt à gonfler
+        # un budget le jour où quelqu'un lira cette version sans recalculer.
+        return ({str(lid): {"facteur": (1.0 if _ligne_hors_debalancement(lignes[lid])
+                                        else float(v["facteur"])),
+                            "base": float(Decimal(str(lignes[lid]["total"] or 0))),
+                            "exclue": v["exclue"]}
+                 for lid, v in voulu.items()},
+                ecart_cents)
+
+    @router.get("/projets/{projet_id}/versions")
+    def lister_versions(projet_id: int, user=Depends(jwt_user)):
+        """Les versions NON supprimées, chacune avec sa dérive courante."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        conn = get_conn()
+        try:
+            cur = conn.cursor(row_factory=dict_row)
+            lignes = _lignes_pour_version(cur, projet_id)
+            cur.execute(
+                "SELECT id, nom, cree_le, cree_par, maj_le, nb_facteurs, facteurs, "
+                "       supprimee_le "
+                "FROM ad_budget.versions_debalancees "
+                "WHERE projet_id = %s AND supprimee_le IS NULL "
+                "ORDER BY cree_le DESC",
+                (projet_id,))
+            rows = cur.fetchall()
+            cur.close()
+        finally:
+            conn.close()
+        return [_version_resumee(r, _derive(lignes, r.get("facteurs") or {}))
+                for r in rows]
+
+    @router.get("/projets/{projet_id}/versions/{version_id}")
+    def lire_version(projet_id: int, version_id: int, user=Depends(jwt_user)):
+        """Une version, SUPPRIMÉE COMPRISE.
+
+        Un rapport émis peut pointer dessus : le refuser ferait qu'une
+        réimpression sorte autre chose que ce qui est parti chez le client.
+        On la sert avec `supprimee_le`, et l'écran le dit.
+        """
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        conn = get_conn()
+        try:
+            cur = conn.cursor(row_factory=dict_row)
+            lignes = _lignes_pour_version(cur, projet_id)
+            cur.execute(
+                "SELECT * FROM ad_budget.versions_debalancees "
+                "WHERE id = %s AND projet_id = %s",
+                (version_id, projet_id))
+            r = cur.fetchone()
+            cur.close()
+        finally:
+            conn.close()
+        if not r:
+            raise HTTPException(status_code=404, detail="Version introuvable.")
+        facteurs = r.get("facteurs") or {}
+        return {"version": {**_version_resumee(r), "cibles": r.get("cibles"),
+                            "compensation": r.get("compensation"),
+                            "affichage": r.get("affichage")},
+                "facteurs": facteurs,
+                "derive": _derive(lignes, facteurs)}
+
+    @router.post("/projets/{projet_id}/versions", status_code=201)
+    def creer_version(projet_id: int, data: dict = Body(...), user=Depends(jwt_user)):
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        _refuser_caractere_nul(data)
+        nom = ((data or {}).get("nom") or "").strip()
+        if not nom:
+            raise HTTPException(status_code=400, detail="Un nom est requis.")
+        voulu = _facteurs_depuis_charge(data)
+
+        conn = get_conn()
+        try:
+            cur = conn.cursor(row_factory=dict_row)
+            try:
+                facteurs, ecart_cents = _ecrire_version(cur, projet_id, data, voulu)
+                cur.execute(
+                    "INSERT INTO ad_budget.versions_debalancees "
+                    "  (projet_id, nom, cree_par, cibles, compensation, affichage, "
+                    "   facteurs, nb_facteurs) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                    (projet_id, nom,
+                     (user or {}).get("email") or str((user or {}).get("id")),
+                     Json((data or {}).get("cibles") or {}),
+                     Json((data or {}).get("compensation") or {}),
+                     (data or {}).get("affichage"),
+                     Json(facteurs), len(facteurs)))
+                cree = cur.fetchone()
+                lignes = _lignes_pour_version(cur, projet_id)
+                conn.commit()
+            except UniqueViolation:
+                conn.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail="Une version porte déjà ce nom dans ce projet.")
+            except HTTPException:
+                conn.rollback()
+                raise
+            except Exception as e:
+                conn.rollback()
+                logger.exception("creer_version: echec projet=%s", projet_id)
+                raise HTTPException(status_code=500,
+                                    detail=f"Échec : {type(e).__name__}: {e}")
+            finally:
+                cur.close()
+        finally:
+            conn.close()
+        return {"version": {**_version_resumee(cree), "cibles": cree.get("cibles"),
+                            "compensation": cree.get("compensation"),
+                            "affichage": cree.get("affichage")},
+                "facteurs": facteurs,
+                "derive": _derive(lignes, facteurs),
+                "ecart_cents": ecart_cents}
+
+    @router.put("/projets/{projet_id}/versions/{version_id}")
+    def maj_version(projet_id: int, version_id: int,
+                    data: dict = Body(...), user=Depends(jwt_user)):
+        """Re-débalancer une version existante — mêmes contrôles qu'à la
+        création. C'est aussi le chemin du « rééquilibrer » : la dérive étant
+        le régime normal, remettre en balance doit coûter un geste, pas une
+        suppression suivie d'une recréation."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        _refuser_caractere_nul(data)
+        voulu = _facteurs_depuis_charge(data)
+        nom = ((data or {}).get("nom") or "").strip() or None
+
+        conn = get_conn()
+        try:
+            cur = conn.cursor(row_factory=dict_row)
+            try:
+                cur.execute(
+                    "SELECT id FROM ad_budget.versions_debalancees "
+                    "WHERE id = %s AND projet_id = %s AND supprimee_le IS NULL FOR UPDATE",
+                    (version_id, projet_id))
+                if not cur.fetchone():
+                    raise HTTPException(status_code=404, detail="Version introuvable.")
+                facteurs, ecart_cents = _ecrire_version(cur, projet_id, data, voulu)
+                cur.execute(
+                    "UPDATE ad_budget.versions_debalancees SET "
+                    "  nom = COALESCE(%s, nom), maj_le = NOW(), maj_par = %s, "
+                    "  cibles = %s, compensation = %s, affichage = %s, "
+                    "  facteurs = %s, nb_facteurs = %s "
+                    "WHERE id = %s AND projet_id = %s RETURNING *",
+                    (nom, (user or {}).get("email") or str((user or {}).get("id")),
+                     Json((data or {}).get("cibles") or {}),
+                     Json((data or {}).get("compensation") or {}),
+                     (data or {}).get("affichage"),
+                     Json(facteurs), len(facteurs), version_id, projet_id))
+                maj = cur.fetchone()
+                lignes = _lignes_pour_version(cur, projet_id)
+                conn.commit()
+            except UniqueViolation:
+                conn.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail="Une version porte déjà ce nom dans ce projet.")
+            except HTTPException:
+                conn.rollback()
+                raise
+            except Exception as e:
+                conn.rollback()
+                logger.exception("maj_version: echec version=%s", version_id)
+                raise HTTPException(status_code=500,
+                                    detail=f"Échec : {type(e).__name__}: {e}")
+            finally:
+                cur.close()
+        finally:
+            conn.close()
+        return {"version": {**_version_resumee(maj), "cibles": maj.get("cibles"),
+                            "compensation": maj.get("compensation"),
+                            "affichage": maj.get("affichage")},
+                "facteurs": facteurs,
+                "derive": _derive(lignes, facteurs),
+                "ecart_cents": ecart_cents}
+
+    @router.delete("/projets/{projet_id}/versions/{version_id}", status_code=204)
+    def supprimer_version(projet_id: int, version_id: int, user=Depends(jwt_user)):
+        """SUPPRESSION DOUCE. Un rapport émis peut pointer sur cette version :
+        un effacement dur ferait mentir une réimpression, en silence."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        conn = get_conn()
+        try:
+            cur = conn.cursor(row_factory=dict_row)
+            cur.execute(
+                "UPDATE ad_budget.versions_debalancees "
+                "SET supprimee_le = NOW(), supprimee_par = %s "
+                "WHERE id = %s AND projet_id = %s AND supprimee_le IS NULL",
+                ((user or {}).get("email") or str((user or {}).get("id")),
+                 version_id, projet_id))
+            touchees = cur.rowcount
+            conn.commit()
+            cur.close()
+        finally:
+            conn.close()
+        if not touchees:
+            raise HTTPException(status_code=404, detail="Version introuvable.")
+        return None
+
     @router.delete("/projets/{projet_id}")
     def delete_projet(
         projet_id: int,
@@ -4177,7 +4720,15 @@ def register_ad_budget_routes(get_conn):
         return {"projet_id": row["id"], "statut": row["statut"]}
 
     @router.get("/projets/{projet_id}/export-for-con")
-    def export_projet_for_con(projet_id: int, user=Depends(jwt_user),
+    def export_projet_for_con(projet_id: int,
+                              # LE CHANTIER SUIT UNE VERSION (Simon, 6 oct. 2026).
+                              # Sans ce paramètre, rien ne change : l'original.
+                              # Avec, les SOUS-TOTAUX sont recalculés depuis
+                              # l'original par les facteurs de la version — Ad CON
+                              # ne reçoit donc jamais une copie figée, et
+                              # l'original n'est jamais touché.
+                              version_id: Optional[int] = Query(None),
+                              user=Depends(jwt_user),
                               authorization: Optional[str] = Header(None), session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
         """Sprint 1.A Ad CON — Export du projet+lignes pour Ad CON.
 
@@ -4303,6 +4854,51 @@ def register_ad_budget_routes(get_conn):
         surface_gypse = surface_mur * 2
 
         # 4) Ventilation ligne par ligne + raw passthrough.
+        # ── LA VERSION SUIVIE, s'il y en a une ────────────────────────────
+        # Contrat convenu avec PC4 le 6 oct. 2026. Trois règles :
+        #   1. on lit la version MÊME SUPPRIMÉE — un chantier qui la suit ne
+        #      doit pas perdre son budget parce que quelqu'un a rangé ;
+        #   2. une version inconnue, ou d'un AUTRE projet, donne 404. **Jamais
+        #      l'original servi à sa place en silence** : Ad CON croirait
+        #      suivre V.1 en affichant autre chose, et rien ne le dirait ;
+        #   3. l'exclusion est RECALCULÉE ici, pas lue dans la version. Une
+        #      ligne « % » ou au mille se recalcule depuis le total : l'étirer
+        #      créerait la boucle que l'exclusion existe pour empêcher.
+        #      (PC4 a mesuré +620 $ sur ce défaut dans `derive_version`.)
+        version_info, facteurs_version = None, {}
+        if version_id is not None:
+            cur.execute(
+                "SELECT id, nom, facteurs, supprimee_le "
+                "FROM ad_budget.versions_debalancees "
+                "WHERE id = %s AND projet_id = %s",
+                (version_id, projet_id))
+            vrow = cur.fetchone()
+            if not vrow:
+                raise HTTPException(status_code=404, detail=(
+                    "La version %s n'existe pas pour ce projet. Le budget n'a "
+                    "PAS été servi : un chantier qui croit suivre une version "
+                    "ne doit jamais recevoir l'original sans le savoir."
+                    % version_id))
+            facteurs_version = vrow.get("facteurs") or {}
+            version_info = {
+                "id": vrow["id"],
+                "nom": vrow["nom"],
+                "supprimee_le": (vrow["supprimee_le"].isoformat()
+                                 if vrow.get("supprimee_le") else None),
+            }
+
+        def _facteur_de(row):
+            """1 par défaut, 1 si la ligne est exclue, sinon celui de la version."""
+            if not facteurs_version or _ligne_hors_debalancement(row):
+                return 1.0
+            entree = facteurs_version.get(str(row["id"]))
+            if not entree:
+                return 1.0
+            try:
+                return float(entree.get("facteur", 1))
+            except (TypeError, ValueError):
+                return 1.0
+
         lines_out = []
         contract_total = 0.0
         for idx, row in enumerate(budget_rows, start=1):
@@ -4340,6 +4936,19 @@ def register_ad_budget_routes(get_conn):
             # reste le montant BRUT saisi, non gaté — seul st_subtotal (la
             # contribution au contrat) est exclu tant que qté=0.
             st_subtotal = (st_amount * (1.0 + ajust_st / 100.0)) if qty_eff > 0 else 0.0
+
+            # LE FACTEUR DE LA VERSION S'APPLIQUE AUX SOUS-TOTAUX, JAMAIS AUX
+            # VALEURS UNITAIRES. Un débalancement déplace des MONTANTS entre
+            # lignes ; il ne change ni un prix unitaire, ni un taux horaire, ni
+            # un nombre d'heures. Multiplier le taux ferait mentir la feuille
+            # de production sur ce que coûte une heure de travail.
+            # Sans version, _facteur_de rend 1.0 : le calcul est inchangé.
+            _f = _facteur_de(row)
+            if _f != 1.0:
+                mat_subtotal *= _f
+                mo_subtotal *= _f
+                st_subtotal *= _f
+
             contract_total += mat_subtotal + mo_subtotal + st_subtotal
 
             lines_out.append({
@@ -4414,6 +5023,18 @@ def register_ad_budget_routes(get_conn):
                 "bud_schema_version": "v1.0",
                 "lines_count": len(lines_out),
             },
+            # LA VERSION SUIVIE, OU None — ET TOUJOURS PRÉSENTE.
+            # Si on ne la servait que lorsqu'il y a une dérive, Ad CON ne
+            # pourrait pas distinguer « pas de dérive » de « j'ai oublié de
+            # demander la version ». Une absence doit vouloir dire une seule
+            # chose. La dérive est calculée par la MÊME fonction que les
+            # écrans d'Ad BUD : une seule règle, vérifiée par la fixture de
+            # parité avec le JS.
+            "version": (None if version_info is None else {
+                **version_info,
+                "derive": derive_version(
+                    {r["id"]: r for r in budget_rows}, facteurs_version),
+            }),
             "project": {
                 # Phase 6 — identité depuis le hub (_ident). statut + ad_hub_project_id
                 # restent du projet local (propre / lien).
@@ -7426,6 +8047,18 @@ def register_ad_budget_routes(get_conn):
         # document -- l'appelant n'a donc rien a savoir de la taxonomie du HUB,
         # il dit seulement ce qu'il publie.
         mode: Optional[str] = Query(None),
+        # QUELLE VERSION A ÉTÉ IMPRIMÉE (PC4, 6 oct. 2026).
+        # Son client les envoie déjà quand le récapitulatif montre une version
+        # débalancée. **FastAPI les IGNORE tant qu'ils ne sont pas déclarés** :
+        # le client enverrait, le serveur répondrait 200, et la donnée
+        # disparaîtrait EN SILENCE. Un 200 qui perd ce qu'on lui confie est
+        # pire qu'un refus — c'est la faute qu'on passe la semaine à retirer.
+        # On les enregistre avec le rapport pour qu'une réimpression retrouve
+        # la version MÊME SUPPRIMÉE : d'où la suppression douce côté versions,
+        # et le fait que GET /versions/{id} serve aussi les supprimées. Un
+        # rapport parti chez un client doit pouvoir ressortir identique.
+        version_id: Optional[int] = Query(None),
+        version_nom: Optional[str] = Query(None),
         user=Depends(jwt_user),
         authorization: Optional[str] = Header(None),
         session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
@@ -7526,8 +8159,22 @@ def register_ad_budget_routes(get_conn):
             # récapitulatif existe en huit versions et l'Espace Rapports doit
             # dire laquelle il montre, pas huit lignes identiques.
             "titre": (titre or "").strip() or f"Récapitulatif — {projet.get('nom') or ''}".strip(" —"),
-            "snapshot_data": "{}",
+            # LA VERSION IMPRIMÉE EST ENREGISTRÉE AVEC LE RAPPORT.
+            # Sans ça, une réimpression ne saurait pas si le document parti
+            # chez le client montrait l'original ou une version débalancée —
+            # et deux PDF au même titre porteraient des montants différents
+            # sans que rien ne les distingue.
+            "snapshot_data": json.dumps(
+                {"version_id": version_id, "version_nom": version_nom}
+                if version_id is not None else {}),
         }
+        # Le titre DIT la version. L'Espace Rapports liste des titres : deux
+        # récapitulatifs du même projet, l'un original l'autre débalancé,
+        # doivent se distinguer à l'œil, pas seulement dans les données.
+        if version_nom and not (titre or "").strip():
+            fields["titre"] = "%s — %s" % (fields["titre"], version_nom.strip())
+        if version_nom:
+            fields["revision_label"] = version_nom.strip()
         try:
             result = hub_service.post_report(jwt_token, int(hub_pid), pdf_bytes, fields)
         except hub_service.HubServiceError as e:
