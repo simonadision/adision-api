@@ -44,6 +44,26 @@ def _rouge(msg):
     raise AssertionError(msg)
 
 
+# L'EMPREINTE PORTE SUR LE CONTENU, PAS SUR L'EMBALLAGE.
+# Ma premiere version faisait le md5 des OCTETS du fichier. Elle a rougi en CI
+# pour une raison qui n'avait rien a voir avec la fixture : **git convertit
+# LF en CRLF au depart sur Windows et sert du LF au runner Linux**, donc les
+# octets different alors que la donnee est identique. Un controle qui rougit
+# sur un detail de plateforme sera desarme a la premiere occasion.
+# On compare donc le JSON RE-SERIALISE de facon canonique (cles triees, pas
+# d'espaces) : insensible aux fins de ligne et a l'indentation, sensible a
+# tout changement reel. La meme empreinte sort cote JS.
+EMPREINTE = "f0d0910b60be871b1426c2a0116b87b8"
+
+
+def _empreinte_canonique(chemin):
+    with open(chemin, encoding="utf-8") as fh:
+        data = json.load(fh)
+    canon = json.dumps(data, sort_keys=True, separators=(",", ":"),
+                       ensure_ascii=False)
+    return hashlib.md5(canon.encode("utf-8")).hexdigest()
+
+
 def _fixture():
     if not os.path.isfile(FIXTURE):
         # Le banc se NOMME au lieu de se sauter : une fixture absente est une
@@ -168,8 +188,7 @@ def test_la_copie_locale_porte_l_EMPREINTE_CONVENUE():
     rougir — et c'est le seul signal qui traverse la frontiere entre deux
     depots qui ne se voient pas.
     """
-    EMPREINTE = "0d883d7e566358d1bf58333bf10105e2"
-    a = hashlib.md5(open(FIXTURE, "rb").read()).hexdigest()
+    a = _empreinte_canonique(FIXTURE)
     if a != EMPREINTE:
         _rouge(
             "la fixture de tests/fixtures/ a change (%s au lieu de %s).\n"
@@ -187,8 +206,8 @@ def test_la_copie_locale_est_IDENTIQUE_a_celle_du_monorepo():
     if not os.path.isfile(FRERE):
         print("     (depot frere absent — l'empreinte figee prend le relais)")
         return
-    a = hashlib.md5(open(FIXTURE, "rb").read()).hexdigest()
-    b = hashlib.md5(open(FRERE, "rb").read()).hexdigest()
+    a = _empreinte_canonique(FIXTURE)
+    b = _empreinte_canonique(FRERE)
     if a != b:
         _rouge("la copie de tests/fixtures/ a DIVERGE de celle du monorepo "
                "(%s vs %s). La parite verifiee ici ne serait plus celle que "
