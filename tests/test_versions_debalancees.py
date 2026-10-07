@@ -294,7 +294,22 @@ def test_emit_DECLARE_version_id_et_version_nom():
 # ══════════════════════════════════════════════════════════════════════════
 # AD CON SUIT UNE VERSION (decision de Simon, 6 oct. 2026)
 # « Le chantier SUIT une version » : contrat convenu avec PC4.
+#
+# ⚠ DEUX SUJETS DEPUIS LE 7 OCT. 2026, ET CE BANC LES A DISTINGUES TOUT SEUL.
+# `export-for-con` est devenue une PORTE de six lignes ; le CALCUL vit dans la
+# fabrique `_payload_export_budget`, partagee avec la porte d'Ad EST. Les cinq
+# cas qui inspectaient le corps de la route ont ROUGI a la seconde ou je l'ai
+# videe -- c'est exactement ce qu'on attend d'un banc dont le sujet bouge
+# (l'inverse, un banc reste vert sans sujet, est la faute qu'on corrige depuis
+# des semaines). On vise donc desormais :
+#   * la PORTE  -> ce qui est declare a FastAPI (version_id) ;
+#   * la FABRIQUE -> tout ce qui calcule.
+# Les deux portes partagent la fabrique : verifier celle-ci couvre Ad CON ET
+# Ad EST d'un seul cas.
 # ══════════════════════════════════════════════════════════════════════════
+
+FABRIQUE_EXPORT = "_payload_export_budget"
+
 
 def test_export_for_con_accepte_version_id():
     b = _bloc("export_projet_for_con")
@@ -307,7 +322,7 @@ def test_une_version_INCONNUE_donne_404_jamais_l_original():
     """LA REGLE QUI COMPTE. Servir l'original a la place d'une version
     demandee, sans rien dire, c'est le defaut le plus cher de la semaine :
     le chantier croit suivre V.1 et travaille sur autre chose."""
-    b = _bloc("export_projet_for_con")
+    b = _bloc(FABRIQUE_EXPORT)
     if "status_code=404" not in b:
         _rouge("une version inconnue ne donne pas 404 : l'original serait "
                "servi en silence")
@@ -319,7 +334,7 @@ def test_une_version_INCONNUE_donne_404_jamais_l_original():
 def test_la_version_SUPPRIMEE_reste_lisible():
     """Un chantier qui suit une version ne doit pas perdre son budget parce
     que quelqu'un a range. Coherent avec la suppression douce."""
-    b = _bloc("export_projet_for_con")
+    b = _bloc(FABRIQUE_EXPORT)
     d = b.index("FROM ad_budget.versions_debalancees")
     if "supprimee_le IS NULL" in b[d:d + 300]:
         _rouge("export-for-con refuse une version supprimee : le chantier "
@@ -330,7 +345,7 @@ def test_le_facteur_ne_touche_QUE_les_sous_totaux():
     """Un debalancement deplace des MONTANTS. Il ne change ni un prix
     unitaire, ni un taux horaire, ni un nombre d'heures — multiplier le taux
     ferait mentir la feuille de production sur ce que coute une heure."""
-    b = _bloc("export_projet_for_con")
+    b = _bloc(FABRIQUE_EXPORT)
     for interdit in ("prix_u *=", "taux *=", "heures *=", "qty_eff *="):
         if interdit in b:
             _rouge("le facteur de version s'applique a une valeur UNITAIRE "
@@ -341,7 +356,7 @@ def test_le_facteur_ne_touche_QUE_les_sous_totaux():
 
 
 def test_l_exclusion_est_RECALCULEE_dans_l_export():
-    b = _bloc("export_projet_for_con")
+    b = _bloc(FABRIQUE_EXPORT)
     if "_ligne_hors_debalancement" not in b:
         _rouge("l'export lit l'exclusion de la version au lieu de la "
                "recalculer : une ligne « %% » serait etiree, et c'est la "
@@ -351,7 +366,7 @@ def test_l_exclusion_est_RECALCULEE_dans_l_export():
 def test_la_cle_version_est_TOUJOURS_servie():
     """Ne la servir que lorsqu'il y a derive empecherait Ad CON de distinguer
     « pas de derive » de « j'ai oublie de demander la version »."""
-    b = _bloc("export_projet_for_con")
+    b = _bloc(FABRIQUE_EXPORT)
     if '"version": (None if version_info is None' not in b:
         _rouge("la cle « version » n'est pas toujours presente : une absence "
                "voudrait dire deux choses a la fois")
