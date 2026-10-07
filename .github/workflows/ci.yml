@@ -138,6 +138,14 @@ jobs:
       - name: Versions debalancees — parite avec l'ecran (fixture partagee)
         run: python tests/test_parite_versions_debalancees.py
 
+      # derive_version (7 oct. 2026, PC1) : aucune tolerance sur la base,
+      # l'arrondi au dollar QU'A VU la version, et les vrais totaux servis a
+      # Ad CON (export-for-con lisait la colonne `total` = materiaux seuls :
+      # 474 lignes sur 1 209 faussement « modifiees » sur la V.1 du 290).
+      # Pur, sans base ; eprouve par trois mutants du code.
+      - name: Versions debalancees — arrondi de la version et vrais totaux
+        run: python tests/test_derive_version_arrondi.py
+
       # Journal des parametres financiers (7 oct. 2026, apres l'enquete 7,887 %
       # du projet 290) : quels champs, quand c'est un changement. Pur, sans base.
       - name: Journal des parametres financiers
