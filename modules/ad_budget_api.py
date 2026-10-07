@@ -4,6 +4,7 @@ import json
 import os
 import re
 import unicodedata
+import uuid
 from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
@@ -69,6 +70,49 @@ def _ligne_hors_debalancement(ligne):
     famille que les 346 680 $ du 1er octobre."""
     unite = str((ligne or {}).get("unite") or "").strip()
     return unite == "%" or _regle_au_mille((ligne or {}).get("description")) is not None
+
+
+# ── JOURNAL DES PARAMÈTRES FINANCIERS (7 oct. 2026, Simon : « go journal ») ──
+# Après l'enquête 7,887 % du projet 290 (aucune trace possible : la base ne
+# gardait aucun historique), chaque changement RÉEL d'un paramètre qui fait le
+# prix est journalisé par update_projet, dans la même transaction.
+CHAMPS_JOURNAL_FINANCIER = tuple(
+    [f"pct_admin_{g}" for g in ("conditions", "architecture", "mecanique", "excavation")]
+    + [f"pct_admin_{g}_{c}" for g in ("conditions", "architecture", "mecanique", "excavation")
+       for c in ("mat", "mo", "st")]
+    + ["pct_admin_mode", "arrondi_dollar"]
+)
+
+
+def _texte_journal(v):
+    """La valeur telle qu'on l'écrit au journal : None reste None, un booléen
+    en clair, un nombre SANS zéros parasites (8 et 8,000 ne sont pas un
+    changement), le reste tel quel."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float, Decimal)):
+        return format(Decimal(str(v)).normalize(), "f")
+    try:
+        return format(Decimal(str(v).replace(",", ".")).normalize(), "f")
+    except (InvalidOperation, ValueError):
+        return str(v)
+
+
+def _changements_journal(avant, nouveaux):
+    """[(champ, avant, après)] pour chaque champ du journal RÉELLEMENT changé.
+    `avant` : la ligne du projet lue sous verrou ; `nouveaux` : les valeurs
+    normalisées qu'update_projet s'apprête à écrire."""
+    out = []
+    for champ in CHAMPS_JOURNAL_FINANCIER:
+        if champ not in (nouveaux or {}):
+            continue
+        a = _texte_journal((avant or {}).get(champ))
+        b = _texte_journal(nouveaux[champ])
+        if a != b:
+            out.append((champ, a, b))
+    return out
 
 
 def derive_version(lignes, facteurs):
@@ -3923,6 +3967,7 @@ def register_ad_budget_routes(get_conn):
 
         fields = []
         values = []
+        nouveaux_journal = {}
         PCT_FIELDS = {
             "pct_admin_conditions", "pct_admin_architecture",
             "pct_admin_mecanique", "pct_admin_excavation",
@@ -4009,10 +4054,21 @@ def register_ad_budget_routes(get_conn):
                         )
                 fields.append(f"{field} = %s")
                 values.append(v)
+                if field in CHAMPS_JOURNAL_FINANCIER:
+                    nouveaux_journal[field] = v
         if not fields:
             cur.close()
             conn.close()
             return {"error": "No fields to update"}
+        # JOURNAL : les valeurs d'AVANT, lues sous verrou dans la transaction
+        # qui écrit -- deux modifications simultanées ne peuvent pas se voler
+        # leur « avant ».
+        changements_journal = []
+        if nouveaux_journal:
+            cur.execute(
+                "SELECT " + ", ".join(CHAMPS_JOURNAL_FINANCIER)
+                + " FROM ad_budget.projets WHERE id = %s FOR UPDATE", (projet_id,))
+            changements_journal = _changements_journal(cur.fetchone() or {}, nouveaux_journal)
         fields.append("updated_at = NOW()")
         sql = (
             f"UPDATE ad_budget.projets SET {', '.join(fields)} "
@@ -4021,6 +4077,15 @@ def register_ad_budget_routes(get_conn):
         values.append(projet_id)
         cur.execute(sql, values)
         updated = cur.fetchone()
+        geste_journal = str(uuid.uuid4()) if changements_journal else None
+        for champ, avant_j, apres_j in changements_journal:
+            # `par` vient du JWT (jamais d'une IP : c'est ce qui manquait à
+            # l'enquête du 290) ; `geste` relie les champs d'une même saisie.
+            cur.execute(
+                "INSERT INTO ad_budget.journal_parametres_financiers "
+                "(projet_id, champ, avant, apres, par, geste) VALUES (%s, %s, %s, %s, %s, %s)",
+                (projet_id, champ, avant_j, apres_j,
+                 (user or {}).get("email") or str((user or {}).get("id")), geste_journal))
 
         # Sprint B : detecter la transition vers un statut definitif
         # (adjuge / complet / perdu) et figer le budget dans un snapshot.
@@ -4057,6 +4122,25 @@ def register_ad_budget_routes(get_conn):
         if set(data) & SNAPSHOT_AFFECTING_FIELDS:
             _mark_budget_dirty_if_emitted(projet_id)
         return updated
+
+    @router.get("/projets/{projet_id}/journal-parametres")
+    def journal_parametres(projet_id: int, limit: int = 200, user=Depends(jwt_user)):
+        """Le journal des paramètres financiers du projet, le plus récent
+        d'abord : qui, quand, champ, avant → après (7 oct. 2026)."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "read")
+        conn = get_conn()
+        try:
+            cur = conn.cursor(row_factory=dict_row)
+            cur.execute(
+                "SELECT id, champ, avant, apres, par, le, geste "
+                "FROM ad_budget.journal_parametres_financiers "
+                "WHERE projet_id = %s ORDER BY le DESC, id DESC LIMIT %s",
+                (projet_id, max(1, min(int(limit or 200), 1000))))
+            rows = cur.fetchall()
+            cur.close()
+        finally:
+            conn.close()
+        return [{**r, "le": r["le"].isoformat() if r.get("le") else None} for r in rows]
 
     # ═════════════════════════════════════════════════════════════════
     # VERSIONS DÉBALANCÉES — des facteurs, jamais une copie
