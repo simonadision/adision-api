@@ -115,7 +115,22 @@ def _changements_journal(avant, nouveaux):
     return out
 
 
-def derive_version(lignes, facteurs):
+class LignesVersion(dict):
+    """Les lignes d'une version, et l'arrondi au dollar du projet avec
+    lequel leurs totaux ont été calculés : les deux voyagent ENSEMBLE, pour
+    que personne ne compare un total à un arrondi relu ailleurs.
+
+    SI L'ARRONDI « SE PERD », C'EST ICI. `arrondi` est un attribut de CLASSE
+    (défaut None), pas d'instance : une instance sur laquelle on a oublié de
+    le poser, ou une copie `dict(lignes)` / `{**lignes}`, lit None. None veut
+    dire « inconnu » et derive_version ne recalcule alors rien : la
+    comparaison redevient celle d'avant le 7 oct. 2026. C'est voulu — la
+    dégradation va vers l'ancien comportement, jamais vers un faux chiffre
+    (relu par PC3)."""
+    arrondi = None
+
+
+def derive_version(lignes, facteurs, arrondi_version=None, arrondi_projet=None):
     """L'écart d'une version et SA CAUSE.
 
     Un écart sans cause est pire qu'un écart : Simon le verrait sans pouvoir
@@ -148,7 +163,36 @@ def derive_version(lignes, facteurs):
 
     Et une ligne exclue n'est comptée NI « sans facteur » NI « modifiée » :
     elle n'est pas débalancée, donc elle n'a rien à expliquer.
+
+    ════════════════════════════════════════════════════════════════════════
+    UNE VERSION SE COMPARE À L'ARRONDI QU'ELLE A VU (7 oct. 2026, PC1/PC3).
+    ════════════════════════════════════════════════════════════════════════
+    `base` est le total de la ligne CALCULÉ AVEC l'arrondi au dollar du
+    projet au moment de la version. Si Simon bascule `arrondi_dollar`
+    ensuite, chaque ligne à total non entier change de 0,01 $ à 0,50 $ sans
+    que personne n'y ait touché : comparée au total courant, la version
+    aurait affiché « 1 209 lignes modifiées » (mesuré : le 290 en a 1 209).
+    Une tolérance au demi-cent ne l'absorbe pas — l'écart va jusqu'à 0,50 $.
+
+    Donc, quand `arrondi_version` est connu et diffère de `arrondi_projet`,
+    la comparaison à `base` se fait avec le total recalculé SOUS L'ARRONDI DE
+    LA VERSION (les lignes portent leurs champs bruts, voir
+    `_lignes_pour_version`). Ces lignes ne sont PAS comptées modifiées — mais
+    la cause est NOMMÉE à côté (`arrondi_change`) : l'écran affiche d'autres
+    montants, et « 0 ligne modifiée » tout seul tromperait (Simon, 5 oct. :
+    « le coût suit l'ÉCRAN, pas les données »). L'écart courant, lui, reste
+    calculé sur le total de l'écran.
+
+    PAS DE TOLÉRANCE sur `base` : elle est écrite par le serveur depuis le
+    même float que `total`, et relue à l'identique (JSONB garde le texte du
+    nombre, repr(float) fait l'aller-retour exact — mesuré sur la V.1 du
+    290). Un seuil masquerait de VRAIES modifications sous le demi-cent.
+    `tests/test_derive_version_arrondi.py` épingle les trois points.
     """
+    arrondi_change = (arrondi_version is not None and arrondi_projet is not None
+                      and bool(arrondi_version) != bool(arrondi_projet))
+    if arrondi_change:
+        from modules.budget_fingerprint import _line_total
     ecart = Decimal("0")
     sans_facteur, orphelins, modifiees = 0, 0, 0
     for lid, ligne in lignes.items():
@@ -168,8 +212,10 @@ def derive_version(lignes, facteurs):
         f = Decimal("1") if exclue else Decimal(str(entree.get("facteur", 1)))
         ecart += total * f - total
         base = entree.get("base")
+        vu = (Decimal(str(_line_total(bool(arrondi_version), ligne)))
+              if arrondi_change else total)
         if (base is not None and not exclue
-                and Decimal(str(base)) != total):
+                and Decimal(str(base)) != vu):
             modifiees += 1
     # ON COMPARE EN TEXTE DES DEUX CÔTÉS.
     # Cette boucle faisait `int(cle)` : une clé non numérique levait une
@@ -187,7 +233,14 @@ def derive_version(lignes, facteurs):
     return {"ecart_courant": float(ecart.quantize(Decimal("0.01"))),
             "lignes_sans_facteur": sans_facteur,
             "facteurs_orphelins": orphelins,
-            "lignes_modifiees": modifiees}
+            "lignes_modifiees": modifiees,
+            # La CAUSE nommée quand l'arrondi a basculé depuis la version :
+            # None = inconnu (appelant d'avant), jamais deviné.
+            "arrondi_de_la_version": (None if arrondi_version is None
+                                      else bool(arrondi_version)),
+            "arrondi_du_projet": (None if arrondi_projet is None
+                                  else bool(arrondi_projet)),
+            "arrondi_change": arrondi_change}
 from modules.aggregates import heures_effectives as _heures_effectives
 from modules.aggregates import quantite_effective
 from modules.lots_calc import compute_lot_totals
@@ -4226,7 +4279,8 @@ def register_ad_budget_routes(get_conn):
             "WHERE projet_id = %s AND actif IS NOT FALSE "
             "ORDER BY id" + (" FOR UPDATE" if verrouiller else ""),
             (projet_id,))
-        lignes = {}
+        lignes = LignesVersion()
+        lignes.arrondi = arrondi
         for r in cur.fetchall():
             d = dict(r)
             d["total"] = _line_total(arrondi, d)
@@ -4236,7 +4290,13 @@ def register_ad_budget_routes(get_conn):
     # `derive_version` vit au NIVEAU DU MODULE (voir sa docstring) : c'est ce
     # qui la rend importable par le test de parité avec le JS. Tant qu'elle
     # était ici, la fixture convenue avec PC4 ne pouvait être lue par personne.
-    _derive = derive_version
+    def _derive(lignes, facteurs, version=None):
+        """La dérive, avec l'arrondi QU'A VU la version et celui du projet
+        maintenant (voir derive_version). Une version sans arrondi stocké
+        (None) se compare comme avant."""
+        return derive_version(lignes, facteurs,
+                              (version or {}).get("arrondi_dollar"),
+                              getattr(lignes, "arrondi", None))
 
     def _version_resumee(r, derive=None):
         return {
@@ -4435,7 +4495,7 @@ def register_ad_budget_routes(get_conn):
             lignes = _lignes_pour_version(cur, projet_id)
             cur.execute(
                 "SELECT id, nom, cree_le, cree_par, maj_le, nb_facteurs, facteurs, "
-                "       supprimee_le "
+                "       supprimee_le, arrondi_dollar "
                 "FROM ad_budget.versions_debalancees "
                 "WHERE projet_id = %s AND supprimee_le IS NULL "
                 "ORDER BY cree_le DESC",
@@ -4444,7 +4504,7 @@ def register_ad_budget_routes(get_conn):
             cur.close()
         finally:
             conn.close()
-        return [_version_resumee(r, _derive(lignes, r.get("facteurs") or {}))
+        return [_version_resumee(r, _derive(lignes, r.get("facteurs") or {}, r))
                 for r in rows]
 
     @router.get("/projets/{projet_id}/versions/{version_id}")
@@ -4475,7 +4535,7 @@ def register_ad_budget_routes(get_conn):
                             "compensation": r.get("compensation"),
                             "affichage": r.get("affichage")},
                 "facteurs": facteurs,
-                "derive": _derive(lignes, facteurs)}
+                "derive": _derive(lignes, facteurs, r)}
 
     @router.post("/projets/{projet_id}/versions", status_code=201)
     def creer_version(projet_id: int, data: dict = Body(...), user=Depends(jwt_user)):
@@ -4494,14 +4554,16 @@ def register_ad_budget_routes(get_conn):
                 cur.execute(
                     "INSERT INTO ad_budget.versions_debalancees "
                     "  (projet_id, nom, cree_par, cibles, compensation, affichage, "
-                    "   facteurs, nb_facteurs) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                    "   facteurs, nb_facteurs, arrondi_dollar) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, "
+                    "  (SELECT arrondi_dollar FROM ad_budget.projets WHERE id = %s)) "
+                    "RETURNING *",
                     (projet_id, nom,
                      (user or {}).get("email") or str((user or {}).get("id")),
                      Json((data or {}).get("cibles") or {}),
                      Json((data or {}).get("compensation") or {}),
                      (data or {}).get("affichage"),
-                     Json(facteurs), len(facteurs)))
+                     Json(facteurs), len(facteurs), projet_id))
                 cree = cur.fetchone()
                 lignes = _lignes_pour_version(cur, projet_id)
                 conn.commit()
@@ -4526,7 +4588,7 @@ def register_ad_budget_routes(get_conn):
                             "compensation": cree.get("compensation"),
                             "affichage": cree.get("affichage")},
                 "facteurs": facteurs,
-                "derive": _derive(lignes, facteurs),
+                "derive": _derive(lignes, facteurs, cree),
                 "ecart_cents": ecart_cents}
 
     @router.put("/projets/{projet_id}/versions/{version_id}")
@@ -4556,13 +4618,16 @@ def register_ad_budget_routes(get_conn):
                     "UPDATE ad_budget.versions_debalancees SET "
                     "  nom = COALESCE(%s, nom), maj_le = NOW(), maj_par = %s, "
                     "  cibles = %s, compensation = %s, affichage = %s, "
-                    "  facteurs = %s, nb_facteurs = %s "
+                    "  facteurs = %s, nb_facteurs = %s, "
+                    # Les bases viennent d'être recalculées : l'arrondi de la
+                    # version devient celui du projet À CET INSTANT.
+                    "  arrondi_dollar = (SELECT arrondi_dollar FROM ad_budget.projets WHERE id = %s) "
                     "WHERE id = %s AND projet_id = %s RETURNING *",
                     (nom, (user or {}).get("email") or str((user or {}).get("id")),
                      Json((data or {}).get("cibles") or {}),
                      Json((data or {}).get("compensation") or {}),
                      (data or {}).get("affichage"),
-                     Json(facteurs), len(facteurs), version_id, projet_id))
+                     Json(facteurs), len(facteurs), projet_id, version_id, projet_id))
                 maj = cur.fetchone()
                 lignes = _lignes_pour_version(cur, projet_id)
                 conn.commit()
@@ -4587,7 +4652,7 @@ def register_ad_budget_routes(get_conn):
                             "compensation": maj.get("compensation"),
                             "affichage": maj.get("affichage")},
                 "facteurs": facteurs,
-                "derive": _derive(lignes, facteurs),
+                "derive": _derive(lignes, facteurs, maj),
                 "ecart_cents": ecart_cents}
 
     @router.delete("/projets/{projet_id}/versions/{version_id}", status_code=204)
@@ -5004,7 +5069,7 @@ def register_ad_budget_routes(get_conn):
         version_info, facteurs_version = None, {}
         if version_id is not None:
             cur.execute(
-                "SELECT id, nom, facteurs, supprimee_le "
+                "SELECT id, nom, facteurs, supprimee_le, arrondi_dollar "
                 "FROM ad_budget.versions_debalancees "
                 "WHERE id = %s AND projet_id = %s",
                 (version_id, projet_id))
@@ -5021,6 +5086,17 @@ def register_ad_budget_routes(get_conn):
                 "nom": vrow["nom"],
                 "supprimee_le": (vrow["supprimee_le"].isoformat()
                                  if vrow.get("supprimee_le") else None),
+                # LES VRAIS TOTAUX, PAS LA COLONNE `total` (7 oct. 2026, PC1) :
+                # `budget_rows` est un SELECT * brut, dont la colonne `total`
+                # ne porte que les MATÉRIAUX. Mesuré sur la V.1 de
+                # « Rénovation intérieure d'unités de logements » : Σ colonne
+                # 643 902,95 $ contre Σ bases 2 785 496 $, 474 lignes sur
+                # 1 209 faussement « modifiées » servies à Ad CON. On passe
+                # par _lignes_pour_version, LA MÊME source que les écrans des
+                # versions : deux chemins pour un même total finissent par
+                # diverger.
+                "derive": _derive(_lignes_pour_version(cur, projet_id),
+                                  facteurs_version, vrow),
             }
 
         def _facteur_de(row):
@@ -5166,11 +5242,9 @@ def register_ad_budget_routes(get_conn):
             # chose. La dérive est calculée par la MÊME fonction que les
             # écrans d'Ad BUD : une seule règle, vérifiée par la fixture de
             # parité avec le JS.
-            "version": (None if version_info is None else {
-                **version_info,
-                "derive": derive_version(
-                    {r["id"]: r for r in budget_rows}, facteurs_version),
-            }),
+            # Toujours présente (None ou la version, sa dérive comprise —
+            # calculée plus haut, curseur ouvert, sur les VRAIS totaux).
+            "version": (None if version_info is None else version_info),
             "project": {
                 # Phase 6 — identité depuis le hub (_ident). statut + ad_hub_project_id
                 # restent du projet local (propre / lien).
