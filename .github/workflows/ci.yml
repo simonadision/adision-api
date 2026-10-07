@@ -190,6 +190,7 @@ jobs:
             tests/test_ligne_commentaires.py \
             tests/test_lots_calc.py \
             tests/test_pdf_lots_recap.py \
+            tests/test_pont_bud_vers_est.py \
             tests/test_quantite_effective.py \
             tests/test_quantites_liees.py \
             tests/test_regroupements_lignes.py \

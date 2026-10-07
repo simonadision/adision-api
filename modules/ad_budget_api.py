@@ -4944,22 +4944,42 @@ def register_ad_budget_routes(get_conn):
             raise HTTPException(status_code=404, detail="Aucun projet Ad BUD lié à ce projet hub")
         return {"projet_id": row["id"], "statut": row["statut"]}
 
-    @router.get("/projets/{projet_id}/export-for-con")
-    def export_projet_for_con(projet_id: int,
-                              # LE CHANTIER SUIT UNE VERSION (Simon, 6 oct. 2026).
-                              # Sans ce paramètre, rien ne change : l'original.
-                              # Avec, les SOUS-TOTAUX sont recalculés depuis
-                              # l'original par les facteurs de la version — Ad CON
-                              # ne reçoit donc jamais une copie figée, et
-                              # l'original n'est jamais touché.
-                              version_id: Optional[int] = Query(None),
-                              user=Depends(jwt_user),
-                              authorization: Optional[str] = Header(None), session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
-        """Sprint 1.A Ad CON — Export du projet+lignes pour Ad CON.
+    # ══════════════════════════════════════════════════════════════════
+    # UNE SEULE FABRIQUE DE PAYLOAD, DEUX PORTES  (7 oct. 2026)
+    # ══════════════════════════════════════════════════════════════════
+    # Ad CON tire ce payload depuis le 1.A ; Ad EST le tire depuis
+    # aujourd'hui (Simon, 7 oct : « j'aimerais pouvoir ouvrir un projet fait
+    # dans ad bud dans ad est », puis « 1-copier le contenue vivent
+    # separéememt »).
+    #
+    # CE QUI DIFFÈRE EST UNIQUEMENT LA GARDE DE STATUT, et elle diffère pour
+    # une raison métier, pas par distraction :
+    #   * Ad CON suit un CHANTIER -> le budget doit être GAGNÉ
+    #     (EXPORT_CON_STATUTS) ; rien n'est à bâtir sur une soumission ;
+    #   * Ad EST reprend un budget pour ESTIMER -> le cas normal est
+    #     justement un projet EN SOUMISSION. La même garde y interdirait
+    #     exactement l'usage demandé.
+    #
+    # Le CALCUL, lui, reste unique. Le patron existait déjà deux fois dans la
+    # maison (Ad TAK -> Ad EST par `proposals`, Ad BUD -> Ad CON par cet
+    # export) : en écrire une TROISIÈME forme aurait été la faute, pas la
+    # solution. Deux chemins qui calculent le même total finissent toujours
+    # par diverger — c'est exactement ce qui a servi à Ad CON 474 fausses
+    # « lignes modifiées » le 7 octobre au matin.
+    def _payload_export_budget(projet_id, version_id, user, authorization,
+                               session_cookie, statuts_permis, refus_detail):
+        """Le projet + ses lignes, tels qu'un autre module les reprend.
 
-        Architecture PULL : Ad CON viendra appeler cet endpoint au Sprint 1.B
-        quand un user clique sur "🏗️ Démarrer suivi chantier" depuis Ad BUD,
-        pour créer le con_projects + figer les con_lines.
+        ÉCRIT POUR AD CON (Sprint 1.A), SERVI AUSSI À AD EST depuis le
+        7 oct. 2026. Le payload n'a pas eu à changer d'un champ :
+        `app_est.estimation_items` porte les MÊMES trois blocs que
+        `con_lines` — matériaux (prix unitaire + ajustement), main-d'œuvre
+        (heures + taux + ajustement), sous-traitance (montant + type +
+        fournisseur + ajustement) — parce que les deux descendent de
+        `ad_budget.budget_lignes`. Vérifié colonne par colonne le 7 oct.
+
+        Architecture PULL : le module destinataire appelle, copie, et vit sa
+        vie ensuite. Ad BUD n'apprend rien de cet appel et ne pousse rien.
 
         Mapping BUD → con_lines (17 champs cibles, cadré au STOP 1.A.1) :
           bud_line_id                ← budget_lignes.id          (INTEGER stringifié ;
@@ -4989,9 +5009,11 @@ def register_ad_budget_routes(get_conn):
         Sécurité :
           - JWT user requis (jwt_user dep)
           - Auth via _load_and_authorize_projet (mode='read', supervisor OK)
-          - Refuse 403 si statut hors EXPORT_CON_STATUTS (defense in depth ;
+          - Refuse 403 si statut hors `statuts_permis` (defense in depth ;
             l'UI ne montre "Démarrer suivi chantier" que sur un projet gagné,
-            mais on bloque aussi côté backend)
+            mais on bloque aussi côté backend). `statuts_permis=None` lève
+            cette garde-là, et SEULEMENT celle-là — c'est le cas d'Ad EST,
+            qui reprend un budget pendant qu'il est encore en soumission.
           - Lignes inactives (actif=FALSE) EXCLUSES de l'export
 
         organization_id fallback (décision STOP 1.A.1, critique #2) :
@@ -5030,20 +5052,16 @@ def register_ad_budget_routes(get_conn):
 
             # Defense in depth — l'UI n'affiche pas le bouton sur un projet
             # non gagné, mais un user qui tape l'URL doit être bloqué aussi.
-            if projet["statut"] not in EXPORT_CON_STATUTS:
-                # Le message NOMME les deux statuts acceptes. Un refus qui dit
+            # `statuts_permis = None` : AUCUNE garde de statut (Ad EST — un
+            # budget en soumission est le cas normal, pas l'exception).
+            if statuts_permis is not None and projet["statut"] not in statuts_permis:
+                # Le message NOMME les statuts acceptes. Un refus qui dit
                 # seulement « mauvais statut » oblige a fouiller le code pour
                 # savoir quoi changer ; celui-ci se lit et s'applique.
                 _actuel = projet["statut"]
                 raise HTTPException(
                     status_code=403,
-                    detail=(
-                        "Ad CON tire les lignes du budget Ad BUD, et seulement "
-                        "pour un projet gagné. Ce budget est au statut "
-                        f"« {LIBELLE_STATUT.get(_actuel, _actuel)} » : "
-                        "passez-le à « Projet en cours » ou « Projet en "
-                        "exécution » dans Ad BUD, puis rouvrez cet écran."
-                    ),
+                    detail=refus_detail(LIBELLE_STATUT.get(_actuel, _actuel)),
                 )
 
             cur.execute(
@@ -5296,6 +5314,64 @@ def register_ad_budget_routes(get_conn):
             "lines": lines_out,
             "raw_snapshot": raw_snapshot,
         }
+
+    # ── PORTE 1 : Ad CON ───────────────────────────────────────────────
+    # Inchangée depuis le Sprint 1.A, garde de statut comprise. Son nom, son
+    # chemin et sa réponse ne bougent pas : Ad CON l'appelle en production.
+    @router.get("/projets/{projet_id}/export-for-con")
+    def export_projet_for_con(projet_id: int,
+                              # LE CHANTIER SUIT UNE VERSION (Simon, 6 oct. 2026).
+                              # Sans ce paramètre, rien ne change : l'original.
+                              # Avec, les SOUS-TOTAUX sont recalculés depuis
+                              # l'original par les facteurs de la version — Ad CON
+                              # ne reçoit donc jamais une copie figée, et
+                              # l'original n'est jamais touché.
+                              version_id: Optional[int] = Query(None),
+                              user=Depends(jwt_user),
+                              authorization: Optional[str] = Header(None),
+                              session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
+        return _payload_export_budget(
+            projet_id, version_id, user, authorization, session_cookie,
+            statuts_permis=EXPORT_CON_STATUTS,
+            refus_detail=lambda libelle: (
+                "Ad CON tire les lignes du budget Ad BUD, et seulement "
+                "pour un projet gagné. Ce budget est au statut "
+                f"« {libelle} » : passez-le à « Projet en cours » ou "
+                "« Projet en exécution » dans Ad BUD, puis rouvrez cet écran."
+            ),
+        )
+
+    # ── PORTE 2 : Ad EST ───────────────────────────────────────────────
+    # « j'aimerais pouvoir ouvrir un projet fait dans ad bud dans ad est »
+    # (Simon, 7 oct. 2026 08 h 08), et : « 1-copier le contenue vivent
+    # separéememt » (08 h 10).
+    #
+    # AUCUNE GARDE DE STATUT, ET C'EST LE POINT. Reprendre un budget pour
+    # estimer se fait justement AVANT que le projet soit gagné : appliquer
+    # EXPORT_CON_STATUTS ici interdirait l'usage demandé dans la totalité des
+    # cas normaux. Mesure du 7 oct, organisation Contracta : 6 projets en
+    # soumission sur 25 — tous refusés par la garde d'Ad CON.
+    #
+    # CE QUI PROTÈGE QUAND MÊME, et c'est inchangé : _load_and_authorize_projet
+    # en lecture (404 hors périmètre), l'identité relue au hub (502 si le hub
+    # est muet, jamais un repli silencieux sur une copie locale), et les
+    # lignes inactives exclues.
+    #
+    # C'EST UNE LECTURE, RIEN D'AUTRE. Ad BUD ne pousse pas vers Ad EST et
+    # n'apprend rien de cet appel : Ad EST tire, copie, et les deux vivent
+    # séparément ensuite — la dérive entre les deux est VOULUE, c'est la
+    # demande de Simon, pas un défaut à rattraper plus tard.
+    @router.get("/projets/{projet_id}/export-for-est")
+    def export_projet_for_est(projet_id: int,
+                              version_id: Optional[int] = Query(None),
+                              user=Depends(jwt_user),
+                              authorization: Optional[str] = Header(None),
+                              session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
+        return _payload_export_budget(
+            projet_id, version_id, user, authorization, session_cookie,
+            statuts_permis=None,
+            refus_detail=None,
+        )
 
     @router.get("/projets/{projet_id}/has-con")
     def projet_has_con(
