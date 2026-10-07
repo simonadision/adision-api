@@ -111,6 +111,32 @@ def test_insert_et_completer_partagent_la_meme_insertion():
     assert src.count("INSERT INTO ad_budget.budget_lignes") == 2  # Ad TYP + _insert_manual
 
 
+def test_jumelle_manuelle_d_une_ligne_ad_typ_n_est_pas_un_manque():
+    # Budget 328 réel : Assurances / Cautionnement en MANUELLES, le gabarit
+    # les porte en Ad TYP (01 00 00.07). Ce n'est pas un manque.
+    gab = [{"numero": "01 00 00", "sous_sections": [{"code_csi": "01 00 00", "lignes": [
+        {"type": "ad_typ", "description": "Assurances", "code_typ": "01 00 00.07"},
+        {"type": "ad_typ", "description": "Cautionnement", "code_typ": "01 00 00.07"},
+        {"type": "manuelle", "description": "Frais de gardiennage", "code_typ": None},
+    ]}]}]
+    budget = [{"description": "Assurances", "source_typ_code": None},
+              {"description": "Cautionnement", "source_typ_code": None}]
+    m = G.lignes_gabarit_manquantes(gab, budget)
+    assert [x["description"] for x in m] == ["Frais de gardiennage"]
+
+
+def test_le_code_exact_passe_avant_la_jumelle_par_description():
+    # Une ligne Ad TYP du budget au BON code ne doit pas être « prise » par
+    # une ligne manuelle homonyme du gabarit, laissant l'Ad TYP en manque.
+    gab = [{"numero": "02 00 00", "sous_sections": [{"code_csi": "02 00 00", "lignes": [
+        {"type": "manuelle", "description": "Décontamination", "code_typ": None},
+        {"type": "ad_typ", "description": "Décontamination", "code_typ": "02 56 13.01"},
+    ]}]}]
+    budget = [{"description": "Décontamination", "source_typ_code": "02 56 13.01"}]
+    m = G.lignes_gabarit_manquantes(gab, budget)
+    assert [(x["type"], x["description"]) for x in m] == [("manuelle", "Décontamination")]
+
+
 if __name__ == "__main__":
     import inspect
     n = 0

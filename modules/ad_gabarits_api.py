@@ -121,17 +121,28 @@ def lignes_gabarit_manquantes(sections, lignes_projet):
     manque). Les lignes vides « à remplir » ne comptent ni d'un côté ni de
     l'autre.
 
+    DEUX PASSES (7 oct. 2026, mesuré sur le budget 328) : « Assurances » et
+    « Cautionnement » y sont des lignes MANUELLES, le gabarit les porte
+    désormais en Ad TYP. Par le seul code, elles passaient pour manquantes --
+    les ajouter aurait créé des doublons. Passe 1 : code catalogue contre
+    code catalogue. Passe 2, pour ce qui reste : description contre
+    description, quel que soit le type de part et d'autre. Le code d'abord,
+    pour qu'une jumelle par description ne prenne pas la place d'une ligne
+    qui avait son code exact.
+
     Chaque manquante porte une `cle` STABLE d'un aperçu à l'autre (le contenu
     et son rang d'apparition) : c'est elle que l'écran renvoie pour dire
     lesquelles ajouter.
     """
-    present = {}
+    budget = []
     for lg in lignes_projet or []:
-        k = _cle_ligne(lg.get("source_typ_code"), lg.get("description"))
-        if k:
-            present[k] = present.get(k, 0) + 1
+        code = (lg.get("source_typ_code") or "").strip()
+        texte = _cle_texte(lg.get("description"))
+        if code or texte:
+            budget.append({"code": code, "texte": texte, "pris": False})
+
+    gab = []
     rang = {}
-    manquantes = []
     for div in sections or []:
         div_code = ((div.get("numero") or div.get("nom_section") or "").strip())
         for ss in div.get("sous_sections") or []:
@@ -143,19 +154,32 @@ def lignes_gabarit_manquantes(sections, lignes_projet):
                     continue
                 n = rang.get(k, 0)
                 rang[k] = n + 1
-                if present.get(k, 0) > 0:
-                    present[k] -= 1
-                    continue
-                manquantes.append({
-                    "cle": f"{k[0]}|{k[1]}|{n}",
-                    "division": div_code,
-                    "section": sec_code,
-                    "type": "ad_typ" if code else "manuelle",
-                    "code_typ": code or None,
-                    "description": lg.get("description") or "",
-                    "_ligne": lg,
-                })
-    return manquantes
+                gab.append({"k": k, "n": n, "code": code, "texte": _cle_texte(lg.get("description")),
+                            "div": div_code, "sec": sec_code, "lg": lg, "trouvee": False})
+
+    def prendre(pred):
+        for b in budget:
+            if not b["pris"] and pred(b):
+                b["pris"] = True
+                return True
+        return False
+
+    for g in gab:  # passe 1 : code contre code
+        if g["code"]:
+            g["trouvee"] = prendre(lambda b, c=g["code"]: b["code"] == c)
+    for g in gab:  # passe 2 : description contre description
+        if not g["trouvee"] and g["texte"]:
+            g["trouvee"] = prendre(lambda b, t=g["texte"]: b["texte"] == t)
+
+    return [{
+        "cle": f"{g['k'][0]}|{g['k'][1]}|{g['n']}",
+        "division": g["div"],
+        "section": g["sec"],
+        "type": "ad_typ" if g["code"] else "manuelle",
+        "code_typ": g["code"] or None,
+        "description": g["lg"].get("description") or "",
+        "_ligne": g["lg"],
+    } for g in gab if not g["trouvee"]]
 
 
 def register_ad_gabarits_routes(get_conn):
