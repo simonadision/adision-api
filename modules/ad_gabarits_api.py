@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 from typing import Optional
 
 import httpx
@@ -75,6 +76,86 @@ def _index_insertion_par_code(codes, nouveau) -> int:
         if k is not None and k <= cle:
             pos = i + 1
     return pos
+
+
+# ═════════════════════════════════════════════════════════════════════
+# COMPLÉTER UN BUDGET DEPUIS SON GABARIT (7 oct. 2026)
+# ═════════════════════════════════════════════════════════════════════
+# Simon, 13 h 32 : « pourquoi mon gabarit n'est pas comme celui par
+# défaut » -- le budget 328 avait été créé à 12 h 43, le gabarit enrichi
+# ensuite (133 enregistrements de 12 h 47 à 13 h 15). Un gabarit ne
+# s'applique qu'à l'insertion ; « go 2 » : un geste qui AJOUTE les lignes du
+# gabarit absentes du budget, sans toucher, modifier ni supprimer une ligne
+# existante.
+#
+# CORRESPONDANCE PAR CONTENU, PAS PAR IDENTIFIANT : l'éditeur remplace toute
+# la structure à chaque enregistrement (_replace_structure), les id des
+# lignes de gabarit changent donc sans cesse. Une ligne Ad TYP se reconnaît
+# à son code catalogue, une ligne manuelle à sa description (casse, accents
+# et espaces ignorés). Sans regarder la section : une ligne que Simon a
+# déplacée dans son budget ne doit pas revenir en double.
+#
+# MULTI-ENSEMBLE : un gabarit qui porte deux fois le même item en attend
+# deux ; le budget qui n'en a qu'un en reçoit un de plus, pas deux.
+
+def _cle_texte(v) -> str:
+    t = unicodedata.normalize("NFKD", str(v or ""))
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    return " ".join(t.lower().split())
+
+
+def _cle_ligne(code_typ, description):
+    code = (code_typ or "").strip()
+    if code:
+        return ("typ", code)
+    texte = _cle_texte(description)
+    return ("man", texte) if texte else None
+
+
+def lignes_gabarit_manquantes(sections, lignes_projet):
+    """Les lignes du gabarit absentes du budget, dans l'ordre du gabarit.
+
+    `sections` : _full_gabarit (divisions → sous_sections → lignes).
+    `lignes_projet` : [{description, source_typ_code}] -- TOUTES les lignes
+    du budget, actives ou non (une ligne désactivée est un choix, pas un
+    manque). Les lignes vides « à remplir » ne comptent ni d'un côté ni de
+    l'autre.
+
+    Chaque manquante porte une `cle` STABLE d'un aperçu à l'autre (le contenu
+    et son rang d'apparition) : c'est elle que l'écran renvoie pour dire
+    lesquelles ajouter.
+    """
+    present = {}
+    for lg in lignes_projet or []:
+        k = _cle_ligne(lg.get("source_typ_code"), lg.get("description"))
+        if k:
+            present[k] = present.get(k, 0) + 1
+    rang = {}
+    manquantes = []
+    for div in sections or []:
+        div_code = ((div.get("numero") or div.get("nom_section") or "").strip())
+        for ss in div.get("sous_sections") or []:
+            sec_code = ((ss.get("code_csi") or "").strip() or div_code or "Divers")
+            for lg in ss.get("lignes") or []:
+                code = (lg.get("code_typ") or "").strip() if lg.get("type") == "ad_typ" else ""
+                k = _cle_ligne(code, lg.get("description"))
+                if not k:
+                    continue
+                n = rang.get(k, 0)
+                rang[k] = n + 1
+                if present.get(k, 0) > 0:
+                    present[k] -= 1
+                    continue
+                manquantes.append({
+                    "cle": f"{k[0]}|{k[1]}|{n}",
+                    "division": div_code,
+                    "section": sec_code,
+                    "type": "ad_typ" if code else "manuelle",
+                    "code_typ": code or None,
+                    "description": lg.get("description") or "",
+                    "_ligne": lg,
+                })
+    return manquantes
 
 
 def register_ad_gabarits_routes(get_conn):
@@ -1522,6 +1603,95 @@ def register_ad_gabarits_routes(get_conn):
             cur.close()
             conn.close()
 
+    def _inserer_ligne_gabarit(cur, projet_id, sec_code, lg, jwt_token, warnings):
+        """Insère UNE ligne de gabarit dans un budget -- partagé par
+        insert-gabarit et completer-gabarit (7 oct. 2026) : une ligne
+        complétée doit naître EXACTEMENT comme une ligne insérée."""
+        desc = lg.get("description") or ""
+        code = (lg.get("code_typ") or "").strip() or None
+        if lg.get("type") == "ad_typ" and code:
+            try:
+                typ = typ_service.get_ligne(jwt_token, code)
+            except typ_service.TypServiceError as e:
+                if e.status_code == 404:
+                    # Introuvable → ligne manuelle + signalement.
+                    warnings.append({
+                        "code": code, "description": desc,
+                        "message": "item catalogue introuvable, inséré en ligne manuelle",
+                    })
+                    _insert_manual(cur, projet_id, sec_code, desc)
+                    return
+                # Indispo (502, etc.) : on abandonne proprement.
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Ad TYP indisponible : {e.detail}",
+                )
+            # Tarifé au catalogue COURANT mais à QTÉ 0 (défaut Ad BUD :
+            # une ligne neuve naît sans quantité). prix_unitaire (par
+            # unité) est préservé → quand l'user saisit une qté, MAT
+            # scale live et MO/ST sont re-snapshotés via apply-typ.
+            m = _map_typ_to_budget_cols(typ, 0, cur.connection)
+            # ═══════════════════════════════════════════════
+            # LA SOUS-SECTION DU GABARIT GAGNE (9 sept 2026)
+            # ═══════════════════════════════════════════════
+            # Simon : « pourquoi j'ai encore resultat communs en
+            # plomberie alors que j'ai changé le gabarit ... les
+            # changements doivent être toujours appliqués ».
+            #
+            # La ligne prenait le code CSI de l'ITEM catalogue
+            # (m["section"] = typ["code"]) plutôt que celui de la
+            # sous-section où l'utilisateur l'avait rangée. Le
+            # commentaire d'origine justifiait ça par « le
+            # regroupement dérive des 4 premiers chiffres, donc le
+            # suffixe .01 n'altère pas le rangement » — vrai pour
+            # le SUFFIXE, faux pour le PRÉFIXE.
+            #
+            # Cas réel : sous-section « 22 10 00 — Tuyauterie et
+            # raccords de plomberie », contenant les items
+            # « 22 05 00.01 » et « 22 20 00.01 ». Les 4 premiers
+            # chiffres ne sont PAS ceux de la sous-section : les
+            # lignes atterrissaient dans « 22 05 » et « 22 20 »,
+            # et le projet affichait « Résultats communs pour la
+            # plomberie » — un titre MasterFormat que Simon n'a
+            # jamais choisi — au lieu de sa propre sous-section.
+            # Réorganiser le gabarit ne changeait donc rien.
+            #
+            # L'ORGANISATION DU GABARIT EST UN CHOIX, pas un
+            # accident : c'est elle qui range, pas le catalogue.
+            # Rien n'est perdu — le code catalogue reste sur la
+            # ligne dans `source_typ_code` (colonne dédiée, lue
+            # par ⟳ re-tarif et apply-typ).
+            #
+            # apply-typ garde son comportement : piocher un item
+            # DIRECTEMENT dans le budget n'a aucune sous-section
+            # de référence, le code de l'item est alors la seule
+            # information disponible.
+            line_section = sec_code or m["section"]
+            # Sprint PU_ST référence Ad TYP — pré-remplissage à
+            # l'insertion gabarit. override = FALSE (héritage
+            # carnet). Le mode COMPUTED côté Ad BUD prend le
+            # relais quand l'user saisira une qté > 0.
+            # Auto-incrément CSI : un gabarit contenant N fois le
+            # même code → suffixes séquentiels libres. Le SELECT
+            # interne voit les INSERTs précédents de la transaction
+            # courante (PostgreSQL READ COMMITTED).
+            section_final = _next_free_csi_suffix(cur, projet_id, line_section)
+            cur.execute(
+                """
+                INSERT INTO ad_budget.budget_lignes
+                (projet_id, section, description, unite, prix_unitaire, qte,
+                 heures, taux_horaire, sous_traitant_montant, prix_unitaire_st,
+                 ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant, actif,
+                 source_typ_code, source_typ_snapshot_at)
+                VALUES (%s,%s,%s,%s,%s,0,%s,%s,%s,%s,0,0,0,TRUE,%s,NOW())
+                """,
+                (projet_id, section_final, desc or m["description"], m["unite"],
+                 m["prix_unitaire"], m["heures"], m["taux_horaire"],
+                 m["sous_traitant_montant"], m["prix_unitaire_st"], code),
+            )
+        else:
+            _insert_manual(cur, projet_id, sec_code, desc)
+
     @router.post("/projets/{projet_id}/insert-gabarit")
     def insert_gabarit(projet_id: int, data: dict,
                        authorization: Optional[str] = Header(None),
@@ -1576,93 +1746,8 @@ def register_ad_gabarits_routes(get_conn):
                         inserted += 1
                         continue
                     for lg in lignes_ss:
-                        desc = lg.get("description") or ""
-                        code = (lg.get("code_typ") or "").strip() or None
-                        if lg.get("type") == "ad_typ" and code:
-                            try:
-                                typ = typ_service.get_ligne(jwt_token, code)
-                            except typ_service.TypServiceError as e:
-                                if e.status_code == 404:
-                                    # Introuvable → ligne manuelle + signalement.
-                                    warnings.append({
-                                        "code": code, "description": desc,
-                                        "message": "item catalogue introuvable, inséré en ligne manuelle",
-                                    })
-                                    _insert_manual(cur, projet_id, sec_code, desc)
-                                    inserted += 1
-                                    continue
-                                # Indispo (502, etc.) : on abandonne proprement.
-                                raise HTTPException(
-                                    status_code=502,
-                                    detail=f"Ad TYP indisponible : {e.detail}",
-                                )
-                            # Tarifé au catalogue COURANT mais à QTÉ 0 (défaut Ad BUD :
-                            # une ligne neuve naît sans quantité). prix_unitaire (par
-                            # unité) est préservé → quand l'user saisit une qté, MAT
-                            # scale live et MO/ST sont re-snapshotés via apply-typ.
-                            m = _map_typ_to_budget_cols(typ, 0, cur.connection)
-                            # ═══════════════════════════════════════════════
-                            # LA SOUS-SECTION DU GABARIT GAGNE (9 sept 2026)
-                            # ═══════════════════════════════════════════════
-                            # Simon : « pourquoi j'ai encore resultat communs en
-                            # plomberie alors que j'ai changé le gabarit ... les
-                            # changements doivent être toujours appliqués ».
-                            #
-                            # La ligne prenait le code CSI de l'ITEM catalogue
-                            # (m["section"] = typ["code"]) plutôt que celui de la
-                            # sous-section où l'utilisateur l'avait rangée. Le
-                            # commentaire d'origine justifiait ça par « le
-                            # regroupement dérive des 4 premiers chiffres, donc le
-                            # suffixe .01 n'altère pas le rangement » — vrai pour
-                            # le SUFFIXE, faux pour le PRÉFIXE.
-                            #
-                            # Cas réel : sous-section « 22 10 00 — Tuyauterie et
-                            # raccords de plomberie », contenant les items
-                            # « 22 05 00.01 » et « 22 20 00.01 ». Les 4 premiers
-                            # chiffres ne sont PAS ceux de la sous-section : les
-                            # lignes atterrissaient dans « 22 05 » et « 22 20 »,
-                            # et le projet affichait « Résultats communs pour la
-                            # plomberie » — un titre MasterFormat que Simon n'a
-                            # jamais choisi — au lieu de sa propre sous-section.
-                            # Réorganiser le gabarit ne changeait donc rien.
-                            #
-                            # L'ORGANISATION DU GABARIT EST UN CHOIX, pas un
-                            # accident : c'est elle qui range, pas le catalogue.
-                            # Rien n'est perdu — le code catalogue reste sur la
-                            # ligne dans `source_typ_code` (colonne dédiée, lue
-                            # par ⟳ re-tarif et apply-typ).
-                            #
-                            # apply-typ garde son comportement : piocher un item
-                            # DIRECTEMENT dans le budget n'a aucune sous-section
-                            # de référence, le code de l'item est alors la seule
-                            # information disponible.
-                            line_section = sec_code or m["section"]
-                            # Sprint PU_ST référence Ad TYP — pré-remplissage à
-                            # l'insertion gabarit. override = FALSE (héritage
-                            # carnet). Le mode COMPUTED côté Ad BUD prend le
-                            # relais quand l'user saisira une qté > 0.
-                            # Auto-incrément CSI : un gabarit contenant N fois le
-                            # même code → suffixes séquentiels libres. Le SELECT
-                            # interne voit les INSERTs précédents de la transaction
-                            # courante (PostgreSQL READ COMMITTED).
-                            section_final = _next_free_csi_suffix(cur, projet_id, line_section)
-                            cur.execute(
-                                """
-                                INSERT INTO ad_budget.budget_lignes
-                                (projet_id, section, description, unite, prix_unitaire, qte,
-                                 heures, taux_horaire, sous_traitant_montant, prix_unitaire_st,
-                                 ajust_materiaux, ajust_main_oeuvre, ajust_sous_traitant, actif,
-                                 source_typ_code, source_typ_snapshot_at)
-                                VALUES (%s,%s,%s,%s,%s,0,%s,%s,%s,%s,0,0,0,TRUE,%s,NOW())
-                                """,
-                                (projet_id, section_final, desc or m["description"], m["unite"],
-                                 m["prix_unitaire"], m["heures"], m["taux_horaire"],
-                                 m["sous_traitant_montant"], m["prix_unitaire_st"], code),
-                            )
-                            inserted += 1
-                        else:
-                            _insert_manual(cur, projet_id, sec_code, desc)
-                            inserted += 1
+                        _inserer_ligne_gabarit(cur, projet_id, sec_code, lg, jwt_token, warnings)
+                        inserted += 1
 
             # Répercute les noms personnalisés du gabarit (nom_section /
             # libelle) dans le système csi_titres (portée « gabarit »,
@@ -1728,6 +1813,70 @@ def register_ad_gabarits_routes(get_conn):
             )
             conn.commit()
             return {"status": "inserted", "nb_lignes": inserted, "warnings": warnings}
+        except HTTPException:
+            conn.rollback()
+            raise
+        finally:
+            cur.close()
+            conn.close()
+
+
+    @router.post("/projets/{projet_id}/completer-gabarit")
+    def completer_gabarit(projet_id: int, data: Optional[dict] = None,
+                          authorization: Optional[str] = Header(None),
+                          session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME),
+                          user=Depends(jwt_user)):
+        """COMPLÉTER UN BUDGET DEPUIS SON GABARIT (7 oct. 2026) -- voir
+        lignes_gabarit_manquantes. Deux temps, jamais un seul :
+          - `appliquer` absent/faux : APERÇU, rien n'est écrit -- la liste
+            des lignes du gabarit absentes du budget ;
+          - `appliquer: true` + `cles` : ajoute CELLES-LÀ seulement (une
+            ligne supprimée exprès dans le budget reparaît à l'aperçu : on
+            la décoche). Aucune ligne existante n'est touchée.
+        `gabarit_id` : par défaut le gabarit d'origine du budget."""
+        data = data or {}
+        appliquer = bool(data.get("appliquer"))
+        org = _org(user)
+        _load_and_authorize_projet(get_conn, projet_id, user, "write" if appliquer else "read")
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
+        conn = get_conn()
+        cur = conn.cursor(row_factory=dict_row)
+        try:
+            gabarit_id = data.get("gabarit_id")
+            if not gabarit_id:
+                cur.execute("SELECT source_gabarit_id FROM ad_budget.projets WHERE id = %s", (projet_id,))
+                r = cur.fetchone()
+                gabarit_id = r and r.get("source_gabarit_id")
+            if not gabarit_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Ce budget n'est né d'aucun gabarit : choisissez le gabarit à comparer.")
+            gab = _load_gabarit_scoped(cur, gabarit_id, org)  # scope strict
+            sections = _full_gabarit(cur, gabarit_id)
+            # FOR UPDATE à l'écriture : deux clics simultanés ne doivent pas
+            # ajouter deux fois la même ligne manquante.
+            cur.execute(
+                "SELECT id, description, source_typ_code FROM ad_budget.budget_lignes "
+                "WHERE projet_id = %s" + (" FOR UPDATE" if appliquer else ""),
+                (projet_id,),
+            )
+            manquantes = lignes_gabarit_manquantes(sections, cur.fetchall())
+            nom = (gab or {}).get("nom") if isinstance(gab, dict) else None
+            if not appliquer:
+                return {
+                    "gabarit_id": gabarit_id, "gabarit_nom": nom,
+                    "manquantes": [{k: v for k, v in m.items() if k != "_ligne"} for m in manquantes],
+                }
+            voulues = set(data.get("cles") or [])
+            warnings, inserted = [], 0
+            for m in manquantes:
+                if m["cle"] not in voulues:
+                    continue
+                _inserer_ligne_gabarit(cur, projet_id, m["section"], m["_ligne"], jwt_token, warnings)
+                inserted += 1
+            conn.commit()
+            return {"status": "completed", "gabarit_id": gabarit_id, "nb_lignes": inserted,
+                    "warnings": warnings}
         except HTTPException:
             conn.rollback()
             raise
