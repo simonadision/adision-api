@@ -118,7 +118,15 @@ def _changements_journal(avant, nouveaux):
 class LignesVersion(dict):
     """Les lignes d'une version, et l'arrondi au dollar du projet avec
     lequel leurs totaux ont été calculés : les deux voyagent ENSEMBLE, pour
-    que personne ne compare un total à un arrondi relu ailleurs."""
+    que personne ne compare un total à un arrondi relu ailleurs.
+
+    SI L'ARRONDI « SE PERD », C'EST ICI. `arrondi` est un attribut de CLASSE
+    (défaut None), pas d'instance : une instance sur laquelle on a oublié de
+    le poser, ou une copie `dict(lignes)` / `{**lignes}`, lit None. None veut
+    dire « inconnu » et derive_version ne recalcule alors rien : la
+    comparaison redevient celle d'avant le 7 oct. 2026. C'est voulu — la
+    dégradation va vers l'ancien comportement, jamais vers un faux chiffre
+    (relu par PC3)."""
     arrondi = None
 
 
