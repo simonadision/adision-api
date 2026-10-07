@@ -5164,13 +5164,52 @@ def register_ad_budget_routes(get_conn):
             # Cast safe Decimal -> float (psycopg renvoie Decimal pour NUMERIC).
             prix_u = float(row.get("prix_unitaire") or 0)
             ajust_mat = float(row.get("ajust_materiaux") or 0)
-            heures = float(row.get("heures") or 0)
+            # LES MÊMES FONCTIONS QUE L'ÉCRAN (7 oct. 2026) — voir le bloc
+            # « TROIS RÈGLES QUI MANQUAIENT » sous le calcul des sous-totaux.
+            heures = _heures_effectives(row.get("unite"), row.get("heures"),
+                                        row.get("heures_manuelles"), qty_eff,
+                                        row.get("production_valeur"))
             taux = float(row.get("taux_horaire") or 0)
             ajust_mo = float(row.get("ajust_main_oeuvre") or 0)
             st_amount = float(row.get("sous_traitant_montant") or 0)
             ajust_st = float(row.get("ajust_sous_traitant") or 0)
 
-            mat_subtotal = qty_eff * prix_u * (1.0 + ajust_mat / 100.0)
+            # ══════════════════════════════════════════════════════════
+            # TROIS RÈGLES QUI MANQUAIENT ICI  (trouvé par PC2, 7 oct. 2026)
+            # ══════════════════════════════════════════════════════════
+            # PC2 mesurait la parité vers Ad EST ; le défaut était en amont,
+            # dans CE calcul, et Ad CON le recevait depuis le Sprint 1.A.
+            # La source unique `compute_budget_totals` (l. ~1392) applique
+            # trois choses que l'export ignorait :
+            #
+            #   1. `quantite_effective(qte, unite, qte_facteur)` -- l'unité
+            #      « % » (qté / 100) et le FACTEUR d'unité (plin/mois…) ;
+            #   2. `heures_effectives(...)` -- l'unité « hr » (heures = qté)
+            #      et la MO par PRODUCTION (`production_valeur`) ;
+            #   3. `ajustement_pct` -- l'ajustement de LIGNE.
+            #
+            # CE QUE ÇA DONNAIT, mesuré (cas synthétiques, formules portées) :
+            #   contingence 2 % à 1 010 098 $ : 20 201,96 -> 2 020 196 (×100)
+            #   unité « hr », heures = qté    :        960 -> 0
+            #   MO par production, 10 u à 4/h :        200 -> 0
+            #   facteur 1 139 plin × 6 mois   :     34 170 -> 5 695
+            #   ajustement de ligne 5 %       :        525 -> 500
+            # `contract_initial_amount` -- le CONTRAT INITIAL d'un chantier --
+            # était donc faux dès qu'un budget portait un de ces cas.
+            #
+            # POURQUOI PERSONNE NE L'A VU PENDANT DES SEMAINES : le commentaire
+            # ci-dessous (16 sept.) est JUSTE, et il explique très bien
+            # pourquoi `qty_eff` ne doit pas multiplier les HEURES. Il a fait
+            # croire que ce bloc avait été relu en entier. Un commentaire juste
+            # peut masquer un défaut voisin.
+            #
+            # L'ARRONDI RESTE UN ÉCART CONNU, NON TRAITÉ ICI : `compute_budget_totals`
+            # arrondit le TOTAL de ligne au dollar quand `arrondi_dollar` est
+            # posé (jusqu'à 0,50 $/ligne). Le répartir sur trois sous-totaux
+            # séparés demande une règle qui n'existe pas encore -- on ne
+            # l'invente pas en passant. Nommé, pas oublié.
+            qeff_mat = quantite_effective(qty_eff, row.get("unite"), row.get("qte_facteur"))
+            mat_subtotal = qeff_mat * prix_u * (1.0 + ajust_mat / 100.0)
             # PAS de qty_eff ici (trouvé 16 sept. 2026, capture de Simon : Main
             # d'œuvre à 5 416,96 $ dans Ad CON contre 41 049,00 $ dans Ad BUD
             # pour le même budget). `heures` est déjà le total HEURES de la
@@ -5190,6 +5229,17 @@ def register_ad_budget_routes(get_conn):
             # reste le montant BRUT saisi, non gaté — seul st_subtotal (la
             # contribution au contrat) est exclu tant que qté=0.
             st_subtotal = (st_amount * (1.0 + ajust_st / 100.0)) if qty_eff > 0 else 0.0
+
+            # L'AJUSTEMENT DE LIGNE porte sur le TOTAL dans la source unique
+            # (`tot_real = st * (1 + adj/100)`). Le distribuer sur les trois
+            # sous-totaux est EXACTEMENT équivalent -- (a+b+c)(1+adj) =
+            # a(1+adj) + b(1+adj) + c(1+adj) -- et c'est la seule forme
+            # possible ici, où les trois blocs voyagent séparément.
+            _adj = float(row.get("ajustement_pct") or 0)
+            if _adj:
+                mat_subtotal *= (1.0 + _adj / 100.0)
+                mo_subtotal *= (1.0 + _adj / 100.0)
+                st_subtotal *= (1.0 + _adj / 100.0)
 
             # LE FACTEUR DE LA VERSION S'APPLIQUE AUX SOUS-TOTAUX, JAMAIS AUX
             # VALEURS UNITAIRES. Un débalancement déplace des MONTANTS entre
