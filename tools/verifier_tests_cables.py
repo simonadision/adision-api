@@ -38,9 +38,6 @@ import sys
 
 # Fichier -> raison. Chaque entree est une DECISION, pas un oubli.
 EXCLUSIONS = {
-    # ── DETTE OUVERTE (PC4, 7 oct 2026) : le jeton de PC4 n'a pas le scope
-    #    `workflow` (push de ci.yml refuse). A cabler par Simon, puis retirer d'ici.
-    "tests/test_journal_parametres_financiers.py": "a cabler dans ci.yml -- jeton PC4 sans scope workflow (dette nommee, 7 oct 2026)",
     # ── Besoin du depot frere adision-monorepo + node : pre-push local
     #    seulement (decision deja actee en tete de ci.yml).
     "tests/test_devis_fidelity.py": "depot frere adision-monorepo requis -- pre-push local (cf. tete de ci.yml)",
