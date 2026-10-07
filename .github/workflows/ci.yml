@@ -185,6 +185,7 @@ jobs:
             tests/test_duplicate_lot_endpoint.py \
             tests/test_completer_gabarit.py \
             tests/test_correctif_catalogue.py \
+            tests/test_export_sous_totaux_justes.py \
             tests/test_gabarit_add_ligne.py \
             tests/test_item_routes_supprimees.py \
             tests/test_ligne_commentaires.py \
