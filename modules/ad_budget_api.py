@@ -2077,6 +2077,30 @@ _CSI_TYP_SECTION_RE = re.compile(r"^\d{2} \d{2} \d{2}$")
 _CSI_TYP_DIVISION_RE = re.compile(r"^\d{2}$")
 
 
+def _remonter_au_catalogue(avant, data, projet, user, jwt_token):
+    """Une ligne née d'Ad TYP dont l'unité ou la description vient d'être
+    corrigée : la correction part au catalogue Ad TYP de l'ORGANISATION DU
+    BUDGET. Rend None (rien à remonter) ou {statut, message}.
+
+    Garde : la couche custom d'Ad TYP écrit dans l'organisation DU JETON. Si
+    elle n'est pas celle du budget (super_admin dans le projet d'un client),
+    on n'écrit rien -- corriger SON catalogue pour le projet d'un autre serait
+    faux -- et on le dit."""
+    from modules.catalogue_writeback import champs_a_remonter, corriger_typ
+    code = ((avant or {}).get("source_typ_code") or "").strip()
+    if not code or "source_typ_code" in (data or {}):
+        return None                     # pas une ligne Ad TYP, ou on change d'item
+    champs = champs_a_remonter(avant, data)
+    if not champs:
+        return None
+    org_jeton = str(user.get("active_organization_id") or user.get("organization_id") or "")
+    org_budget = str((projet or {}).get("organization_id") or "")
+    if not jwt_token or not org_budget or org_jeton != org_budget:
+        return {"statut": "ignore",
+                "message": "Catalogue non corrigé : ce budget appartient à une autre organisation que la vôtre."}
+    return corriger_typ(jwt_token, code, champs)
+
+
 def _section_csi_typ(typ: dict):
     """Code CSI à poser dans la cellule code d'une ligne budget piochée dans Ad TYP.
 
@@ -9319,7 +9343,7 @@ def register_ad_budget_routes(get_conn):
         # PARENT. La mutation ci-dessous reste scopée WHERE id=%s AND
         # projet_id=%s : un ligne_id appartenant à un autre projet ne matche
         # rien -> aucune ligne modifiée.
-        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        projet_auth = _load_and_authorize_projet(get_conn, projet_id, user, "write")
         # Validation du type de sous-traitant. On accepte vide / null ou un
         # des types whitelist — refus 400 sur valeur inconnue pour éviter
         # qu'une typo silencieuse pollue la BD.
@@ -9562,7 +9586,8 @@ def register_ad_budget_routes(get_conn):
         # si elle change réellement une quantité (l'écran renvoie toute la ligne).
         cur_liens = conn.cursor(row_factory=dict_row)
         cur_liens.execute(
-            "SELECT quantites_liees_a, " + ", ".join(CHAMPS_QUANTITES_LIEES)
+            "SELECT quantites_liees_a, description, unite, source_typ_code, "
+            + ", ".join(CHAMPS_QUANTITES_LIEES)
             + " FROM ad_budget.budget_lignes WHERE id = %s AND projet_id = %s",
             (ligne_id, projet_id),
         )
@@ -9606,9 +9631,19 @@ def register_ad_budget_routes(get_conn):
         conn.close()
         _mark_budget_dirty_if_emitted(projet_id)  # mutation de ligne -> snapshot
         _push_budget_snapshot(get_conn, projet_id, authorization, session_cookie)  # pipeline Ad ANA (fire-and-forget)
+        # CORRECTIF → CATALOGUE DE L'ORGANISATION (7 oct. 2026, choix de Simon :
+        # « au catalogue, toujours », « catalogue de mon org »). Après le commit :
+        # le budget est enregistré quoi qu'il arrive au catalogue. Voir
+        # modules/catalogue_writeback.py.
+        try:
+            catalogue = _remonter_au_catalogue(avant, data, projet_auth, user,
+                                               _extract_bearer(authorization, None, session_cookie))
+        except Exception as e:  # jamais bloquant : le budget est déjà enregistré
+            logger.exception("remontée catalogue ligne %s : %s", ligne_id, e)
+            catalogue = {"statut": "echec", "message": f"Catalogue non corrigé : {e}"}
         # `copies` : lignes des autres lots qui viennent de suivre, que l'écran
         # remplace dans son état sans tout relire.
-        return {"status": "updated", "copies": copies}
+        return {"status": "updated", "copies": copies, "catalogue": catalogue}
 
     # ─────────────────────────────────────────────────────────────────
     # PATCH /projets/{projet_id}/lignes/reorder
