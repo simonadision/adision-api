@@ -2090,6 +2090,36 @@ def _remonter_au_catalogue(avant, data, projet, user, jwt_token):
     code = ((avant or {}).get("source_typ_code") or "").strip()
     if not code or "source_typ_code" in (data or {}):
         return None                     # pas une ligne Ad TYP, ou on change d'item
+    # ══════════════════════════════════════════════════════════════════
+    # LE MODE DE LA LIGNE DECIDE DU CATALOGUE  (Simon, 7 oct. 2026)
+    # ══════════════════════════════════════════════════════════════════
+    # « Ad MAT par defaut partout ; le MODE decide du catalogue ; JAMAIS les
+    # deux. » Une ecriture qui part dans les DEUX catalogues cree deux verites
+    # pour un meme article -- la famille qu'on passe la semaine a retirer.
+    #
+    # CE QUI SE PASSAIT : la seule condition de declenchement etait
+    # `source_typ_code`. Le mode n'etait JAMAIS regarde. Une ligne LIEE A UN
+    # ITEM AD MAT mais NEE d'Ad TYP (elle garde son code d'origine) voyait donc
+    # ses corrections d'unite et de description partir dans Ad TYP, pour toute
+    # l'organisation, alors que son catalogue est Ad MAT.
+    #
+    # MESURE DU 8 OCT, base d'Ad BUD, 4 939 lignes : 27 portent DEJA les deux
+    # liens, 3 795 Ad TYP seul, 241 Ad MAT seul. Ce sont ces 27 que la garde
+    # protege -- et leur sort (les laisser, les basculer) reste la decision de
+    # Simon, pas un effet de bord de ce correctif.
+    #
+    # POURQUOI `item_id_ad_mat` ET PAS UN CHAMP « mode » : il n'y en a pas.
+    # `type_source` en avait l'air -- elle est NULL sur les 4 939 lignes,
+    # colonne morte. Le mode se LIT sur le lien : un item Ad MAT attache, c'est
+    # le mode Ad MAT. `lierLigneAItemAdMat` (Ad BUD) efface d'ailleurs
+    # `source_typ_code` en posant le lien : les deux ne devraient jamais
+    # coexister, et cette garde est ce qui reste vrai quand ils coexistent
+    # quand meme.
+    if (avant or {}).get("item_id_ad_mat") is not None:
+        return {"statut": "ignore",
+                "message": ("Catalogue Ad TYP non corrige : cette ligne est liee a un item "
+                            "Ad MAT. Le mode de la ligne decide du catalogue, et une "
+                            "correction ne part jamais dans les deux.")}
     champs = champs_a_remonter(avant, data)
     if not champs:
         return None
@@ -9712,7 +9742,10 @@ def register_ad_budget_routes(get_conn):
         # si elle change réellement une quantité (l'écran renvoie toute la ligne).
         cur_liens = conn.cursor(row_factory=dict_row)
         cur_liens.execute(
+            # `item_id_ad_mat` est lu ICI parce que _remonter_au_catalogue en a
+            # besoin pour connaitre le MODE de la ligne (8 oct. 2026).
             "SELECT quantites_liees_a, description, unite, source_typ_code, "
+            "item_id_ad_mat, "
             + ", ".join(CHAMPS_QUANTITES_LIEES)
             + " FROM ad_budget.budget_lignes WHERE id = %s AND projet_id = %s",
             (ligne_id, projet_id),
