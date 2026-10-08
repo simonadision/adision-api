@@ -26,6 +26,7 @@ from psycopg.types.json import Json
 
 from modules.contacts_rapport import principal_affiche, contacts_supplementaires, lignes_supplementaires, contacts_depuis_param
 from modules import con_service, hub_service, mat_service, typ_service
+from modules import correspondance_comptes
 from modules.ad_budget_constants import AD_VIU_BLINDSPOT_DIVISIONS
 from modules.aggregates import adapt_budget_lines, compute_aggregates, _js_round
 
@@ -2543,6 +2544,18 @@ def _extraire_montant_pdf_lot(pdf_bytes: bytes):
 # (montants sous-traitant manquants, même cause : deux listes de colonnes
 # copiées-collées qui cessent de s'accorder). Une seule fonction ne peut
 # pas diverger d'elle-même.
+def _comptes_exportes(row, charte):
+    """{compte_mat, compte_mo, compte_st} d'une ligne pour l'export (Ad CON /
+    Ad EST). Natures PRÉSENTES : résolues (enregistré > ancien compte unique >
+    charte). Natures absentes : la valeur enregistrée, sans résolution.
+    `charte=None` est permis : seules les valeurs de la ligne servent alors."""
+    resolus = correspondance_comptes.comptes_par_nature(row, charte)
+    out = {}
+    for nature, col in correspondance_comptes.COLONNE_NATURE.items():
+        out[col] = resolus[nature] if nature in resolus else (row.get(col) or None)
+    return out
+
+
 def _dupliquer_lots_et_lignes(cur, projet_id_source, new_id):
     """Duplique les LOTS de `projet_id_source` vers `new_id` (correspondance
     ancien_lot_id -> nouveau_lot_id, un lot à la fois avec RETURNING pour une
@@ -2586,7 +2599,8 @@ def _dupliquer_lots_et_lignes(cur, projet_id_source, new_id):
            item_id_ad_mat, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
            source_typ_code, source_typ_snapshot_at,
            source_viu_analysis_id, source_viu_item_id,
-           production_valeur, production_unite, production_auto, qte_auto, qte_formule, qte_facteur)
+           production_valeur, production_unite, production_auto, qte_auto, qte_formule, qte_facteur,
+           compte_metier_force, compte_mat, compte_mo, compte_st)
         SELECT %s, {lot_id_expr}, source_item_id, section, description, unite, prix_unitaire,
                qte, ajustement_pct, note, actif, prix_unitaire_override,
                heures, heures_manuelles, taux_horaire, cout_sous_traitant, sous_traitant_nom,
@@ -2599,7 +2613,12 @@ def _dupliquer_lots_et_lignes(cur, projet_id_source, new_id):
                item_id_ad_mat, item_ad_mat_scope, source_mat_prix_snapshot, source_mat_snapshot_at,
                source_typ_code, source_typ_snapshot_at,
                source_viu_analysis_id, source_viu_item_id,
-               production_valeur, production_unite, production_auto, qte_auto, qte_formule, qte_facteur
+               production_valeur, production_unite, production_auto, qte_auto, qte_formule, qte_facteur,
+               -- LES COMPTES CHARTE Q VOYAGENT AVEC LA LIGNE (Simon, 8 oct. 2026 :
+               -- « le compte de charte Q est aussi important que le # CSI »). Une
+               -- copie qui les perdrait ferait retomber ses lignes en « non
+               -- associé ». compte_metier_force manquait déjà avant ce jour.
+               compte_metier_force, compte_mat, compte_mo, compte_st
         FROM ad_budget.budget_lignes WHERE projet_id = %s
         """,
         (new_id, *case_params, projet_id_source))
@@ -5183,6 +5202,20 @@ def register_ad_budget_routes(get_conn):
             except (TypeError, ValueError):
                 return 1.0
 
+        # ── LES COMPTES CHARTE Q PAR NATURE (8 oct. 2026, issue monorepo #1096) ──
+        # Chaque ligne exportée porte compte_mat / compte_mo / compte_st RÉSOLUS :
+        # le compte ENREGISTRÉ d'abord, sinon la charte Q de l'organisation
+        # (modules/correspondance_comptes.py, même ordre qu'Ad CON). La charte
+        # est chargée avec le JWT de l'appelant ; si elle ne vient pas (hub
+        # muet, autre organisation servie), on envoie quand même ce que la
+        # LIGNE sait (enregistré, ancien compte unique) et None pour le reste.
+        # L'EXPORT NE TOMBE JAMAIS PARCE QUE LA COMPTABILITÉ EST INJOIGNABLE.
+        # `charte_q_chargee` dit à Ad CON ce que veut dire un None : « à
+        # attribuer » (charte chargée, aucune paire) ou « hub injoignable ».
+        _org_charte = projet.get("organization_id") or user.get("organization_id")
+        _charte = correspondance_comptes.charger(_jwt, _org_charte)
+        charte_q_chargee = _charte is not None
+
         lines_out = []
         contract_total = 0.0
         for idx, row in enumerate(budget_rows, start=1):
@@ -5313,6 +5346,11 @@ def register_ad_budget_routes(get_conn):
                 # afficher sans dépendre d'Ad BUD. Hors lot : les deux à None.
                 "bud_lot_id": row.get("lot_id"),
                 "lot_nom": noms_lots.get(row.get("lot_id")),
+                # Comptes charte Q RÉSOLUS par nature (voir le bloc au-dessus de
+                # la boucle). Nature présente : le compte résolu (ou None) ;
+                # nature absente : la valeur enregistrée telle quelle (le plus
+                # souvent None) — elle ne crée aucune rangée chez Ad CON.
+                **_comptes_exportes(row, _charte),
             })
 
         # 4bis) Administration & profit + sous-total avant taxes (Simon, 16
@@ -5367,6 +5405,11 @@ def register_ad_budget_routes(get_conn):
             # Toujours présente (None ou la version, sa dérive comprise —
             # calculée plus haut, curseur ouvert, sur les VRAIS totaux).
             "version": (None if version_info is None else version_info),
+            # True = la charte Q de l'organisation a été chargée : un compte
+            # None sur une ligne veut dire « à attribuer ». False = hub
+            # injoignable (ou autre organisation servie, rejetée) : None veut
+            # dire « inconnu », pas « sans compte ».
+            "charte_q_chargee": charte_q_chargee,
             "project": {
                 # Phase 6 — identité depuis le hub (_ident). statut + ad_hub_project_id
                 # restent du projet local (propre / lien).
@@ -9487,6 +9530,187 @@ def register_ad_budget_routes(get_conn):
             _mark_budget_dirty_if_emitted(projet_id)  # import de lignes -> snapshot
             _push_budget_snapshot(get_conn, projet_id, authorization, session_cookie)  # pipeline Ad ANA (fire-and-forget)
         return {"status": "imported", "count": inserted}
+
+    # ══════════════════════════════════════════════════════════
+    # LE COMPTE CHARTE Q DE CHAQUE NATURE, ENREGISTRÉ SUR LA LIGNE
+    # (migrations/sprint_comptes_par_nature.sql — contrat : issue monorepo #1096)
+    # ══════════════════════════════════════════════════════════
+    # Simon, 8 oct. 2026, 15 h 35 : « un item doit avoir un compte propre ; une
+    # fois la charte associée à un item, c'est enregistré en base avec l'item ;
+    # le compte de charte Q est aussi important que le # CSI » ; 15 h 54 :
+    # « une colonne charte Q pour chacune des sections matériaux, main
+    # d'oeuvre, sous-traitant ». Même patron que les routes d'Ad CON
+    # (adision-con-api, projects_api.py, `_ecrire_compte_nature`) : une route
+    # DÉDIÉE (le PUT générique de la ligne ne connaît pas ces colonnes), et un
+    # journal par geste.
+    #
+    # AUCUNE ÉCRITURE DANS UN GET, PAR DÉCISION EXPLICITE : un GET qui écrit et
+    # avale ses erreurs ferait changer la comptabilité d'un budget à la simple
+    # ouverture, sans trace d'intention. L'enregistrement depuis la charte est
+    # un POST, avec dry_run par défaut.
+    #
+    # HORS TOTAUX : aucune de ces routes ne touche un montant, un taux ni un
+    # pct_admin_*, et elles ne marquent pas le budget « à réémettre » — un
+    # numéro de compte n'entre ni dans les totaux ni dans l'empreinte.
+
+    def _ecrire_compte_nature(cur, ligne_id, projet_id, nature, compte, user, note):
+        """Écrit UN compte de nature et le journalise. NE commit PAS.
+        Rend (avant, change). La ligne a déjà été vérifiée dans le projet ;
+        le WHERE porte quand même projet_id, par prudence.
+        `updated_at` n'est PAS touché, comme côté Ad CON : un compte n'est pas
+        une modification du chiffrage de la ligne."""
+        col = correspondance_comptes.COLONNE_NATURE[nature]
+        cur.execute(
+            f"SELECT {col} AS v FROM ad_budget.budget_lignes "
+            "WHERE id = %s AND projet_id = %s FOR UPDATE",
+            (ligne_id, projet_id),
+        )
+        avant = (cur.fetchone() or {}).get("v")
+        if avant == compte:
+            return avant, False
+        cur.execute(
+            f"UPDATE ad_budget.budget_lignes SET {col} = %s "
+            "WHERE id = %s AND projet_id = %s",
+            (compte, ligne_id, projet_id),
+        )
+        cur.execute(
+            "INSERT INTO ad_budget.budget_ligne_compte_journal "
+            "(ligne_id, projet_id, nature, compte_avant, compte_apres, par, note) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (ligne_id, projet_id, nature, avant, compte,
+             (user.get("email") if isinstance(user, dict) else None), note),
+        )
+        return avant, True
+
+    @router.patch("/projets/{projet_id}/lignes/{ligne_id}/compte/{nature}")
+    def patch_ligne_compte_nature(projet_id: int, ligne_id: int, nature: str,
+                                  data: dict = Body(...), user=Depends(jwt_user)):
+        """Pose ou efface le compte d'UNE nature (MAT | MO | ST) d'une ligne.
+        Corps : {"compte": "55010"} ou {"compte": null}, {"note": "..."} facultatif.
+
+        Écriture de contenu : passe par _load_and_authorize_projet en mode
+        'write', donc par le VERROU et la DÉTENTION comme toute écriture de
+        ligne (409 si le projet est gelé ou détenu par un autre). Ce n'est pas
+        un blocage « sur les comptes » : c'est le même garde-fou que le PUT."""
+        _load_and_authorize_projet(get_conn, projet_id, user, "write")
+        nature = (nature or "").upper()
+        if nature not in correspondance_comptes.COLONNE_NATURE:
+            raise HTTPException(status_code=422, detail="nature doit etre MAT, MO ou ST")
+        data = data if isinstance(data, dict) else {}
+        compte = data.get("compte", None)
+        if compte is not None:
+            if not isinstance(compte, str):
+                raise HTTPException(
+                    status_code=422,
+                    detail="compte doit etre une chaine, ou null pour l'effacer",
+                )
+            # Des blancs ne sont pas un compte : NULL, comme la garde CHECK en base.
+            compte = compte.strip() or None
+        note = data.get("note")
+        if note is not None and not isinstance(note, str):
+            raise HTTPException(status_code=422, detail="note doit etre une chaine")
+        conn = get_conn()
+        try:
+            cur = conn.cursor(row_factory=dict_row)
+            try:
+                cur.execute(
+                    "SELECT id FROM ad_budget.budget_lignes WHERE id = %s AND projet_id = %s",
+                    (ligne_id, projet_id),
+                )
+                if not cur.fetchone():
+                    raise HTTPException(status_code=404, detail="Ligne introuvable dans ce projet")
+                avant, change = _ecrire_compte_nature(
+                    cur, ligne_id, projet_id, nature, compte, user, note)
+                conn.commit()
+                return {"ok": True, "inchange": not change, "ligne_id": ligne_id,
+                        "nature": nature, "compte_avant": avant, "compte": compte}
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                cur.close()
+        finally:
+            conn.close()
+
+    @router.post("/projets/{projet_id}/comptes/enregistrer")
+    def enregistrer_comptes_projet(projet_id: int,
+                                   dry_run: bool = Query(True),
+                                   user=Depends(jwt_user),
+                                   authorization: Optional[str] = Header(None),
+                                   session_cookie: Optional[str] = Cookie(None, alias=SESSION_COOKIE_NAME)):
+        """Enregistre, pour chaque ligne ACTIVE et chaque nature AYANT UN
+        MONTANT, le compte que la charte Q de l'organisation donne aujourd'hui
+        — SEULEMENT là où la colonne de cette nature est VIDE. Un compte déjà
+        posé n'est JAMAIS remplacé. dry_run=true (défaut) : compte sans écrire
+        (tout est annulé par un rollback).
+
+        dry_run lit en mode 'read' (un aperçu ne modifie rien, il passe même
+        sur un projet verrouillé) ; l'écriture réelle passe en mode 'write',
+        donc par le verrou et la détention comme toute écriture de ligne.
+
+        Garde 036 : la charte est chargée avec le JWT de l'APPELANT, et
+        `charger` la REJETTE si le hub sert une autre organisation que celle du
+        PROJET. Pas de charte -> 503, rien n'est écrit : on n'invente jamais."""
+        projet = _load_and_authorize_projet(
+            get_conn, projet_id, user, "read" if dry_run else "write")
+        # L'organisation du PROJET (Loi 25, cf. _load_and_authorize_projet) ;
+        # repli sur celle du jeton pour un projet d'avant le multi-tenant,
+        # comme export-for-con.
+        org = (projet or {}).get("organization_id") or user.get("organization_id")
+        jwt_token = _extract_bearer(authorization, None, session_cookie)
+        corr = correspondance_comptes.charger(jwt_token, org)
+        if not corr:
+            if not jwt_token:
+                cause = "aucun jeton à présenter au hub"
+            elif not org:
+                cause = "le projet n'a pas d'organisation"
+            else:
+                cause = ("le hub n'a pas servi la correspondance des comptes de "
+                         "l'organisation du projet (hub injoignable, réponse non "
+                         "JSON, ou organisation servie différente — le journal "
+                         "du service dit laquelle)")
+            raise HTTPException(
+                status_code=503,
+                detail="Charte Q indisponible : " + cause + ". Rien n'a été enregistré.",
+            )
+        conn = get_conn()
+        try:
+            cur = conn.cursor(row_factory=dict_row)
+            try:
+                cur.execute(
+                    "SELECT * FROM ad_budget.budget_lignes "
+                    "WHERE projet_id = %s AND actif = TRUE ORDER BY id",
+                    (projet_id,),
+                )
+                lignes = cur.fetchall()
+                poses, sans_compte = 0, 0
+                for l in lignes:
+                    resolus = correspondance_comptes.comptes_par_nature(l, corr)
+                    for nature, compte in resolus.items():
+                        if l.get(correspondance_comptes.COLONNE_NATURE[nature]):
+                            continue  # jamais d'écrasement
+                        if not compte:
+                            sans_compte += 1
+                            continue
+                        poses += 1
+                        if not dry_run:
+                            _ecrire_compte_nature(
+                                cur, l["id"], projet_id, nature, compte, user,
+                                "enregistré par la résolution de la charte Q (compte enregistré, ancien compte, code CSI ou règle de nature)")
+                if dry_run:
+                    conn.rollback()
+                else:
+                    conn.commit()
+                return {"dry_run": dry_run, "lignes": len(lignes),
+                        "comptes_enregistres": poses,
+                        "natures_sans_compte": sans_compte}
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                cur.close()
+        finally:
+            conn.close()
 
     # Valeurs autorisées pour sous_traitant_type. None / "" = vide.
     SOUS_TRAITANT_TYPES = {"Budget", "Soumission", "BSDQ", "Allocation"}
