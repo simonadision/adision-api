@@ -146,6 +146,12 @@ jobs:
       - name: Versions debalancees — arrondi de la version et vrais totaux
         run: python tests/test_derive_version_arrondi.py
 
+      # Charte Q par nature (8 oct. 2026, PC1) : port de la resolution d'Ad CON
+      # (a0 > a > b > b' > c > d), natures lues sur les montants d'Ad BUD,
+      # garde 036. Pur, sans base ni reseau ; eprouve par quatre mutants.
+      - name: Charte Q — compte de chaque nature d'une ligne
+        run: python tests/test_correspondance_comptes_bud.py
+
       # Journal des parametres financiers (7 oct. 2026, apres l'enquete 7,887 %
       # du projet 290) : quels champs, quand c'est un changement. Pur, sans base.
       - name: Journal des parametres financiers

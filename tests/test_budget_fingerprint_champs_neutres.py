@@ -2,7 +2,9 @@
 
 POURQUOI CE BANC EXISTE : certains champs de la ligne de budget decrivent
 l'item sans participer a son prix. Ils n'entrent NI dans `sous_total`, NI dans
-`total`, NI dans l'empreinte. Aujourd'hui il y en a deux :
+`total`, NI dans l'empreinte. Il y en a deux depuis fin septembre, plus les
+trois comptes par nature (`compte_mat`, `compte_mo`, `compte_st`) depuis le
+8 oct. 2026 (migrations/sprint_comptes_par_nature.sql) :
 
   * `format_item` (demande de PC4, 2026-09-29) -- le format d'achat de l'item,
     la boite de 12 ;
@@ -64,6 +66,13 @@ CHAMPS_NEUTRES = {
     # valeur qui ressemble a un MONTANT. Si l'empreinte bougeait ici, c'est
     # qu'un numero de compte serait entre dans un calcul.
     "compte_metier_force": ["56035", "04010", "58065", "1826132.90"],
+    # Les trois comptes PAR NATURE (Simon, 8 oct. 2026 : « une colonne charte
+    # Q pour chacune des sections matériaux, main d'oeuvre, sous-traitant »).
+    # Memes pieges : zero de tete, et une valeur qui ressemble a un montant.
+    # Enregistres sur la ligne, ils restent HORS EMPREINTE comme leur aine.
+    "compte_mat": ["55010", "04010", "56100", "2031.36"],
+    "compte_mo": ["50005", "05000", "51001", "338.56"],
+    "compte_st": ["55005", "09998", "59998", "58365.00"],
 }
 
 
