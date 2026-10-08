@@ -183,6 +183,7 @@ jobs:
             tests/test_decode_token_graceful.py \
             tests/test_devis_documents_filter.py \
             tests/test_duplicate_lot_endpoint.py \
+            tests/test_ad_mat_mode_decide_catalogue.py \
             tests/test_completer_gabarit.py \
             tests/test_correctif_catalogue.py \
             tests/test_export_sous_totaux_justes.py \
