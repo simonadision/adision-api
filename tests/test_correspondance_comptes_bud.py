@@ -117,6 +117,21 @@ def test_la_MO_passe_par_heures_effectives():
     _egal(cc.montants_par_nature(prod)["MO"], 200.0, "128 / 32 = 4 h × 50 $ = 200 $")
 
 
+def test_un_TAUX_seul_ne_fait_PAS_exister_la_MO():
+    """8 oct. 2026 (PC3, relayé par PC4) : dans Ad EST, la MO était comptée dès
+    que le taux était > 0 -- et Ad EST remplit ce taux tout seul : 50005 et
+    59998 s'affichaient sur des lignes à 0 $. Une nature existe par son
+    MONTANT : un taux sans heures effectives n'en fait pas une."""
+    _egal(cc.natures_de_la_ligne({"qte": 3, "unite": "pi2", "prix_unitaire": 0,
+                                  "heures": 0, "taux_horaire": 85}), [],
+          "taux 85 $/h, 0 h, prix 0 -> aucune nature")
+    _egal(cc.natures_de_la_ligne({"qte": 4, "unite": "hr", "taux_horaire": 85}), ["MO"],
+          "unité « hr » : les heures sont dans la quantité -> MO")
+    _egal(cc.natures_de_la_ligne({"qte": 50, "unite": "pi2", "production_valeur": 10,
+                                  "taux_horaire": 85}), ["MO"],
+          "production : heures = quantité / production -> MO")
+
+
 def test_ST_a_quantite_nulle_n_existe_pas():
     """Règle #2 de Simon (17 août 2026) : QTÉ=0 exclut le montant ST."""
     _egal(cc.natures_de_la_ligne({"qte": 0, "sous_traitant_montant": 900}), [],
