@@ -488,6 +488,7 @@ CORS_ALLOWED_ORIGINS = [
     "https://mat.adision.ca",     # Ad MAT (futur consommateur potentiel)
     "https://con.adision.ca",     # Ad CON (futur consommateur potentiel)
     "https://typ.adision.ca",     # Ad TYP (éditeur d'assemblage — taux horaires ACQ)
+    "https://pla.adision.ca",     # Ad PLA (11 oct. 2026 — échéancier préliminaire importé d'Ad BUD ; lecture)
     "http://localhost:5173",
     "http://localhost:5174",
     "http://localhost:5175",
