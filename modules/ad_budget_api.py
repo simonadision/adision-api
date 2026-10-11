@@ -435,6 +435,26 @@ ALLOWED_STATUTS = {"en_soumission", "en_cours", "en_execution", "perdu", "archiv
 # archive ne se batissent pas.
 EXPORT_CON_STATUTS = {"en_cours", "en_execution"}
 
+# LES LOTS DU PROJET, TELS QUE L'EXPORT LES SERT (export-for-con ET
+# export-for-est). LECTURE SEULE de ad_budget.lots : rien n'est calcule,
+# nb_logements et ordre partent tels quels (int ou None). Les lignes gardent
+# leur `lot_nom` comme avant -- ce bloc s'AJOUTE, il ne remplace rien.
+# Tri : ordre croissant puis nom, un ordre NULL en dernier.
+def lots_pour_export(rows):
+    def _cle(r):
+        ordre = r.get("ordre")
+        return (ordre is None, ordre if ordre is not None else 0, r.get("nom") or "")
+    return [
+        {
+            "id": r.get("id"),
+            "nom": r.get("nom"),
+            "nb_logements": r.get("nb_logements"),
+            "ordre": r.get("ordre"),
+        }
+        for r in sorted(rows, key=_cle)
+    ]
+
+
 # STATUT D'UN PROJET CREE SANS STATUT EXPLICITE. Meme valeur que le DEFAULT
 # de la colonne (sprint_quatre_statuts_projet.sql, etape 4). Il valait encore
 # « brouillon » ici apres le 9 septembre : le code passait ce litteral a
@@ -5126,10 +5146,15 @@ def register_ad_budget_routes(get_conn):
             # mêmes descriptions y apparaissaient en double, sans moyen de
             # les distinguer ni de suivre un lot à part.
             cur.execute(
-                "SELECT id, nom FROM ad_budget.lots WHERE projet_id = %s",
+                "SELECT id, nom, nb_logements, ordre FROM ad_budget.lots "
+                "WHERE projet_id = %s",
                 (projet_id,),
             )
-            noms_lots = {r["id"]: r["nom"] for r in cur.fetchall()}
+            _lots_rows = cur.fetchall()
+            noms_lots = {r["id"]: r["nom"] for r in _lots_rows}
+            # Bloc « lots » du payload (11 oct. 2026) : la MEME lecture, rien
+            # de plus. noms_lots et lot_nom des lignes restent inchanges.
+            lots_out = lots_pour_export(_lots_rows)
         finally:
             try:
                 cur.close()
@@ -5435,6 +5460,7 @@ def register_ad_budget_routes(get_conn):
                 "organization_id_source": org_source,
             },
             "lines": lines_out,
+            "lots": lots_out,
             "raw_snapshot": raw_snapshot,
         }
 
