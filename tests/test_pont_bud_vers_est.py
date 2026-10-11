@@ -169,6 +169,91 @@ def test_la_garde_est_CONDITIONNELLE_dans_la_fabrique(arbre):
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 4. LE BLOC « lots » -- AJOUTE, SANS RIEN RETIRER (11 oct 2026)
+# ══════════════════════════════════════════════════════════════════════════
+# Le payload sert desormais la liste des lots du projet (id, nom,
+# nb_logements, ordre), lue dans la MEME requete que noms_lots. Les lignes
+# gardent leur `lot_nom` : Ad EST range ses lots par ce nom
+# (import_bud_api.py), le changer casserait l'import.
+
+def _dict_retourne(fn):
+    """Le dict litteral retourne par la fabrique (celui qui porte "lines")."""
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Return) and isinstance(n.value, ast.Dict):
+            cles = [k.value for k in n.value.keys if isinstance(k, ast.Constant)]
+            if "lines" in cles:
+                return dict(zip(cles, n.value.values))
+    return None
+
+
+def test_le_payload_porte_le_bloc_lots(arbre):
+    """Mutant qui doit rougir : retirer `"lots": lots_out` du retour."""
+    fn = _fonctions(arbre, FABRIQUE)[0]
+    d = _dict_retourne(fn)
+    assert d is not None, "le dict retourne par la fabrique est introuvable"
+    assert "lots" in d, "le payload ne sert plus le bloc « lots »"
+    v = d["lots"]
+    assert isinstance(v, ast.Name) and v.id == "lots_out", (
+        "« lots » ne vient plus de lots_out (la lecture de ad_budget.lots)")
+    for cle in ("lines", "project", "raw_snapshot", "organization_id"):
+        assert cle in d, "la cle %s a disparu du payload : Ad CON la requiert" % cle
+
+
+def test_la_requete_lots_lit_nb_logements_et_ordre(arbre):
+    fn = _fonctions(arbre, FABRIQUE)[0]
+    requetes = [n.value for n in ast.walk(fn)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                and "ad_budget.lots" in n.value]
+    assert requetes, "la fabrique ne lit plus ad_budget.lots"
+    assert "nb_logements" in requetes[0] and "ordre" in requetes[0], (
+        "la lecture des lots ne ramene plus nb_logements et ordre : %r" % requetes[0])
+
+
+def test_lot_nom_des_lignes_est_INCHANGE(arbre):
+    """`"lot_nom": noms_lots.get(row.get("lot_id"))` -- tel quel.
+    Mutant qui doit rougir : servir l'id, ou passer par lots_out."""
+    fn = _fonctions(arbre, FABRIQUE)[0]
+    trouves = []
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Dict):
+            for k, v in zip(n.keys, n.values):
+                if isinstance(k, ast.Constant) and k.value == "lot_nom":
+                    trouves.append(ast.unparse(v))
+    assert trouves == ["noms_lots.get(row.get('lot_id'))"], (
+        "lot_nom des lignes a change : %r" % trouves)
+    noms = [n for n in ast.walk(fn)
+            if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "noms_lots" for t in n.targets)]
+    assert len(noms) == 1 and ast.unparse(noms[0].value) == (
+        "{r['id']: r['nom'] for r in _lots_rows}"), "noms_lots a change"
+
+
+def test_lots_pour_export_sert_les_valeurs_TELLES_QUELLES():
+    from modules.ad_budget_api import lots_pour_export
+    rows = [
+        {"id": 7, "nom": "Lot B", "nb_logements": None, "ordre": None,
+         "created_at": "x", "updated_at": "y"},
+        {"id": 5, "nom": "Lot A", "nb_logements": 12, "ordre": 1},
+        {"id": 6, "nom": "Lot 0", "nb_logements": 0, "ordre": 0},
+        {"id": 8, "nom": "Aa", "nb_logements": 3, "ordre": 1},
+    ]
+    out = lots_pour_export(rows)
+    assert out == [
+        {"id": 6, "nom": "Lot 0", "nb_logements": 0, "ordre": 0},
+        {"id": 8, "nom": "Aa", "nb_logements": 3, "ordre": 1},
+        {"id": 5, "nom": "Lot A", "nb_logements": 12, "ordre": 1},
+        {"id": 7, "nom": "Lot B", "nb_logements": None, "ordre": None},
+    ]
+    # Aucune colonne de plus que les quatre annoncees.
+    assert all(set(l) == {"id", "nom", "nb_logements", "ordre"} for l in out)
+
+
+def test_lots_pour_export_projet_sans_lot():
+    from modules.ad_budget_api import lots_pour_export
+    assert lots_pour_export([]) == []
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # ANTI-VACUITE : le detecteur doit savoir dire NON
 # ══════════════════════════════════════════════════════════════════════════
 
