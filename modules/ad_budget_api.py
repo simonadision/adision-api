@@ -5068,7 +5068,15 @@ def register_ad_budget_routes(get_conn):
           mo_hours_origin            ← heures
           mo_rate_origin             ← taux_horaire
           mo_adjustment_pct_origin   ← ajust_main_oeuvre
-          mo_subtotal_origin         ← qty_eff × heures × taux × (1+ajust_mo/100) (calc backend)
+          mo_subtotal_origin         ← heures × taux × (1+ajust_mo/100)   (calc backend)
+                                       ⚠ SANS la quantite : `heures` est un TOTAL d'heures
+                                       pour la ligne, pas un nombre d'heures PAR UNITE. Le code
+                                       (l. ~5313) ne multiplie pas par qty_eff, et il a raison.
+                                       Cette ligne annoncait l'inverse (12 oct. 2026) : c'est
+                                       exactement la faute qui a deja coute ici -- une vue qui
+                                       multipliait les heures par la quantite a ajoute 31 500 $
+                                       de MO sur un projet d'essai (mig 078). Un commentaire faux
+                                       a cet endroit fait << corriger >> du code correct.
           st_type                    ← sous_traitant_type         (NULL en prod actuellement)
           st_supplier_origin         ← sous_traitant_nom
           st_amount_origin           ← sous_traitant_montant
