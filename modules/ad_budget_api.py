@@ -355,7 +355,9 @@ BUDGET_GROUPS_PDF = [
     ("conditions", "Conditions générales", "pct_admin_conditions", lambda n: n == 1),
     ("architecture", "Architecture", "pct_admin_architecture", lambda n: 2 <= n <= 14),
     ("mecanique", "Mécanique", "pct_admin_mecanique", lambda n: 20 <= n <= 28),
-    ("excavation", "Excavation", "pct_admin_excavation", lambda n: n == 31),
+    # Libelle « Civil » (Simon, 13 oct. 2026 : « pas Excavation : c est Civil »)
+    # -- cle et champ pct_admin_excavation inchanges.
+    ("excavation", "Civil", "pct_admin_excavation", lambda n: n == 31),
 ]
 
 # Termes de description qui déclenchent l'utilisation des surfaces globales
