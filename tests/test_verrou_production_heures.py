@@ -29,7 +29,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: E402
 
-from modules.aggregates import heures_effectives  # noqa: E402
+from modules.aggregates import heures_effectives, _round1  # noqa: E402
+import math  # noqa: E402
+
+
+def _js_round_4(x):
+    """Miroir de Math.round(x * 1e4) / 1e4 (production.js)."""
+    return math.floor(x * 1e4 + 0.5) / 1e4
 from modules.ad_budget_api import compute_budget_totals  # noqa: E402
 from modules.budget_fingerprint import _line_total  # noqa: E402
 from modules.lots_calc import compute_lot_totals  # noqa: E402
@@ -79,10 +85,20 @@ def test_charpenterie_via_compute_lot_totals():
     assert result["grand_total"] == pytest.approx(16 * 80)  # 2 x 8 h/unité x 80 $/h
 
 
-# ── 3. production_valeur ET heures_manuelles=True -> le ratio gagne QUAND MÊME ──
-def test_production_ecrase_override_manuel():
+# ── 3. production_valeur ET heures_manuelles=True -> la SAISIE gagne (15 oct.) ──
+def test_saisie_heures_maitre_sur_production():
     h = heures_effectives("hr", 999, True, 10, 5)
-    assert h == pytest.approx(2.0)
+    assert h == 999
+
+
+# Témoin du 15 oct. 2026 : 120 h tapées, production posée à 4 décimales
+# (production.js). L'ancienne règle relisait 120,5 ; on exige 120.
+def test_temoin_120h_ne_devient_pas_120_5():
+    def prod_depuis_heures(q, h):
+        return _js_round_4(q / h)
+    temoin = next(q for q in range(1, 200001)
+                  if _round1(q / prod_depuis_heures(q, 120)) == 120.5)
+    assert heures_effectives("pi2", 120, True, temoin, prod_depuis_heures(temoin, 120)) == 120
 
 
 # ── 4. Pas de production, unité hr, pas d'override -> heures = qté (inchangé) ──

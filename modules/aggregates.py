@@ -129,11 +129,18 @@ def heures_effectives(unite, heures, heures_manuelles, qte, production_valeur=No
 
     Sinon (pas de production renseignée) : comportement historique inchangé —
     unité « hr » sans override réel -> heures = qté ; sinon colonne `heures`."""
+    # 15 oct. 2026 -- REMPLACE la priorité du 14 août. Simon : « la jai mis
+    # 120h si je ferme le projet et j y reviens . je veux voir 120h. pas
+    # 120.5h ». Une heure SAISIE (heures_manuelles et valeur != 0) est le champ
+    # maître : jamais recalculée depuis une production arrondie à 4 décimales.
+    # Miroir exact : packages/aggregates/src/budgetLigneTotal.js.
+    h = float(heures or 0)
+    if heures_manuelles and h != 0:
+        return h
     prod = float(production_valeur or 0)
     if prod > 0:
         return _round1(float(qte or 0) / prod)
-    h = float(heures or 0)
-    if _is_heure_unit(unite) and not (heures_manuelles and h != 0):
+    if _is_heure_unit(unite):
         return float(qte or 0)
     return h
 

@@ -74,12 +74,12 @@ def test_mo_par_production_dix_unites_a_quatre_a_lheure():
     assert heures_effectives("un", 0, False, 10, 4) == 2.5
 
 
-def test_production_ECRASE_des_heures_tapees_a_la_main():
-    """Regle confirmee par Simon le 14 aout 2026 : production renseignee =
-    priorite absolue, `heures_manuelles` est SANS EFFET. C'est ce qui empeche
-    une colonne `heures` desynchronisee de mentir au serveur (incident du
-    20 aout, projet 290 : 39 219 $ et 463 h d'ecart)."""
-    assert heures_effectives("un", 999, True, 10, 4) == 2.5
+def test_heures_tapees_a_la_main_priment_sur_la_production():
+    """Regle du 15 oct. 2026 (remplace celle du 14 aout) : une heure SAISIE est
+    le champ maitre. Simon : « je veux voir 120h. pas 120.5h ». Sans saisie,
+    la production reste la source (0 h manuelle -> qte / production)."""
+    assert heures_effectives("un", 999, True, 10, 4) == 999
+    assert heures_effectives("un", 999, False, 10, 4) == 2.5
 
 
 def test_le_pourcent_ne_touche_JAMAIS_les_heures():
